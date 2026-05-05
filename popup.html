@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ChatGPT Queue + Optimizer</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.1.1/css/all.min.css">
+    <style>
+        :root {
+            color-scheme: light dark;
+
+            --bg: #f6f7f9;
+            --panel: #ffffff;
+            --panel-2: #edf0f3;
+            --surface: #ffffff;
+            --field: #ffffff;
+            --border: #d6dbe1;
+            --text: #17202a;
+            --muted: #5f6b7a;
+
+            --accent: #0284c7;
+            --accent-hover: #0369a1;
+            --accent-text: #ffffff;
+
+            --accent-2: #16a34a;
+            --accent-2-hover: #15803d;
+            --accent-2-text: #ffffff;
+
+            --danger: #dc2626;
+            --danger-hover: #b91c1c;
+
+            --status-bg: rgba(2, 132, 199, 0.10);
+            --status-text: #075985;
+            --status-border: rgba(2, 132, 199, 0.30);
+
+            --enabled-bg: rgba(22, 163, 74, 0.12);
+            --enabled-text: #166534;
+            --enabled-border: rgba(22, 163, 74, 0.35);
+
+            --disabled-bg: rgba(220, 38, 38, 0.10);
+            --disabled-text: #991b1b;
+            --disabled-border: rgba(220, 38, 38, 0.30);
+
+            --shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #111315;
+                --panel: #181b1f;
+                --panel-2: #20242a;
+                --surface: #111418;
+                --field: #0f1114;
+                --border: #30363d;
+                --text: #f3f4f6;
+                --muted: #a7adb7;
+
+                --accent: #38bdf8;
+                --accent-hover: #7dd3fc;
+                --accent-text: #041016;
+
+                --accent-2: #22c55e;
+                --accent-2-hover: #86efac;
+                --accent-2-text: #052e16;
+
+                --danger: #ef4444;
+                --danger-hover: #f87171;
+
+                --status-bg: rgba(56, 189, 248, 0.12);
+                --status-text: #bae6fd;
+                --status-border: rgba(56, 189, 248, 0.35);
+
+                --enabled-bg: rgba(34, 197, 94, 0.14);
+                --enabled-text: #bbf7d0;
+                --enabled-border: rgba(34, 197, 94, 0.35);
+
+                --disabled-bg: rgba(239, 68, 68, 0.12);
+                --disabled-text: #fecaca;
+                --disabled-border: rgba(239, 68, 68, 0.35);
+
+                --shadow: none;
+            }
+        }
+
+        body {
+            font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            width: 315px;
+            min-height: 430px;
+            max-height: 620px;
+            overflow-y: auto;
+            background: var(--bg);
+            color: var(--text);
+        }
+
+        .container {
+            display: flex;
+            flex-direction: column;
+            min-height: 100%;
+            padding: 14px;
+            box-sizing: border-box;
+            gap: 10px;
+        }
+
+        .title {
+            text-align: left;
+            font-size: 17px;
+            font-weight: 750;
+            letter-spacing: -0.02em;
+            margin: 2px 0 0;
+            color: var(--text);
+        }
+
+        .tool-tabs {
+            display: flex;
+            gap: 6px;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 5px;
+            box-shadow: var(--shadow);
+        }
+
+        .tool-tab {
+            width: 50%;
+            padding: 8px 6px;
+            font-size: 12px;
+            border-radius: 10px;
+            background: transparent;
+            color: var(--muted);
+            border: 1px solid transparent;
+        }
+
+        .tool-tab:hover {
+            background: var(--panel-2);
+            color: var(--text);
+        }
+
+        .tool-tab.active {
+            background: var(--accent);
+            color: var(--accent-text);
+            border-color: var(--accent);
+            font-weight: 700;
+        }
+
+        .tool-panel {
+            display: none;
+        }
+
+        .tool-panel.active {
+            display: block;
+        }
+
+        .form-group {
+            margin-bottom: 10px;
+            position: relative;
+        }
+
+        label {
+            font-size: 12px;
+            color: var(--muted);
+            margin-bottom: 6px;
+            display: block;
+            font-weight: 650;
+        }
+
+        textarea,
+        input[type="number"],
+        select {
+            width: 100%;
+            padding: 9px;
+            font-size: 13px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            box-sizing: border-box;
+            background-color: var(--field);
+            color: var(--text);
+            outline: none;
+            color-scheme: light dark;
+        }
+
+        select {
+            appearance: auto;
+            -webkit-appearance: menulist;
+        }
+
+        select option {
+            background-color: var(--field);
+            color: var(--text);
+        }
+
+        textarea {
+            resize: none;
+            height: 94px;
+        }
+
+        textarea::placeholder {
+            color: var(--muted);
+            opacity: 0.85;
+        }
+
+        textarea:focus,
+        input[type="number"]:focus,
+        select:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
+        }
+
+        button {
+            width: 100%;
+            padding: 9px 10px;
+            background: var(--accent);
+            color: var(--accent-text);
+            border: 1px solid transparent;
+            border-radius: 10px;
+            font-size: 13px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+        }
+
+        button:hover {
+            background: var(--accent-hover);
+            color: var(--accent-text);
+        }
+
+        #status-indicator {
+            display: none;
+            background: var(--status-bg);
+            color: var(--status-text);
+            padding: 7px;
+            border-radius: 10px;
+            font-size: 11px;
+            border: 1px solid var(--status-border);
+            text-align: center;
+        }
+
+        .queue-control-panel,
+        .accordion-panel,
+        .optimizer-panel,
+        #messages-container,
+        .dropdown-container {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            box-shadow: var(--shadow);
+        }
+
+        .queue-control-panel,
+        .accordion-panel,
+        .optimizer-panel {
+            padding: 10px;
+            font-size: 11px;
+        }
+
+        .queue-control-header {
+            font-weight: 800;
+            color: var(--text);
+            margin-bottom: 9px;
+            text-align: left;
+            font-size: 12px;
+        }
+
+        .queue-control-section {
+            margin-bottom: 9px;
+        }
+
+        .queue-control-section:last-child {
+            margin-bottom: 0;
+        }
+
+        .queue-control-section label {
+            font-size: 11px;
+            margin-bottom: 5px;
+        }
+
+        .target-tab-row {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+        }
+
+        .target-tab-row select {
+            flex: 1;
+            min-width: 0;
+            font-size: 11px;
+            padding: 7px;
+            background-color: var(--field);
+            color: var(--text);
+            border: 1px solid var(--border);
+        }
+
+        .target-tab-row select option {
+            background-color: var(--field);
+            color: var(--text);
+        }
+
+        .target-tab-row button,
+        .instances-header button {
+            width: auto;
+            padding: 7px 8px;
+            font-size: 10px;
+            background: var(--panel-2);
+            color: var(--text);
+            border: 1px solid var(--border);
+        }
+
+        .target-tab-row button:hover,
+        .instances-header button:hover {
+            background: color-mix(in srgb, var(--panel-2) 85%, var(--text) 15%);
+            color: var(--text);
+        }
+
+        .instances-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+            font-weight: 750;
+            color: var(--text);
+        }
+
+        .instances-list {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+
+        .instance-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 6px;
+            padding: 7px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+        }
+
+        .instance-info {
+            flex: 1;
+            line-height: 1.3;
+            color: var(--muted);
+            overflow-wrap: anywhere;
+        }
+
+        .instance-stop-btn {
+            width: auto;
+            padding: 5px 7px;
+            font-size: 10px;
+            background: var(--danger);
+            color: #ffffff;
+        }
+
+        .instance-stop-btn:hover {
+            background: var(--danger-hover);
+            color: #ffffff;
+        }
+
+        .instance-empty {
+            color: var(--muted);
+            text-align: center;
+            padding: 6px;
+        }
+
+        #stop-all-instances {
+            margin-top: 6px;
+            padding: 7px;
+            font-size: 11px;
+            background: var(--danger);
+            color: #ffffff;
+            display: none;
+        }
+
+        #stop-all-instances:hover {
+            background: var(--danger-hover);
+            color: #ffffff;
+        }
+
+        .accordion-panel summary {
+            cursor: pointer;
+            font-weight: 800;
+            font-size: 13px;
+            color: var(--text);
+            padding: 3px 0;
+            list-style-position: inside;
+        }
+
+        .accordion-panel[open] summary {
+            margin-bottom: 9px;
+        }
+
+        #messages-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        #messages-list {
+            margin-top: 5px;
+            padding: 8px;
+            overflow-y: auto;
+            font-size: 12px;
+            color: var(--muted);
+            line-height: 1.4;
+            max-height: 86px;
+            min-height: 50px;
+            width: 92%;
+        }
+
+        .button-group {
+            display: flex;
+            width: 100%;
+            justify-content: space-between;
+            border-top: 1px solid var(--border);
+        }
+
+        .clear-messages-btn,
+        .save-sequence-btn {
+            background: transparent;
+            border: none;
+            color: var(--muted);
+            font-size: 10px;
+            width: 50%;
+            padding: 7px;
+            border-radius: 0;
+        }
+
+        .clear-messages-btn:hover,
+        .save-sequence-btn:hover {
+            background: var(--panel-2);
+            color: var(--text);
+        }
+
+        .prompt-button-group {
+            display: flex;
+            width: 100%;
+            gap: 6px;
+        }
+
+        .prompt-button-group button {
+            width: 50%;
+            padding: 8px 6px;
+            font-size: 10px;
+            line-height: 1.2;
+            background: var(--panel);
+            color: var(--text);
+            border: 1px solid var(--border);
+        }
+
+        .prompt-button-group button:hover {
+            background: var(--panel-2);
+            color: var(--text);
+        }
+
+        .input-group {
+            display: flex;
+            align-items: center;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 6px;
+        }
+
+        .input-group textarea {
+            flex: 1;
+            border: none;
+            outline: none;
+            background: transparent;
+            color: var(--text);
+        }
+
+        .button-stack {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            margin-left: 8px;
+        }
+
+        .add-message-btn {
+            background: var(--accent-2);
+            color: var(--accent-2-text);
+            border: none;
+            border-radius: 50%;
+            font-size: 19px;
+            width: 38px;
+            height: 38px;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .add-message-btn:hover {
+            background: var(--accent-2-hover);
+            color: var(--accent-2-text);
+        }
+
+        .dropdown-container {
+            display: flex;
+            align-items: center;
+            padding: 0 8px;
+            height: 40px;
+            background: var(--panel);
+            color: var(--text);
+        }
+
+        .dropdown-container select {
+            flex: 1;
+            border: none;
+            outline: none;
+            font-size: 13px;
+            background-color: transparent;
+            color: var(--text);
+            color-scheme: light dark;
+        }
+
+        .dropdown-container select option {
+            background-color: var(--field);
+            color: var(--text);
+        }
+
+        .delete-sequence-btn {
+            background: transparent !important;
+            border: none;
+            color: var(--danger);
+            cursor: pointer;
+            font-size: 20px;
+            width: 30px;
+            height: 30px;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .delete-sequence-btn:hover {
+            color: var(--danger-hover);
+            background: transparent !important;
+        }
+
+        .note {
+            font-size: 10px;
+            text-align: center;
+            margin: 5px 0;
+            color: var(--muted);
+            line-height: 1.3;
+        }
+
+        #queue-message {
+            height: 80px;
+        }
+
+        #send-messages {
+            background: var(--accent-2);
+            color: var(--accent-2-text);
+            border-radius: 12px;
+        }
+
+        #send-messages:hover {
+            background: var(--accent-2-hover);
+            color: var(--accent-2-text);
+        }
+
+        #enqueue-message {
+            background: var(--panel);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            margin-top: 6px;
+        }
+
+        #enqueue-message:hover {
+            background: var(--panel-2);
+            color: var(--text);
+        }
+
+        #stop-automation {
+            display: none;
+        }
+
+        #messages-to-go-footer {
+            position: sticky;
+            bottom: 0;
+            margin-top: 8px;
+            padding: 8px;
+            background: var(--field);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            font-size: 11px;
+            text-align: center;
+            color: var(--muted);
+        }
+
+        .optimizer-header {
+            margin-bottom: 14px;
+            text-align: left;
+        }
+
+        .optimizer-header h3 {
+            margin: 0 0 8px;
+            font-size: 16px;
+            color: var(--text);
+        }
+
+        .optimizer-status {
+            padding: 8px 10px;
+            border-radius: 10px;
+            font-size: 12px;
+            font-weight: 750;
+            background: var(--surface);
+            color: var(--muted);
+            border: 1px solid var(--border);
+        }
+
+        .optimizer-status.enabled {
+            background: var(--enabled-bg);
+            color: var(--enabled-text);
+            border-color: var(--enabled-border);
+        }
+
+        .optimizer-status.disabled {
+            background: var(--disabled-bg);
+            color: var(--disabled-text);
+            border-color: var(--disabled-border);
+        }
+
+        .optimizer-setting {
+            margin-bottom: 12px;
+        }
+
+        .optimizer-setting label {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 12px;
+            font-weight: 700;
+            color: var(--muted);
+        }
+
+        .optimizer-setting input[type="number"] {
+            background-color: var(--field);
+            color: var(--text);
+            border: 1px solid var(--border);
+        }
+
+        .optimizer-setting input[type="checkbox"] {
+            margin-right: 8px;
+            accent-color: var(--accent);
+        }
+
+        .optimizer-autosave-note {
+            font-size: 10px;
+            color: var(--muted);
+            margin-top: 6px;
+            text-align: center;
+        }
+
+        .optimizer-actions {
+            display: flex;
+            gap: 6px;
+            margin-top: 12px;
+        }
+
+        .optimizer-actions button {
+            width: 100%;
+            padding: 8px 6px;
+            font-size: 12px;
+            border-radius: 10px;
+        }
+
+        #optimizer-toggle {
+            background: var(--accent);
+            color: var(--accent-text);
+        }
+
+        #optimizer-toggle:hover {
+            background: var(--accent-hover);
+            color: var(--accent-text);
+        }
+
+        .optimizer-stats {
+            margin-top: 12px;
+            padding: 9px;
+            background: var(--field);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            font-size: 11px;
+            color: var(--muted);
+            line-height: 1.45;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="title">ChatGPT Queue + Optimizer</div>
+
+        <div class="tool-tabs">
+            <button id="queue-tool-tab" class="tool-tab active">Queue Tool</button>
+            <button id="optimizer-tool-tab" class="tool-tab">Optimizer Tool</button>
+        </div>
+
+        <div id="queue-tool-panel" class="tool-panel active">
+            <div id="status-indicator">
+                <i class="fas fa-sync fa-spin"></i> Automation running...
+            </div>
+
+            <div class="form-group">
+                <div class="queue-control-panel">
+                    <div class="queue-control-header">Queue controls</div>
+
+                    <div class="queue-control-section">
+                        <label for="target-tab-select">Run sequence on:</label>
+                        <div class="target-tab-row">
+                            <select id="target-tab-select">
+                                <option value="current">Current ChatGPT tab</option>
+                            </select>
+                            <button id="refresh-target-tabs">Refresh</button>
+                        </div>
+                    </div>
+
+                    <div class="queue-control-section">
+                        <div class="instances-header">
+                            <span>Running instances</span>
+                            <button id="refresh-instances">Refresh</button>
+                        </div>
+
+                        <div id="running-instances-list" class="instances-list">
+                            <div class="instance-empty">No running instances</div>
+                        </div>
+
+                        <button id="stop-all-instances">Stop all instances</button>
+                    </div>
+                </div>
+            </div>
+
+            <details id="make-sequence-panel" class="accordion-panel">
+                <summary>Make a sequence</summary>
+
+                <div class="form-group">
+                    <label for="new-message">Enter your sequence messages:</label>
+                    <div class="input-group">
+                        <textarea id="new-message" placeholder="Type a sequence message, then press +"></textarea>
+                        <div class="button-stack">
+                            <button id="add-message" class="add-message-btn">+</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <div id="messages-container">
+                        <div id="messages-list"></div>
+                        <div class="button-group">
+                            <button id="save-sequence" class="save-sequence-btn">Save Sequence</button>
+                            <button id="clear-messages" class="clear-messages-btn">Clear Messages</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="note">Add multiple messages, then save sequence for future use.</div>
+            </details>
+
+            <div class="form-group">
+                <div class="dropdown-container">
+                    <select id="sequence-dropdown">
+                        <option value="" disabled selected>Save a sequence first</option>
+                    </select>
+                    <button id="delete-sequence" class="delete-sequence-btn">&times;</button>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="queue-message">Send message next:</label>
+                <textarea id="queue-message" placeholder="Type one message to send next, or send immediately if no queue is running"></textarea>
+            </div>
+
+            <div class="form-group">
+                <div class="prompt-button-group">
+                    <button id="copy-sequence-prompt">Copy prompt for making a sequence</button>
+                    <button id="import-prompt-output">Import prompt output</button>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <button id="send-messages">Send Sequence</button>
+                <button id="enqueue-message">Send message next</button>
+                <button id="stop-automation">Stop Automation</button>
+            </div>
+
+            <div id="messages-to-go-footer">0 messages to go...</div>
+        </div>
+
+        <div id="optimizer-tool-panel" class="tool-panel">
+            <div class="optimizer-panel">
+                <div class="optimizer-header">
+                    <h3>ChatGPT Optimizer</h3>
+                    <div id="optimizer-status" class="optimizer-status">Checking...</div>
+                </div>
+
+                <div class="optimizer-setting">
+                    <label for="optimizer-window-size">Window Size (messages to show):</label>
+                    <input type="number" id="optimizer-window-size" min="10" max="500" value="50">
+                </div>
+
+                <div class="optimizer-setting">
+                    <label for="optimizer-batch-size">Batch Size (messages to load at once):</label>
+                    <input type="number" id="optimizer-batch-size" min="5" max="100" value="25">
+                </div>
+
+                <div class="optimizer-setting">
+                    <label>
+                        <input type="checkbox" id="optimizer-auto-scroll"> Auto-load on scroll
+                    </label>
+                </div>
+
+                <div class="optimizer-autosave-note">Settings auto-save after changes.</div>
+
+                <div class="optimizer-actions optimizer-actions-single">
+                    <button id="optimizer-toggle">Toggle</button>
+                </div>
+
+                <div id="optimizer-stats" class="optimizer-stats" style="display: none;"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="popup.js"></script>
+</body>
+</html>
