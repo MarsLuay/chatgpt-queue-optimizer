@@ -50,6 +50,7 @@
   "permissions": [
     "scripting",
     "storage",
+    "alarms",
     "activeTab",
     "tabs",
     "clipboardRead",

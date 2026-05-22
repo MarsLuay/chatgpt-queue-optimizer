@@ -1,8 +1,10 @@
 document.addEventListener('DOMContentLoaded', function () {
     const queueToolTab = document.getElementById('queue-tool-tab');
     const optimizerToolTab = document.getElementById('optimizer-tool-tab');
+    const settingsToolTab = document.getElementById('settings-tool-tab');
     const queueToolPanel = document.getElementById('queue-tool-panel');
     const optimizerToolPanel = document.getElementById('optimizer-tool-panel');
+    const settingsToolPanel = document.getElementById('settings-tool-panel');
 
     const messageList = document.getElementById('messages-list');
     const newMessageInput = document.getElementById('new-message');
@@ -27,6 +29,12 @@ document.addEventListener('DOMContentLoaded', function () {
     const runningInstancesList = document.getElementById('running-instances-list');
     const refreshInstancesButton = document.getElementById('refresh-instances');
     const stopAllInstancesButton = document.getElementById('stop-all-instances');
+    const queueLogList = document.getElementById('queue-log-list');
+    const refreshQueueLogButton = document.getElementById('refresh-queue-log');
+    const copyQueueLogButton = document.getElementById('copy-queue-log');
+    const clearQueueLogButton = document.getElementById('clear-queue-log');
+    const queueDeepResearchAware = document.getElementById('queue-deep-research-aware');
+    const queueUnlimitedRetryWait = document.getElementById('queue-unlimited-retry-wait');
 
     const optimizerStatus = document.getElementById('optimizer-status');
     const optimizerWindowSize = document.getElementById('optimizer-window-size');
@@ -55,6 +63,8 @@ document.addEventListener('DOMContentLoaded', function () {
     let messages = [];
     let savedSequences = {};
     let optimizerAutoSaveTimer = null;
+    let lastOptimizerLogSignature = '';
+    let lastOptimizerLogAt = 0;
 
     const EDIT_SEQUENCE_VALUE = '__edit_selected_sequence__';
     let selectedSequenceName = '';
@@ -73,9 +83,11 @@ document.addEventListener('DOMContentLoaded', function () {
         updateMessagesList();
         refreshTargetTabs();
         refreshRunningJobsStatus();
+        refreshQueueLog();
     });
 
     loadOptimizerSettings();
+    loadQueueSettings();
 
     if (optimizerWindowSize) {
         optimizerWindowSize.addEventListener('input', scheduleOptimizerAutoSave);
@@ -91,15 +103,29 @@ document.addEventListener('DOMContentLoaded', function () {
         optimizerAutoScroll.addEventListener('change', scheduleOptimizerAutoSave);
     }
 
+    if (queueDeepResearchAware) {
+        queueDeepResearchAware.addEventListener('change', saveQueueSettings);
+    }
+
+    if (queueUnlimitedRetryWait) {
+        queueUnlimitedRetryWait.addEventListener('change', saveQueueSettings);
+    }
+
     chrome.runtime.onMessage.addListener((request) => {
         if (request.action === 'automationFinished') {
             refreshRunningJobsStatus();
+            refreshQueueLog();
             showTempStatus(`Automation finished${request.tabId ? ` on tab ${request.tabId}` : ''}.`);
         }
 
         if (request.action === 'automationPaused') {
             refreshRunningJobsStatus();
+            refreshQueueLog();
             showTempStatus(`Queue paused: ${request.error || 'ChatGPT failed.'}`);
+        }
+
+        if (request.action === 'queueDebugLogUpdated') {
+            refreshQueueLog();
         }
     });
 
@@ -109,23 +135,46 @@ document.addEventListener('DOMContentLoaded', function () {
         if (changes.runningJobs || changes.isRunning) {
             refreshRunningJobsStatus();
         }
+
+        if (changes.queueDebugLogs) {
+            renderQueueLog(Array.isArray(changes.queueDebugLogs.newValue) ? changes.queueDebugLogs.newValue : []);
+        }
     });
 
-    if (queueToolTab && optimizerToolTab && queueToolPanel && optimizerToolPanel) {
+    if (
+        queueToolTab &&
+        optimizerToolTab &&
+        settingsToolTab &&
+        queueToolPanel &&
+        optimizerToolPanel &&
+        settingsToolPanel
+    ) {
         queueToolTab.addEventListener('click', function () {
-            queueToolTab.classList.add('active');
-            optimizerToolTab.classList.remove('active');
-            queueToolPanel.classList.add('active');
-            optimizerToolPanel.classList.remove('active');
+            activateToolPanel(queueToolTab, queueToolPanel);
         });
 
         optimizerToolTab.addEventListener('click', async function () {
-            optimizerToolTab.classList.add('active');
-            queueToolTab.classList.remove('active');
-            optimizerToolPanel.classList.add('active');
-            queueToolPanel.classList.remove('active');
-
+            activateToolPanel(optimizerToolTab, optimizerToolPanel);
             await refreshOptimizerStatus();
+        });
+
+        settingsToolTab.addEventListener('click', function () {
+            activateToolPanel(settingsToolTab, settingsToolPanel);
+            refreshQueueLog();
+        });
+    }
+
+    function activateToolPanel(activeTab, activePanel) {
+        [queueToolTab, optimizerToolTab, settingsToolTab].forEach((tab) => {
+            if (tab) {
+                tab.classList.toggle('active', tab === activeTab);
+            }
+        });
+
+        [queueToolPanel, optimizerToolPanel, settingsToolPanel].forEach((panel) => {
+            if (panel) {
+                panel.classList.toggle('active', panel === activePanel);
+            }
         });
     }
 
@@ -505,6 +554,43 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     }
 
+    if (refreshQueueLogButton) {
+        refreshQueueLogButton.addEventListener('click', refreshQueueLog);
+    }
+
+    if (copyQueueLogButton) {
+        copyQueueLogButton.addEventListener('click', async function () {
+            try {
+                const logs = await getQueueLogEntries();
+                const text = logs.length > 0 ? formatQueueLogForCopy(logs) : 'No automation logs yet.';
+
+                await copyTextToClipboard(text);
+                showTempStatus('Queue log copied.');
+            } catch (error) {
+                alert('Could not copy queue log.');
+            }
+        });
+    }
+
+    if (clearQueueLogButton) {
+        clearQueueLogButton.addEventListener('click', function () {
+            chrome.runtime.sendMessage({ action: 'clearQueueDebugLogs' }, function (response) {
+                if (chrome.runtime.lastError) {
+                    alert(chrome.runtime.lastError.message || 'Could not clear queue log.');
+                    return;
+                }
+
+                if (!response || !response.ok) {
+                    alert(response?.error || 'Could not clear queue log.');
+                    return;
+                }
+
+                renderQueueLog([]);
+                showTempStatus('Queue log cleared.');
+            });
+        });
+    }
+
     addMessageButton.addEventListener('click', function () {
         const message = newMessageInput.value.trim();
 
@@ -793,6 +879,156 @@ document.addEventListener('DOMContentLoaded', function () {
         }, 2000);
     }
 
+    function refreshQueueLog() {
+        if (!queueLogList) return;
+
+        getQueueLogEntries()
+            .then(renderQueueLog)
+            .catch(() => {
+                renderQueueLog([]);
+            });
+    }
+
+    function getQueueLogEntries() {
+        return new Promise((resolve, reject) => {
+            chrome.runtime.sendMessage({ action: 'getQueueDebugLogs' }, function (response) {
+                if (chrome.runtime.lastError) {
+                    reject(new Error(chrome.runtime.lastError.message || 'Could not read queue log.'));
+                    return;
+                }
+
+                if (!response || !response.ok) {
+                    reject(new Error(response?.error || 'Could not read queue log.'));
+                    return;
+                }
+
+                resolve(Array.isArray(response.logs) ? response.logs : []);
+            });
+        });
+    }
+
+    function logOptimizerEvent(level, message, details = {}, dedupeMs = 30000) {
+        const signature = [
+            level,
+            message,
+            details.action || '',
+            details.error || '',
+            details.tabId || ''
+        ].join('|');
+        const now = Date.now();
+
+        if (signature === lastOptimizerLogSignature && now - lastOptimizerLogAt < dedupeMs) {
+            return;
+        }
+
+        lastOptimizerLogSignature = signature;
+        lastOptimizerLogAt = now;
+
+        chrome.runtime.sendMessage({
+            action: 'logAutomationEvent',
+            source: 'optimizer',
+            level,
+            tabId: details.tabId || '',
+            message,
+            details
+        }, () => {
+            void chrome.runtime.lastError;
+        });
+    }
+
+    function renderQueueLog(logs) {
+        if (!queueLogList) return;
+
+        queueLogList.innerHTML = '';
+
+        const recentLogs = (Array.isArray(logs) ? logs : [])
+            .slice(-30)
+            .reverse();
+
+        if (recentLogs.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'queue-log-empty';
+            empty.textContent = 'No automation logs yet';
+            queueLogList.appendChild(empty);
+            return;
+        }
+
+        recentLogs.forEach((log) => {
+            const entry = document.createElement('div');
+            const level = ['error', 'warn', 'success', 'info'].includes(log.level) ? log.level : 'info';
+            entry.className = `queue-log-entry ${level}`;
+
+            const meta = document.createElement('div');
+            meta.className = 'queue-log-meta';
+            const source = log.details?.source ? ` | ${String(log.details.source).toUpperCase()}` : '';
+            meta.textContent = `${formatLogTime(log.timestamp)} | ${level.toUpperCase()}${source}${log.tabId ? ` | Tab ${log.tabId}` : ''}`;
+
+            const message = document.createElement('div');
+            message.className = 'queue-log-message';
+            message.textContent = log.message || 'Queue event';
+
+            entry.appendChild(meta);
+            entry.appendChild(message);
+
+            const detailsText = formatLogDetails(log.details);
+
+            if (detailsText) {
+                const details = document.createElement('div');
+                details.className = 'queue-log-details';
+                details.textContent = detailsText;
+                entry.appendChild(details);
+            }
+
+            queueLogList.appendChild(entry);
+        });
+    }
+
+    function formatQueueLogForCopy(logs) {
+        return (Array.isArray(logs) ? logs : [])
+            .map((log) => {
+                const source = log.details?.source ? ` source=${log.details.source}` : '';
+                const parts = [
+                    `[${log.timestamp || 'unknown time'}] ${String(log.level || 'info').toUpperCase()}${source}${log.tabId ? ` tab=${log.tabId}` : ''}`,
+                    log.message || 'Queue event'
+                ];
+                const detailsText = formatLogDetails(log.details);
+
+                if (detailsText) {
+                    parts.push(detailsText);
+                }
+
+                return parts.join('\n');
+            })
+            .join('\n\n');
+    }
+
+    function formatLogTime(timestamp) {
+        const date = new Date(timestamp);
+
+        if (Number.isNaN(date.getTime())) {
+            return 'Unknown time';
+        }
+
+        return date.toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+        });
+    }
+
+    function formatLogDetails(details) {
+        if (!details || typeof details !== 'object') {
+            return '';
+        }
+
+        try {
+            const text = JSON.stringify(details, null, 2);
+            return text.length > 1200 ? `${text.slice(0, 1197)}...` : text;
+        } catch (error) {
+            return '';
+        }
+    }
+
     function updateMessagesToGoFooter(runningJobs) {
         if (!messagesToGoFooter) return;
 
@@ -919,9 +1155,13 @@ document.addEventListener('DOMContentLoaded', function () {
 
             const tabTitle = titleMap[tabId] || 'ChatGPT';
             const status = job.isPaused ? 'Paused' : 'Running';
+            const totalMessages = Number(job.totalMessages || 0);
+            const completedCount = Number(job.completedCount || 0);
+            const progress = totalMessages > 0 ? ` | Done: ${completedCount}/${totalMessages}` : '';
             const nextPreview = job.nextMessagePreview ? ` | Next: ${job.nextMessagePreview}` : '';
+            const errorPreview = job.lastError ? ` | Error: ${job.lastError}` : '';
 
-            info.textContent = `${tabTitle} | ${status} | Remaining: ${job.remaining}${nextPreview}`;
+            info.textContent = `${tabTitle} | ${status}${progress} | Remaining: ${job.remaining}${nextPreview}${errorPreview}`;
 
             const controls = document.createElement('div');
             controls.style.display = 'flex';
@@ -1181,6 +1421,36 @@ The sequence should do the following: `;
         });
     }
 
+    function loadQueueSettings() {
+        if (!queueDeepResearchAware || !queueUnlimitedRetryWait) {
+            return;
+        }
+
+        chrome.storage.sync.get(
+            {
+                queueDeepResearchAware: true,
+                queueUnlimitedRetryWait: false
+            },
+            function (config) {
+                queueDeepResearchAware.checked = config.queueDeepResearchAware !== false;
+                queueUnlimitedRetryWait.checked = config.queueUnlimitedRetryWait === true;
+            }
+        );
+    }
+
+    async function saveQueueSettings() {
+        if (!queueDeepResearchAware || !queueUnlimitedRetryWait) {
+            return;
+        }
+
+        await setSyncStorage({
+            queueDeepResearchAware: queueDeepResearchAware.checked,
+            queueUnlimitedRetryWait: queueUnlimitedRetryWait.checked
+        });
+
+        showTempStatus('Queue settings saved.');
+    }
+
     async function loadOptimizerSettings() {
         if (
             !optimizerStatus ||
@@ -1253,6 +1523,10 @@ The sequence should do the following: `;
 
             if (!tab) {
                 setOptimizerStatus('Settings saved. No ChatGPT tab selected/open.', 'disabled');
+                logOptimizerEvent('warn', 'Optimizer settings saved, but no ChatGPT tab is selected or open.', {
+                    action: 'UPDATE_CONFIG',
+                    config: newConfig
+                });
                 return;
             }
 
@@ -1265,6 +1539,14 @@ The sequence should do the following: `;
                 await refreshOptimizerStatus();
             } catch (error) {
                 setOptimizerStatus('Settings saved. Optimizer not loaded on selected tab.', 'disabled');
+                logOptimizerEvent('error', 'Optimizer config update failed.', {
+                    action: 'UPDATE_CONFIG',
+                    tabId: tab.id,
+                    tabTitle: cleanTabTitle(tab.title),
+                    tabUrl: tab.url || '',
+                    error: error.message || String(error),
+                    config: newConfig
+                });
             }
         }, 500);
     }
@@ -1297,6 +1579,9 @@ The sequence should do the following: `;
             setOptimizerStatus('No ChatGPT tab selected/open', 'disabled');
             optimizerToggle.textContent = 'Enable';
             optimizerStats.style.display = 'none';
+            logOptimizerEvent('warn', 'Optimizer status check skipped because no ChatGPT tab is selected or open.', {
+                action: 'GET_STATUS'
+            });
             return;
         }
 
@@ -1326,6 +1611,13 @@ The sequence should do the following: `;
             setOptimizerStatus(`Optimizer not loaded: ${error.message}`, 'disabled');
             optimizerToggle.textContent = 'Enable';
             optimizerStats.style.display = 'none';
+            logOptimizerEvent('error', `Optimizer not loaded: ${error.message}`, {
+                action: 'GET_STATUS',
+                tabId: tab.id,
+                tabTitle: cleanTabTitle(tab.title),
+                tabUrl: tab.url || '',
+                error: error.message || String(error)
+            });
         }
     }
 
@@ -1335,6 +1627,9 @@ The sequence should do the following: `;
 
             if (!tab) {
                 setOptimizerStatus('No ChatGPT tab selected/open', 'disabled');
+                logOptimizerEvent('warn', 'Optimizer toggle skipped because no ChatGPT tab is selected or open.', {
+                    action: 'TOGGLE_OPTIMIZER'
+                });
                 return;
             }
 
@@ -1358,6 +1653,13 @@ The sequence should do the following: `;
                 await refreshOptimizerStatus();
             } catch (error) {
                 setOptimizerStatus(`Error: ${error.message}`, 'disabled');
+                logOptimizerEvent('error', `Optimizer toggle failed: ${error.message}`, {
+                    action: 'TOGGLE_OPTIMIZER',
+                    tabId: tab.id,
+                    tabTitle: cleanTabTitle(tab.title),
+                    tabUrl: tab.url || '',
+                    error: error.message || String(error)
+                });
                 console.error('Optimizer toggle failed:', error);
             }
         });

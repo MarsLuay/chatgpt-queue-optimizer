@@ -1,4 +1,16 @@
 const jobs = new Map();
+const QUEUE_DEBUG_LOG_KEY = 'queueDebugLogs';
+const QUEUE_DURABLE_STATE_KEY = 'queueDurableJobs';
+const MAX_QUEUE_DEBUG_LOG_ENTRIES = 300;
+const QUEUE_SETTINGS_DEFAULTS = {
+    queueUnlimitedRetryWait: false,
+    queueDeepResearchAware: true
+};
+const UNLIMITED_RETRY_DELAY_MS = 15000;
+const QUEUE_WAKE_ALARM_NAME = 'queue-wake';
+const QUEUE_WAKE_ALARM_PERIOD_MINUTES = 0.5;
+
+let queueLogWrite = Promise.resolve();
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'startSequence') {
@@ -31,6 +43,21 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             ok: true,
             jobs: getRunningJobsSnapshot()
         });
+        return true;
+    }
+
+    if (request.action === 'getQueueDebugLogs') {
+        handleGetQueueDebugLogs(sendResponse);
+        return true;
+    }
+
+    if (request.action === 'clearQueueDebugLogs') {
+        handleClearQueueDebugLogs(sendResponse);
+        return true;
+    }
+
+    if (request.action === 'logAutomationEvent') {
+        handleLogAutomationEvent(request, sendResponse);
         return true;
     }
 
@@ -72,7 +99,9 @@ chrome.runtime.onInstalled.addListener(() => {
             enabled: undefined,
             windowSize: undefined,
             batchSize: undefined,
-            autoScroll: undefined
+            autoScroll: undefined,
+            queueUnlimitedRetryWait: undefined,
+            queueDeepResearchAware: undefined
         },
         (data) => {
             const defaults = {};
@@ -93,6 +122,14 @@ chrome.runtime.onInstalled.addListener(() => {
                 defaults.autoScroll = true;
             }
 
+            if (typeof data.queueUnlimitedRetryWait !== 'boolean') {
+                defaults.queueUnlimitedRetryWait = QUEUE_SETTINGS_DEFAULTS.queueUnlimitedRetryWait;
+            }
+
+            if (typeof data.queueDeepResearchAware !== 'boolean') {
+                defaults.queueDeepResearchAware = QUEUE_SETTINGS_DEFAULTS.queueDeepResearchAware;
+            }
+
             if (Object.keys(defaults).length > 0) {
                 chrome.storage.sync.set(defaults);
             }
@@ -102,10 +139,235 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
     if (jobs.has(tabId)) {
+        const job = jobs.get(tabId);
+        logQueueEvent(tabId, 'warn', 'ChatGPT tab closed while queue was active.', {
+            completedCount: job?.completedCount || 0,
+            totalMessages: getTotalMessages(job),
+            remaining: getRemainingCount(job)
+        });
         jobs.delete(tabId);
         updateRunningJobsStorage();
     }
 });
+
+if (chrome.alarms && chrome.alarms.onAlarm) {
+    chrome.alarms.onAlarm.addListener((alarm) => {
+        if (alarm.name !== QUEUE_WAKE_ALARM_NAME) return;
+
+        resumeDurableQueues('alarm');
+    });
+}
+
+initializeQueueDiagnostics();
+
+function initializeQueueDiagnostics() {
+    resumeDurableQueues('startup')
+        .then((restoredCount) => {
+            if (restoredCount > 0) {
+                return;
+            }
+
+            return logLegacyStaleRunningJobs();
+        })
+        .catch((error) => {
+            console.warn('Could not initialize queue diagnostics:', error);
+        });
+}
+
+async function resumeDurableQueues(source = 'manual') {
+    if (jobs.size > 0) {
+        updateQueueWakeAlarm(true);
+
+        for (const job of jobs.values()) {
+            if (job.isRunning && !job.isPaused && !job.isStopped && !job.isProcessing) {
+                processQueue(job.tabId);
+            }
+        }
+
+        return 0;
+    }
+
+    const data = await readLocalStorage([QUEUE_DURABLE_STATE_KEY]);
+    const durableJobs = data[QUEUE_DURABLE_STATE_KEY] && typeof data[QUEUE_DURABLE_STATE_KEY] === 'object'
+        ? data[QUEUE_DURABLE_STATE_KEY]
+        : {};
+    const restoredJobs = restoreDurableJobs(durableJobs);
+
+    if (restoredJobs.length === 0) {
+        updateQueueWakeAlarm();
+        return 0;
+    }
+
+    logQueueEvent('', 'warn', `Restored ${restoredJobs.length} queue${restoredJobs.length === 1 ? '' : 's'} after background worker wake.`, {
+        source,
+        restoredJobs: restoredJobs.map(job => ({
+            tabId: job.tabId,
+            status: getJobStatus(job),
+            phase: job.currentPhase || '',
+            completedCount: job.completedCount || 0,
+            currentCommandNumber: job.currentCommandNumber || 0,
+            remaining: getRemainingCount(job),
+            totalMessages: getTotalMessages(job),
+            lastError: job.lastError || ''
+        }))
+    });
+
+    updateRunningJobsStorage();
+
+    for (const job of restoredJobs) {
+        if (job.isRunning && !job.isPaused && !job.isStopped) {
+            processQueue(job.tabId);
+        }
+    }
+
+    return restoredJobs.length;
+}
+
+function restoreDurableJobs(durableJobs) {
+    const restoredJobs = [];
+
+    for (const rawJob of Object.values(durableJobs || {})) {
+        if (!rawJob || !rawJob.tabId) continue;
+
+        const tabId = Number(rawJob.tabId);
+        const queue = Array.isArray(rawJob.queue)
+            ? rawJob.queue.map(message => String(message || '').trim()).filter(Boolean)
+            : [];
+        const currentMessage = String(rawJob.currentMessage || '').trim() || null;
+
+        if (!currentMessage && queue.length === 0) continue;
+
+        const job = {
+            tabId,
+            queue,
+            currentMessage,
+            isRunning: rawJob.isRunning !== false && rawJob.isPaused !== true,
+            isPaused: rawJob.isPaused === true,
+            isStopped: false,
+            pausedReason: rawJob.pausedReason || '',
+            lastError: rawJob.lastError || '',
+            runId: rawJob.runId || createRunId(),
+            totalMessages: Number(rawJob.totalMessages || 0),
+            completedCount: Number(rawJob.completedCount || 0),
+            currentCommandNumber: Number(rawJob.currentCommandNumber || 0),
+            currentPhase: rawJob.currentPhase || (currentMessage ? 'waiting' : 'queued'),
+            startedAt: Number(rawJob.startedAt || Date.now()),
+            updatedAt: Number(rawJob.updatedAt || Date.now())
+        };
+
+        job.totalMessages = getTotalMessages(job);
+
+        if (job.currentMessage && !job.currentCommandNumber) {
+            job.currentCommandNumber = Number(job.completedCount || 0) + 1;
+        }
+
+        if (job.currentPhase === 'sending' || job.currentPhase === 'retry-wait') {
+            logQueueEvent(tabId, 'warn', 'Recovered a command that was not confirmed submitted; retrying it.', {
+                phase: job.currentPhase,
+                commandNumber: job.currentCommandNumber || 0,
+                totalMessages: getTotalMessages(job),
+                messagePreview: previewText(job.currentMessage || '', 160)
+            });
+            job.queue.unshift(job.currentMessage);
+            job.currentMessage = null;
+            job.currentCommandNumber = 0;
+            job.currentPhase = 'queued';
+        }
+
+        jobs.set(tabId, job);
+        restoredJobs.push(job);
+    }
+
+    return restoredJobs;
+}
+
+function logLegacyStaleRunningJobs() {
+    return readLocalStorage(['runningJobs'])
+        .then((data) => {
+            const staleJobs = data.runningJobs && typeof data.runningJobs === 'object'
+                ? data.runningJobs
+                : {};
+            const entries = Object.values(staleJobs);
+
+            if (entries.length === 0) {
+                return;
+            }
+
+            logQueueEvent('', 'error', 'Background worker restarted while queue state existed; in-memory queue was lost.', {
+                staleJobCount: entries.length,
+                staleJobs: entries.map(job => ({
+                    tabId: job.tabId || '',
+                    status: job.status || '',
+                    remaining: job.remaining || 0,
+                    completedCount: job.completedCount || 0,
+                    totalMessages: job.totalMessages || 0,
+                    currentCommandNumber: job.currentCommandNumber || 0,
+                    lastError: job.lastError || ''
+                }))
+            });
+
+            writeLocalStorage({
+                runningJobs: {},
+                [QUEUE_DURABLE_STATE_KEY]: {},
+                isRunning: false
+            }).catch((error) => {
+                console.warn('Could not clear stale queue state:', error);
+            });
+        })
+        .catch((error) => {
+            console.warn('Could not initialize queue diagnostics:', error);
+        });
+}
+
+function handleGetQueueDebugLogs(sendResponse) {
+    readLocalStorage([QUEUE_DEBUG_LOG_KEY])
+        .then((data) => {
+            sendResponse({
+                ok: true,
+                logs: Array.isArray(data[QUEUE_DEBUG_LOG_KEY]) ? data[QUEUE_DEBUG_LOG_KEY] : []
+            });
+        })
+        .catch((error) => {
+            sendResponse({
+                ok: false,
+                error: error?.message || 'Could not read queue log.'
+            });
+        });
+}
+
+function handleClearQueueDebugLogs(sendResponse) {
+    queueLogWrite = queueLogWrite
+        .catch(() => {})
+        .then(() => writeLocalStorage({ [QUEUE_DEBUG_LOG_KEY]: [] }));
+
+    queueLogWrite
+        .then(() => {
+            notifyRuntime({ action: 'queueDebugLogUpdated' });
+            sendResponse({ ok: true });
+        })
+        .catch((error) => {
+            sendResponse({
+                ok: false,
+                error: error?.message || 'Could not clear queue log.'
+            });
+        });
+}
+
+function handleLogAutomationEvent(request, sendResponse) {
+    const level = ['error', 'warn', 'success', 'info'].includes(request.level)
+        ? request.level
+        : 'info';
+    const details = request.details && typeof request.details === 'object'
+        ? request.details
+        : {};
+
+    logQueueEvent(request.tabId || '', level, request.message || 'Automation event', {
+        source: request.source || 'popup',
+        ...details
+    });
+
+    sendResponse({ ok: true });
+}
 
 function handleStartSequence(request, sendResponse) {
     const tabId = request.tabId;
@@ -114,6 +376,9 @@ function handleStartSequence(request, sendResponse) {
         : [];
 
     if (!tabId || messages.length === 0) {
+        logQueueEvent(tabId, 'warn', 'Could not start sequence: missing tab or messages.', {
+            messageCount: messages.length
+        });
         sendResponse({ ok: false, error: 'Missing tabId or messages.' });
         return;
     }
@@ -121,6 +386,11 @@ function handleStartSequence(request, sendResponse) {
     const existingJob = jobs.get(tabId);
 
     if (existingJob && (existingJob.isRunning || existingJob.isPaused)) {
+        logQueueEvent(tabId, 'warn', 'Could not start sequence: queue already exists on tab.', {
+            status: getJobStatus(existingJob),
+            remaining: getRemainingCount(existingJob),
+            lastError: existingJob.lastError || ''
+        });
         sendResponse({
             ok: false,
             error: 'A sequence is already running or paused on this tab. Use Send message next or stop/retry the existing queue.'
@@ -137,8 +407,18 @@ function handleStartSequence(request, sendResponse) {
         isStopped: false,
         pausedReason: '',
         lastError: '',
+        runId: createRunId(),
+        totalMessages: messages.length,
+        completedCount: 0,
+        currentCommandNumber: 0,
+        currentPhase: 'queued',
         startedAt: Date.now(),
         updatedAt: Date.now()
+    });
+
+    logQueueEvent(tabId, 'info', `Started sequence with ${messages.length} command${messages.length === 1 ? '' : 's'}.`, {
+        totalMessages: messages.length,
+        firstMessagePreview: previewText(messages[0] || '', 160)
     });
 
     updateRunningJobsStorage();
@@ -152,6 +432,7 @@ function handleEnqueueMessage(request, sendResponse) {
     const message = String(request.message || '').trim();
 
     if (!tabId || !message) {
+        logQueueEvent(tabId, 'warn', 'Could not enqueue command: missing tab or message.');
         sendResponse({ ok: false, error: 'Missing tabId or message.' });
         return;
     }
@@ -165,7 +446,13 @@ function handleEnqueueMessage(request, sendResponse) {
             existingJob.queue.push(message);
         }
 
+        existingJob.totalMessages = getTotalMessages(existingJob) + 1;
         existingJob.updatedAt = Date.now();
+        logQueueEvent(tabId, 'info', 'Added command to paused queue.', {
+            totalMessages: getTotalMessages(existingJob),
+            remaining: getRemainingCount(existingJob),
+            messagePreview: previewText(message, 160)
+        });
         updateRunningJobsStorage();
 
         sendResponse({
@@ -180,7 +467,14 @@ function handleEnqueueMessage(request, sendResponse) {
 
     if (existingJob && existingJob.isRunning) {
         existingJob.queue.unshift(message);
+        existingJob.totalMessages = getTotalMessages(existingJob) + 1;
         existingJob.updatedAt = Date.now();
+
+        logQueueEvent(tabId, 'info', 'Added command to run next in active queue.', {
+            totalMessages: getTotalMessages(existingJob),
+            remaining: getRemainingCount(existingJob),
+            messagePreview: previewText(message, 160)
+        });
 
         updateRunningJobsStorage();
 
@@ -203,8 +497,18 @@ function handleEnqueueMessage(request, sendResponse) {
         isStopped: false,
         pausedReason: '',
         lastError: '',
+        runId: createRunId(),
+        totalMessages: 1,
+        completedCount: 0,
+        currentCommandNumber: 0,
+        currentPhase: 'queued',
         startedAt: Date.now(),
         updatedAt: Date.now()
+    });
+
+    logQueueEvent(tabId, 'info', 'Started a new one-command queue.', {
+        totalMessages: 1,
+        messagePreview: previewText(message, 160)
     });
 
     updateRunningJobsStorage();
@@ -224,16 +528,25 @@ function handleRetryPausedJob(request, sendResponse) {
     const job = jobs.get(tabId);
 
     if (!tabId || !job) {
+        logQueueEvent(tabId, 'warn', 'Could not retry paused queue: no queue found.');
         sendResponse({ ok: false, error: 'No queue found for this tab.' });
         return;
     }
 
     if (!job.isPaused) {
+        logQueueEvent(tabId, 'warn', 'Could not retry queue because it is not paused.', {
+            status: getJobStatus(job),
+            remaining: getRemainingCount(job)
+        });
         sendResponse({ ok: false, error: 'This queue is not paused.' });
         return;
     }
 
     if (job.queue.length === 0) {
+        logQueueEvent(tabId, 'warn', 'Paused queue had no commands left when retry was requested.', {
+            completedCount: job.completedCount || 0,
+            totalMessages: getTotalMessages(job)
+        });
         jobs.delete(tabId);
         updateRunningJobsStorage();
         sendResponse({ ok: false, error: 'Paused queue has no messages left.' });
@@ -245,7 +558,15 @@ function handleRetryPausedJob(request, sendResponse) {
     job.isStopped = false;
     job.pausedReason = '';
     job.lastError = '';
+    job.currentPhase = 'queued';
     job.updatedAt = Date.now();
+
+    logQueueEvent(tabId, 'info', 'Retrying paused queue.', {
+        completedCount: job.completedCount || 0,
+        totalMessages: getTotalMessages(job),
+        remaining: getRemainingCount(job),
+        nextMessagePreview: previewText(job.queue[0] || '', 160)
+    });
 
     updateRunningJobsStorage();
     processQueue(tabId);
@@ -262,6 +583,13 @@ function handleStopSequence(request, sendResponse) {
         job.isPaused = false;
         job.isStopped = true;
 
+        logQueueEvent(tabId, 'warn', 'Queue stopped manually.', {
+            completedCount: job.completedCount || 0,
+            totalMessages: getTotalMessages(job),
+            remaining: getRemainingCount(job),
+            currentCommandNumber: job.currentCommandNumber || 0
+        });
+
         jobs.delete(tabId);
         updateRunningJobsStorage();
 
@@ -277,6 +605,12 @@ function handleStopAllSequences(sendResponse) {
         job.isRunning = false;
         job.isPaused = false;
         job.isStopped = true;
+        logQueueEvent(tabId, 'warn', 'Queue stopped by Stop all.', {
+            completedCount: job.completedCount || 0,
+            totalMessages: getTotalMessages(job),
+            remaining: getRemainingCount(job),
+            currentCommandNumber: job.currentCommandNumber || 0
+        });
         jobs.delete(tabId);
     }
 
@@ -287,33 +621,166 @@ function handleStopAllSequences(sendResponse) {
 async function processQueue(tabId) {
     const job = jobs.get(tabId);
 
-    if (!job || job.isPaused || !job.isRunning) {
+    if (!job || job.isPaused || !job.isRunning || job.isProcessing) {
         return;
     }
 
+    job.isProcessing = true;
+
     try {
-        while (job.queue.length > 0 && job.isRunning && !job.isPaused && !job.isStopped) {
+        while (job.isRunning && !job.isPaused && !job.isStopped) {
+            if (job.currentMessage && job.currentPhase === 'waiting') {
+                const totalMessages = getTotalMessages(job);
+                const queueSettings = await getQueueSettings();
+
+                logQueueEvent(tabId, 'info', `Resumed waiting for command ${job.currentCommandNumber || '?'}/${totalMessages}.`, {
+                    commandNumber: job.currentCommandNumber || 0,
+                    totalMessages,
+                    settings: queueSettings
+                });
+
+                const waitResult = await waitForTabResponse(tabId, {
+                    commandNumber: job.currentCommandNumber,
+                    totalMessages,
+                    queueSettings
+                });
+
+                if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+                    return;
+                }
+
+                if (!waitResult.ok) {
+                    logQueueEvent(tabId, 'error', `Command ${job.currentCommandNumber}/${totalMessages} failed while waiting for ChatGPT.`, {
+                        commandNumber: job.currentCommandNumber,
+                        totalMessages,
+                        error: waitResult.error || 'ChatGPT response failed.',
+                        diagnostics: waitResult.details || {}
+                    });
+
+                    if (await retryCurrentCommandIfEnabled(tabId, job, 'wait', waitResult.error || 'ChatGPT response failed.', waitResult.details || {})) {
+                        continue;
+                    }
+
+                    pauseJob(tabId, waitResult.error || 'ChatGPT response failed.', {
+                        phase: 'wait',
+                        diagnostics: waitResult.details || {}
+                    });
+                    return;
+                }
+
+                completeCurrentCommand(tabId, job, totalMessages, waitResult.details || {});
+
+                if (job.queue.length > 0) {
+                    await sleep(2000);
+                }
+
+                continue;
+            }
+
+            if (job.currentMessage) {
+                logQueueEvent(tabId, 'warn', 'Recovered a command without a confirmed waiting state; retrying it before moving forward.', {
+                    phase: job.currentPhase || '',
+                    commandNumber: job.currentCommandNumber || 0,
+                    totalMessages: getTotalMessages(job),
+                    messagePreview: previewText(job.currentMessage || '', 160)
+                });
+
+                job.queue.unshift(job.currentMessage);
+                job.currentMessage = null;
+                job.currentCommandNumber = 0;
+                job.currentPhase = 'queued';
+                job.updatedAt = Date.now();
+                updateRunningJobsStorage();
+                continue;
+            }
+
+            if (job.queue.length === 0) {
+                break;
+            }
+
             job.currentMessage = job.queue.shift();
+            job.currentCommandNumber = Number(job.completedCount || 0) + 1;
+            job.lastError = '';
+            job.currentPhase = 'sending';
             job.updatedAt = Date.now();
+            const totalMessages = getTotalMessages(job);
+            const queueSettings = await getQueueSettings();
+
+            logQueueEvent(tabId, 'info', `Sending command ${job.currentCommandNumber}/${totalMessages}.`, {
+                commandNumber: job.currentCommandNumber,
+                totalMessages,
+                remainingBeforeSend: getRemainingCount(job),
+                messagePreview: previewText(job.currentMessage || '', 160),
+                settings: queueSettings
+            });
+
             updateRunningJobsStorage();
 
             const sendResult = await sendPromptToSpecificTab(tabId, job.currentMessage);
 
+            if (!jobs.has(tabId) || job.isStopped) {
+                return;
+            }
+
             if (!sendResult.ok) {
-                pauseJob(tabId, sendResult.error || 'Could not send message to ChatGPT.');
+                logQueueEvent(tabId, 'error', `Failed to submit command ${job.currentCommandNumber}/${totalMessages}.`, {
+                    commandNumber: job.currentCommandNumber,
+                    totalMessages,
+                    error: sendResult.error || 'Could not send message to ChatGPT.',
+                    diagnostics: sendResult.details || {}
+                });
+
+                if (await retryCurrentCommandIfEnabled(tabId, job, 'send', sendResult.error || 'Could not send message to ChatGPT.', sendResult.details || {})) {
+                    continue;
+                }
+
+                pauseJob(tabId, sendResult.error || 'Could not send message to ChatGPT.', {
+                    phase: 'send',
+                    diagnostics: sendResult.details || {}
+                });
                 return;
             }
 
-            const waitResult = await waitForTabResponse(tabId);
-
-            if (!waitResult.ok) {
-                pauseJob(tabId, waitResult.error || 'ChatGPT response failed.');
-                return;
-            }
-
-            job.currentMessage = null;
+            job.currentPhase = 'waiting';
             job.updatedAt = Date.now();
             updateRunningJobsStorage();
+
+            logQueueEvent(tabId, 'success', `Submitted command ${job.currentCommandNumber}/${totalMessages}.`, {
+                commandNumber: job.currentCommandNumber,
+                totalMessages,
+                diagnostics: sendResult.details || {}
+            });
+
+            const waitResult = await waitForTabResponse(tabId, {
+                commandNumber: job.currentCommandNumber,
+                totalMessages,
+                queueSettings
+            });
+
+            if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+                return;
+            }
+
+            if (!waitResult.ok) {
+                logQueueEvent(tabId, 'error', `Command ${job.currentCommandNumber}/${totalMessages} failed while waiting for ChatGPT.`, {
+                    commandNumber: job.currentCommandNumber,
+                    totalMessages,
+                    error: waitResult.error || 'ChatGPT response failed.',
+                    diagnostics: waitResult.details || {}
+                });
+
+                if (await retryCurrentCommandIfEnabled(tabId, job, 'wait', waitResult.error || 'ChatGPT response failed.', waitResult.details || {})) {
+                    continue;
+                }
+
+                pauseJob(tabId, waitResult.error || 'ChatGPT response failed.', {
+                    phase: 'wait',
+                    diagnostics: waitResult.details || {}
+                });
+                return;
+            }
+
+            completeCurrentCommand(tabId, job, totalMessages, waitResult.details || {});
 
             if (job.queue.length > 0) {
                 await sleep(2000);
@@ -327,18 +794,55 @@ async function processQueue(tabId) {
         }
 
         if (!job.isPaused && job.queue.length === 0 && !job.currentMessage) {
+            logQueueEvent(tabId, 'success', 'Queue completed.', {
+                completedCount: job.completedCount || 0,
+                totalMessages: getTotalMessages(job)
+            });
             jobs.delete(tabId);
             updateRunningJobsStorage();
             recordCompletedRun(tabId);
         }
     } catch (error) {
-        pauseJob(tabId, error?.message || 'Unexpected automation error.');
+        logQueueEvent(tabId, 'error', 'Unexpected automation error while processing queue.', {
+            error: serializeError(error),
+            commandNumber: job.currentCommandNumber || 0,
+            completedCount: job.completedCount || 0,
+            totalMessages: getTotalMessages(job),
+            remaining: getRemainingCount(job)
+        });
+        pauseJob(tabId, error?.message || 'Unexpected automation error.', {
+            phase: 'unexpected',
+            error: serializeError(error)
+        });
+    } finally {
+        if (job) {
+            job.isProcessing = false;
+        }
     }
 }
 
-function pauseJob(tabId, reason) {
+function completeCurrentCommand(tabId, job, totalMessages, diagnostics = {}) {
+    job.completedCount = Number(job.completedCount || 0) + 1;
+
+    logQueueEvent(tabId, 'success', `Completed command ${job.completedCount}/${totalMessages}.`, {
+        commandNumber: job.completedCount,
+        totalMessages,
+        remaining: Math.max(0, job.queue.length),
+        diagnostics
+    });
+
+    job.currentMessage = null;
+    job.currentCommandNumber = 0;
+    job.currentPhase = 'queued';
+    job.updatedAt = Date.now();
+    updateRunningJobsStorage();
+}
+
+function pauseJob(tabId, reason, details = {}) {
     const job = jobs.get(tabId);
     if (!job) return;
+
+    const failedMessage = job.currentMessage || '';
 
     if (job.currentMessage) {
         job.queue.unshift(job.currentMessage);
@@ -350,7 +854,20 @@ function pauseJob(tabId, reason) {
     job.isStopped = false;
     job.pausedReason = reason || 'Queue paused because ChatGPT failed.';
     job.lastError = job.pausedReason;
+    job.currentPhase = 'paused';
     job.updatedAt = Date.now();
+
+    logQueueEvent(tabId, 'error', 'Queue paused.', {
+        reason: job.pausedReason,
+        commandNumber: job.currentCommandNumber || 0,
+        completedCount: job.completedCount || 0,
+        totalMessages: getTotalMessages(job),
+        remaining: getRemainingCount(job),
+        failedMessagePreview: previewText(failedMessage, 160),
+        ...details
+    });
+
+    job.currentCommandNumber = 0;
 
     updateRunningJobsStorage();
 
@@ -359,6 +876,53 @@ function pauseJob(tabId, reason) {
         tabId,
         error: job.pausedReason
     });
+}
+
+async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnostics = {}) {
+    if (!job || job.isStopped || job.isPaused || !job.isRunning) {
+        return false;
+    }
+
+    const queueSettings = await getQueueSettings();
+
+    if (!queueSettings.queueUnlimitedRetryWait) {
+        return false;
+    }
+
+    if (!job.currentMessage) {
+        return false;
+    }
+
+    job.lastError = reason || 'Queue command failed.';
+    job.currentPhase = 'retry-wait';
+    job.updatedAt = Date.now();
+    updateRunningJobsStorage();
+
+    logQueueEvent(tabId, 'warn', `Unlimited retry mode will retry command ${job.currentCommandNumber || '?'}/${getTotalMessages(job)}.`, {
+        phase,
+        reason: job.lastError,
+        retryInSeconds: Math.round(UNLIMITED_RETRY_DELAY_MS / 1000),
+        commandNumber: job.currentCommandNumber || 0,
+        completedCount: job.completedCount || 0,
+        totalMessages: getTotalMessages(job),
+        remaining: getRemainingCount(job),
+        diagnostics
+    });
+
+    await sleep(UNLIMITED_RETRY_DELAY_MS);
+
+    if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+        return false;
+    }
+
+    job.queue.unshift(job.currentMessage);
+    job.currentMessage = null;
+    job.currentCommandNumber = 0;
+    job.currentPhase = 'queued';
+    job.updatedAt = Date.now();
+    updateRunningJobsStorage();
+
+    return true;
 }
 
 async function sendPromptToSpecificTab(tabId, text) {
@@ -370,14 +934,55 @@ async function sendPromptToSpecificTab(tabId, text) {
                     return new Promise(resolve => setTimeout(resolve, ms));
                 }
 
-                const input =
-                    document.querySelector('div[contenteditable="true"]') ||
-                    document.querySelector('[contenteditable="true"]');
+                function describeElement(element) {
+                    if (!element) return null;
+
+                    return {
+                        tagName: element.tagName || '',
+                        id: element.id || '',
+                        testId: element.getAttribute('data-testid') || '',
+                        ariaLabel: element.getAttribute('aria-label') || '',
+                        text: (element.innerText || element.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 160),
+                        disabled: !!element.disabled,
+                        ariaDisabled: element.getAttribute('aria-disabled') || ''
+                    };
+                }
+
+                function findFirstSelector(selectors) {
+                    for (const selector of selectors) {
+                        const element = document.querySelector(selector);
+
+                        if (element) {
+                            return {
+                                selector,
+                                element
+                            };
+                        }
+                    }
+
+                    return {
+                        selector: '',
+                        element: null
+                    };
+                }
+
+                const inputMatch = findFirstSelector([
+                    'div[contenteditable="true"]',
+                    '[contenteditable="true"]'
+                ]);
+
+                const input = inputMatch.element;
 
                 if (!input) {
                     return {
                         ok: false,
-                        error: 'ChatGPT input box was not found.'
+                        error: 'ChatGPT input box was not found.',
+                        details: {
+                            contentEditableCount: document.querySelectorAll('[contenteditable="true"]').length,
+                            activeElement: describeElement(document.activeElement),
+                            url: location.href,
+                            title: document.title
+                        }
                     };
                 }
 
@@ -396,29 +1001,55 @@ async function sendPromptToSpecificTab(tabId, text) {
 
                 await sleepInPage(700);
 
-                const sendButton =
-                    document.querySelector('button[data-testid="send-button"]') ||
-                    document.querySelector('button[aria-label="Send prompt"]') ||
-                    document.querySelector('button[type="submit"]');
+                const sendButtonMatch = findFirstSelector([
+                    'button[data-testid="send-button"]',
+                    'button[aria-label="Send prompt"]',
+                    'button[type="submit"]'
+                ]);
+
+                const sendButton = sendButtonMatch.element;
 
                 if (!sendButton) {
                     return {
                         ok: false,
-                        error: 'Send button was not found.'
+                        error: 'Send button was not found.',
+                        details: {
+                            inputSelector: inputMatch.selector,
+                            inputTextLength: (input.innerText || input.textContent || '').length,
+                            buttonCount: document.querySelectorAll('button').length,
+                            activeElement: describeElement(document.activeElement),
+                            url: location.href,
+                            title: document.title
+                        }
                     };
                 }
 
                 if (sendButton.disabled || sendButton.getAttribute('aria-disabled') === 'true') {
                     return {
                         ok: false,
-                        error: 'Send button is disabled.'
+                        error: 'Send button is disabled.',
+                        details: {
+                            inputSelector: inputMatch.selector,
+                            sendButtonSelector: sendButtonMatch.selector,
+                            inputTextLength: (input.innerText || input.textContent || '').length,
+                            sendButton: describeElement(sendButton),
+                            url: location.href,
+                            title: document.title
+                        }
                     };
                 }
 
                 sendButton.click();
 
                 return {
-                    ok: true
+                    ok: true,
+                    details: {
+                        inputSelector: inputMatch.selector,
+                        sendButtonSelector: sendButtonMatch.selector,
+                        messageLength: String(msg || '').length,
+                        url: location.href,
+                        title: document.title
+                    }
                 };
             },
             args: [text]
@@ -429,23 +1060,40 @@ async function sendPromptToSpecificTab(tabId, text) {
         if (!result || !result.ok) {
             return {
                 ok: false,
-                error: result?.error || 'Could not send prompt.'
+                error: result?.error || 'Could not send prompt.',
+                details: result?.details || {
+                    scriptResultCount: Array.isArray(results) ? results.length : 0
+                }
             };
         }
 
-        return { ok: true };
+        return {
+            ok: true,
+            details: result.details || {}
+        };
     } catch (error) {
         return {
             ok: false,
-            error: error?.message || 'Failed to inject prompt into ChatGPT tab.'
+            error: error?.message || 'Failed to inject prompt into ChatGPT tab.',
+            details: {
+                error: serializeError(error)
+            }
         };
     }
 }
 
-async function waitForTabResponse(tabId) {
+async function waitForTabResponse(tabId, context = {}) {
     const startedAt = Date.now();
-    const maxWaitMs = 10 * 60 * 1000;
+    const queueSettings = {
+        ...QUEUE_SETTINGS_DEFAULTS,
+        ...(context.queueSettings || {})
+    };
+    const maxWaitMs = queueSettings.queueUnlimitedRetryWait
+        ? Number.POSITIVE_INFINITY
+        : 10 * 60 * 1000;
     let sawGenerating = false;
+    let sawDeepResearch = false;
+    let lastProgressLogAt = startedAt;
 
     return new Promise((resolve) => {
         const checkInterval = setInterval(() => {
@@ -453,62 +1101,141 @@ async function waitForTabResponse(tabId) {
 
             if (!job || job.isStopped) {
                 clearInterval(checkInterval);
-                resolve({ ok: false, error: 'Queue was stopped.' });
+                resolve({
+                    ok: false,
+                    error: 'Queue was stopped.',
+                    details: {
+                        elapsedMs: Date.now() - startedAt,
+                        sawGenerating,
+                        sawDeepResearch,
+                        settings: queueSettings
+                    }
+                });
                 return;
             }
 
             if (job.isPaused || !job.isRunning) {
                 clearInterval(checkInterval);
-                resolve({ ok: false, error: 'Queue was paused.' });
+                resolve({
+                    ok: false,
+                    error: 'Queue was paused.',
+                    details: {
+                        elapsedMs: Date.now() - startedAt,
+                        sawGenerating,
+                        sawDeepResearch,
+                        settings: queueSettings
+                    }
+                });
                 return;
             }
 
-            if (Date.now() - startedAt > maxWaitMs) {
+            if (Date.now() - startedAt > maxWaitMs && !(queueSettings.queueDeepResearchAware && sawDeepResearch)) {
                 clearInterval(checkInterval);
-                resolve({ ok: false, error: 'Timed out waiting for ChatGPT response.' });
+                resolve({
+                    ok: false,
+                    error: 'Timed out waiting for ChatGPT response.',
+                    details: {
+                        elapsedMs: Date.now() - startedAt,
+                        sawGenerating,
+                        sawDeepResearch,
+                        settings: queueSettings
+                    }
+                });
                 return;
             }
 
-            chrome.scripting.executeScript({
-                target: { tabId },
-                func: () => {
-                    const stopButton =
-                        document.querySelector('button[data-testid="stop-button"]') ||
-                        document.querySelector('[aria-label="Stop generating"]') ||
-                        document.querySelector('button[aria-label="Stop streaming"]');
+            try {
+                chrome.scripting.executeScript({
+                    target: { tabId },
+                    func: () => {
+                        const stopButton =
+                            document.querySelector('button[data-testid="stop-button"]') ||
+                            document.querySelector('[aria-label="Stop generating"]') ||
+                            document.querySelector('button[aria-label="Stop streaming"]');
 
-                    const resultStreaming =
-                        document.querySelector('.result-streaming') ||
-                        document.querySelector('[data-testid*="conversation-turn"] .result-streaming');
+                        const resultStreaming =
+                            document.querySelector('.result-streaming') ||
+                            document.querySelector('[data-testid*="conversation-turn"] .result-streaming');
 
-                    const pageText = document.body ? document.body.innerText.toLowerCase() : '';
+                        const bodyText = document.body ? document.body.innerText : '';
+                        const pageText = bodyText.toLowerCase();
+                        const errorMarkers = [
+                            'something went wrong',
+                            'there was an error',
+                            'error generating a response',
+                            'network error',
+                            'failed to generate',
+                            'try again later'
+                        ];
+                        const matchedError = errorMarkers.find(marker => pageText.includes(marker)) || '';
+                        const matchedErrorIndex = matchedError ? pageText.indexOf(matchedError) : -1;
+                        const errorSnippet = matchedErrorIndex >= 0
+                            ? bodyText
+                                .slice(Math.max(0, matchedErrorIndex - 120), matchedErrorIndex + 260)
+                                .replace(/\s+/g, ' ')
+                                .trim()
+                            : '';
 
-                    const hasKnownError =
-                        pageText.includes('something went wrong') ||
-                        pageText.includes('there was an error') ||
-                        pageText.includes('error generating a response') ||
-                        pageText.includes('network error') ||
-                        pageText.includes('failed to generate') ||
-                        pageText.includes('try again later');
-
-                    const hasTryAgainButton =
-                        Array.from(document.querySelectorAll('button')).some(btn => {
+                        const hasKnownError = !!matchedError;
+                        const buttons = Array.from(document.querySelectorAll('button'));
+                        const hasTryAgainButton = buttons.some(btn => {
                             const text = (btn.innerText || btn.getAttribute('aria-label') || '').toLowerCase().trim();
                             return text === 'retry' || text === 'try again';
                         });
 
-                    return {
-                        generating: !!(stopButton || resultStreaming),
-                        hasError: !!hasKnownError,
-                        hasTryAgainButton: !!hasTryAgainButton
-                    };
+                        const statusText = Array.from(document.querySelectorAll(
+                            '[role="status"], [aria-live], [data-testid*="status"], [data-testid*="progress"], [data-testid*="research"]'
+                        ))
+                            .map(node => node.innerText || node.textContent || '')
+                            .join(' ')
+                            .replace(/\s+/g, ' ')
+                            .trim()
+                            .slice(0, 1200);
+                        const researchText = `${statusText} ${buttons.map(btn => btn.innerText || btn.getAttribute('aria-label') || '').join(' ')}`.toLowerCase();
+                        const researchProgressMarkers = [
+                            'deep research',
+                            'researching',
+                            'searching the web',
+                            'searching sources',
+                            'reading sources',
+                            'analyzing sources',
+                            'gathering sources',
+                            'checking sources',
+                            'synthesizing',
+                            'creating report',
+                            'writing report'
+                        ];
+                        const matchedResearchMarker =
+                            researchProgressMarkers.find(marker => researchText.includes(marker)) ||
+                            researchProgressMarkers.find(marker => pageText.includes(marker)) ||
+                            '';
+                        const deepResearchActive = !!matchedResearchMarker && !!(stopButton || resultStreaming);
+
+                        return {
+                            generating: !!(stopButton || resultStreaming),
+                            deepResearchActive,
+                            matchedResearchMarker,
+                            researchStatusPreview: statusText,
+                            hasError: !!hasKnownError,
+                            hasTryAgainButton: !!hasTryAgainButton,
+                            errorSnippet,
+                            matchedError,
+                            url: location.href,
+                            title: document.title
+                        };
                 }
-            }, (results) => {
+                }, (results) => {
                 if (chrome.runtime.lastError) {
                     clearInterval(checkInterval);
                     resolve({
                         ok: false,
-                        error: chrome.runtime.lastError.message || 'Could not read ChatGPT tab.'
+                        error: chrome.runtime.lastError.message || 'Could not read ChatGPT tab.',
+                        details: {
+                            elapsedMs: Date.now() - startedAt,
+                            sawGenerating,
+                            sawDeepResearch,
+                            settings: queueSettings
+                        }
                     });
                     return;
                 }
@@ -519,29 +1246,128 @@ async function waitForTabResponse(tabId) {
                     clearInterval(checkInterval);
                     resolve({
                         ok: false,
-                        error: 'ChatGPT showed an error or retry state.'
+                        error: 'ChatGPT showed an error or retry state.',
+                        details: {
+                            elapsedMs: Date.now() - startedAt,
+                            sawGenerating,
+                            sawDeepResearch,
+                            settings: queueSettings,
+                            state
+                        }
                     });
                     return;
                 }
 
-                if (state.generating) {
-                    sawGenerating = true;
+                const deepResearchActive = queueSettings.queueDeepResearchAware && !!state.deepResearchActive;
+
+                if (deepResearchActive && !sawDeepResearch) {
+                    logQueueEvent(tabId, 'info', `Deep research activity detected for command ${context.commandNumber || '?'}/${context.totalMessages || '?'}.`, {
+                        commandNumber: context.commandNumber || 0,
+                        totalMessages: context.totalMessages || 0,
+                        elapsedMs: Date.now() - startedAt,
+                        matchedResearchMarker: state.matchedResearchMarker || '',
+                        researchStatusPreview: state.researchStatusPreview || ''
+                    });
+                }
+
+                if (state.generating || deepResearchActive) {
+                    if (!sawGenerating) {
+                        logQueueEvent(tabId, 'info', `ChatGPT started responding for command ${context.commandNumber || '?'}/${context.totalMessages || '?'}.`, {
+                            commandNumber: context.commandNumber || 0,
+                            totalMessages: context.totalMessages || 0,
+                            elapsedMs: Date.now() - startedAt,
+                            state
+                        });
+                    }
+
+                    sawGenerating = sawGenerating || !!state.generating;
+                    sawDeepResearch = sawDeepResearch || deepResearchActive;
+
+                    if (Date.now() - lastProgressLogAt > 30000) {
+                        logQueueEvent(tabId, 'info', `Still waiting for command ${context.commandNumber || '?'}/${context.totalMessages || '?'}.`, {
+                            commandNumber: context.commandNumber || 0,
+                            totalMessages: context.totalMessages || 0,
+                            elapsedSeconds: Math.round((Date.now() - startedAt) / 1000),
+                            generating: !!state.generating,
+                            deepResearchActive,
+                            sawGenerating,
+                            sawDeepResearch,
+                            settings: queueSettings
+                        });
+                        lastProgressLogAt = Date.now();
+                    }
+
                     return;
                 }
 
-                if (sawGenerating) {
+                if (sawGenerating || sawDeepResearch) {
                     clearInterval(checkInterval);
                     setTimeout(() => {
-                        resolve({ ok: true });
+                        resolve({
+                            ok: true,
+                            details: {
+                                elapsedMs: Date.now() - startedAt,
+                                sawGenerating,
+                                sawDeepResearch,
+                                settings: queueSettings,
+                                state
+                            }
+                        });
                     }, 800);
                     return;
                 }
 
-                if (Date.now() - startedAt > 5000) {
+                if (!queueSettings.queueUnlimitedRetryWait && Date.now() - startedAt > 5000) {
                     clearInterval(checkInterval);
-                    resolve({ ok: true });
+                    logQueueEvent(tabId, 'warn', `No generating indicator after command ${context.commandNumber || '?'}/${context.totalMessages || '?'}; assuming it completed.`, {
+                        commandNumber: context.commandNumber || 0,
+                        totalMessages: context.totalMessages || 0,
+                        elapsedMs: Date.now() - startedAt,
+                        settings: queueSettings,
+                        state
+                    });
+                    resolve({
+                        ok: true,
+                        details: {
+                            assumedCompleteWithoutGeneratingIndicator: true,
+                            elapsedMs: Date.now() - startedAt,
+                            sawGenerating,
+                            sawDeepResearch,
+                            settings: queueSettings,
+                            state
+                        }
+                    });
+                    return;
                 }
-            });
+
+                if (queueSettings.queueUnlimitedRetryWait && Date.now() - lastProgressLogAt > 30000) {
+                    logQueueEvent(tabId, 'info', `Unlimited wait mode is still waiting for command ${context.commandNumber || '?'}/${context.totalMessages || '?'}.`, {
+                        commandNumber: context.commandNumber || 0,
+                        totalMessages: context.totalMessages || 0,
+                        elapsedSeconds: Math.round((Date.now() - startedAt) / 1000),
+                        generating: !!state.generating,
+                        deepResearchActive,
+                        sawGenerating,
+                        sawDeepResearch,
+                        settings: queueSettings
+                    });
+                    lastProgressLogAt = Date.now();
+                }
+                });
+            } catch (error) {
+                clearInterval(checkInterval);
+                resolve({
+                    ok: false,
+                    error: error?.message || 'Could not inspect ChatGPT response state.',
+                    details: {
+                        elapsedMs: Date.now() - startedAt,
+                        sawGenerating,
+                        sawDeepResearch,
+                        settings: queueSettings,
+                        error: serializeError(error)
+                    }
+                });
+            }
         }, 1000);
     });
 }
@@ -563,6 +1389,11 @@ function getRunningJobsSnapshot() {
             currentMessage: job.currentMessage || '',
             currentMessagePreview: previewText(job.currentMessage || ''),
             nextMessagePreview: previewText(job.queue[0] || ''),
+            runId: job.runId || '',
+            totalMessages: getTotalMessages(job),
+            completedCount: job.completedCount || 0,
+            currentCommandNumber: job.currentCommandNumber || 0,
+            currentPhase: job.currentPhase || '',
             startedAt: job.startedAt,
             updatedAt: job.updatedAt
         };
@@ -575,6 +1406,15 @@ function getRemainingCount(job) {
     return job.queue.length + (job.currentMessage ? 1 : 0);
 }
 
+function getTotalMessages(job) {
+    if (!job) return 0;
+
+    return Math.max(
+        Number(job.totalMessages || 0),
+        Number(job.completedCount || 0) + getRemainingCount(job)
+    );
+}
+
 function getJobStatus(job) {
     if (job.isPaused) return 'paused';
     if (job.isRunning) return 'running';
@@ -584,11 +1424,55 @@ function getJobStatus(job) {
 
 function updateRunningJobsStorage() {
     const snapshot = getRunningJobsSnapshot();
+    const durableJobs = getDurableJobsState();
+    const hasJobs = Object.keys(snapshot).length > 0;
 
     chrome.storage.local.set({
         runningJobs: snapshot,
-        isRunning: Object.keys(snapshot).length > 0
+        queueDurableJobs: durableJobs,
+        isRunning: hasJobs
     });
+
+    updateQueueWakeAlarm(hasJobs);
+}
+
+function getDurableJobsState() {
+    const state = {};
+
+    for (const [tabId, job] of jobs.entries()) {
+        state[tabId] = {
+            tabId: job.tabId,
+            queue: Array.isArray(job.queue) ? [...job.queue] : [],
+            currentMessage: job.currentMessage || '',
+            isRunning: !!job.isRunning,
+            isPaused: !!job.isPaused,
+            isStopped: !!job.isStopped,
+            pausedReason: job.pausedReason || '',
+            lastError: job.lastError || '',
+            runId: job.runId || '',
+            totalMessages: getTotalMessages(job),
+            completedCount: Number(job.completedCount || 0),
+            currentCommandNumber: Number(job.currentCommandNumber || 0),
+            currentPhase: job.currentPhase || 'queued',
+            startedAt: job.startedAt,
+            updatedAt: job.updatedAt
+        };
+    }
+
+    return state;
+}
+
+function updateQueueWakeAlarm(hasJobs = jobs.size > 0) {
+    if (!chrome.alarms) return;
+
+    if (hasJobs) {
+        chrome.alarms.create(QUEUE_WAKE_ALARM_NAME, {
+            periodInMinutes: QUEUE_WAKE_ALARM_PERIOD_MINUTES
+        });
+        return;
+    }
+
+    chrome.alarms.clear(QUEUE_WAKE_ALARM_NAME);
 }
 
 function recordCompletedRun(tabId) {
@@ -618,6 +1502,166 @@ function notifyRuntime(message) {
     } catch (error) {
         // Popup may be closed. Ignore.
     }
+}
+
+function logQueueEvent(tabId, level, message, details = {}) {
+    const entry = {
+        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        timestamp: new Date().toISOString(),
+        tabId: tabId || '',
+        level: level || 'info',
+        message: message || 'Queue event',
+        details: sanitizeLogValue(details)
+    };
+
+    const consoleMessage = `[ChatGPT Queue] ${entry.message}`;
+
+    if (entry.level === 'error') {
+        console.error(consoleMessage, entry.details);
+    } else if (entry.level === 'warn') {
+        console.warn(consoleMessage, entry.details);
+    } else {
+        console.log(consoleMessage, entry.details);
+    }
+
+    queueLogWrite = queueLogWrite
+        .catch(() => {})
+        .then(async () => {
+            const data = await readLocalStorage([QUEUE_DEBUG_LOG_KEY]);
+            const logs = Array.isArray(data[QUEUE_DEBUG_LOG_KEY]) ? data[QUEUE_DEBUG_LOG_KEY] : [];
+            const nextLogs = [...logs, entry].slice(-MAX_QUEUE_DEBUG_LOG_ENTRIES);
+
+            await writeLocalStorage({ [QUEUE_DEBUG_LOG_KEY]: nextLogs });
+
+            notifyRuntime({
+                action: 'queueDebugLogUpdated',
+                entry
+            });
+        })
+        .catch((error) => {
+            console.warn('Could not write queue debug log:', error);
+        });
+
+    return entry;
+}
+
+function readLocalStorage(keys) {
+    return new Promise((resolve, reject) => {
+        chrome.storage.local.get(keys, (data) => {
+            const lastError = chrome.runtime.lastError;
+
+            if (lastError) {
+                reject(new Error(lastError.message || 'Storage read failed.'));
+                return;
+            }
+
+            resolve(data || {});
+        });
+    });
+}
+
+function writeLocalStorage(items) {
+    return new Promise((resolve, reject) => {
+        chrome.storage.local.set(items, () => {
+            const lastError = chrome.runtime.lastError;
+
+            if (lastError) {
+                reject(new Error(lastError.message || 'Storage write failed.'));
+                return;
+            }
+
+            resolve();
+        });
+    });
+}
+
+async function getQueueSettings() {
+    try {
+        const data = await readSyncStorage(QUEUE_SETTINGS_DEFAULTS);
+
+        return {
+            queueUnlimitedRetryWait: data.queueUnlimitedRetryWait === true,
+            queueDeepResearchAware: data.queueDeepResearchAware !== false
+        };
+    } catch (error) {
+        console.warn('Could not read queue settings, using defaults:', error);
+        return { ...QUEUE_SETTINGS_DEFAULTS };
+    }
+}
+
+function readSyncStorage(defaults) {
+    return new Promise((resolve, reject) => {
+        chrome.storage.sync.get(defaults, (data) => {
+            const lastError = chrome.runtime.lastError;
+
+            if (lastError) {
+                reject(new Error(lastError.message || 'Sync storage read failed.'));
+                return;
+            }
+
+            resolve(data || {});
+        });
+    });
+}
+
+function sanitizeLogValue(value, depth = 0) {
+    if (value === null || value === undefined) {
+        return value;
+    }
+
+    if (value instanceof Error) {
+        return serializeError(value);
+    }
+
+    if (typeof value === 'string') {
+        return value.length > 700 ? `${value.slice(0, 697)}...` : value;
+    }
+
+    if (typeof value === 'number' || typeof value === 'boolean') {
+        return value;
+    }
+
+    if (Array.isArray(value)) {
+        if (depth >= 2) {
+            return `[${value.length} items]`;
+        }
+
+        return value.slice(0, 12).map(item => sanitizeLogValue(item, depth + 1));
+    }
+
+    if (typeof value === 'object') {
+        if (depth >= 3) {
+            return '[object]';
+        }
+
+        const clean = {};
+        const entries = Object.entries(value).slice(0, 30);
+
+        for (const [key, item] of entries) {
+            if (typeof item === 'function' || item === undefined) continue;
+            clean[key] = sanitizeLogValue(item, depth + 1);
+        }
+
+        return clean;
+    }
+
+    return String(value);
+}
+
+function serializeError(error) {
+    if (!error) {
+        return {};
+    }
+
+    return {
+        name: error.name || 'Error',
+        message: error.message || String(error),
+        stack: error.stack ? previewText(error.stack, 700) : ''
+    };
+}
+
+function createRunId() {
+    return `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
 }
 
 function isChatGPTUrl(url) {

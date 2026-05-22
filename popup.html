@@ -123,13 +123,21 @@
         }
 
         .tool-tab {
-            width: 50%;
+            flex: 1 1 0;
+            min-width: 0;
             padding: 8px 6px;
             font-size: 12px;
             border-radius: 10px;
             background: transparent;
             color: var(--muted);
             border: 1px solid transparent;
+        }
+
+        .settings-tool-tab {
+            flex: 0 0 38px;
+            width: 38px;
+            margin-left: auto;
+            padding: 8px 0;
         }
 
         .tool-tab:hover {
@@ -297,7 +305,8 @@
         }
 
         .target-tab-row button,
-        .instances-header button {
+        .instances-header button,
+        .queue-log-header button {
             width: auto;
             padding: 7px 8px;
             font-size: 10px;
@@ -307,18 +316,26 @@
         }
 
         .target-tab-row button:hover,
-        .instances-header button:hover {
+        .instances-header button:hover,
+        .queue-log-header button:hover {
             background: color-mix(in srgb, var(--panel-2) 85%, var(--text) 15%);
             color: var(--text);
         }
 
-        .instances-header {
+        .instances-header,
+        .queue-log-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
             margin-bottom: 6px;
             font-weight: 750;
             color: var(--text);
+        }
+
+        .queue-log-actions {
+            display: flex;
+            gap: 4px;
+            align-items: center;
         }
 
         .instances-list {
@@ -359,6 +376,64 @@
         }
 
         .instance-empty {
+            color: var(--muted);
+            text-align: center;
+            padding: 6px;
+        }
+
+        .queue-log-list {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+            max-height: 180px;
+            overflow-y: auto;
+        }
+
+        .queue-log-entry {
+            padding: 7px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-left: 4px solid var(--status-border);
+            border-radius: 10px;
+        }
+
+        .queue-log-entry.error {
+            border-left-color: var(--danger);
+        }
+
+        .queue-log-entry.warn {
+            border-left-color: #d97706;
+        }
+
+        .queue-log-entry.success {
+            border-left-color: #16a34a;
+        }
+
+        .queue-log-meta {
+            color: var(--muted);
+            font-size: 10px;
+            line-height: 1.25;
+            margin-bottom: 3px;
+        }
+
+        .queue-log-message {
+            color: var(--text);
+            font-weight: 700;
+            line-height: 1.25;
+            overflow-wrap: anywhere;
+        }
+
+        .queue-log-details {
+            color: var(--muted);
+            font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+            font-size: 10px;
+            line-height: 1.35;
+            margin-top: 4px;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }
+
+        .queue-log-empty {
             color: var(--muted);
             text-align: center;
             padding: 6px;
@@ -699,6 +774,9 @@
         <div class="tool-tabs">
             <button id="queue-tool-tab" class="tool-tab active">Queue Tool</button>
             <button id="optimizer-tool-tab" class="tool-tab">Optimizer Tool</button>
+            <button id="settings-tool-tab" class="tool-tab settings-tool-tab" title="Settings" aria-label="Settings">
+                <i class="fas fa-cog" aria-hidden="true"></i>
+            </button>
         </div>
 
         <div id="queue-tool-panel" class="tool-panel active">
@@ -732,6 +810,7 @@
 
                         <button id="stop-all-instances">Stop all instances</button>
                     </div>
+
                 </div>
             </div>
 
@@ -789,6 +868,41 @@
             </div>
 
             <div id="messages-to-go-footer">0 messages to go...</div>
+        </div>
+
+        <div id="settings-tool-panel" class="tool-panel">
+            <div class="form-group">
+                <div class="queue-control-panel">
+                    <div class="queue-control-header">Settings</div>
+
+                    <div class="optimizer-setting">
+                        <label>
+                            <input type="checkbox" id="queue-deep-research-aware"> Deep research aware
+                        </label>
+                    </div>
+
+                    <div class="optimizer-setting">
+                        <label>
+                            <input type="checkbox" id="queue-unlimited-retry-wait"> Unlimited retry and wait
+                        </label>
+                    </div>
+
+                    <div class="queue-control-section">
+                        <div class="queue-log-header">
+                            <span>Automation log</span>
+                            <div class="queue-log-actions">
+                                <button id="refresh-queue-log">Refresh</button>
+                                <button id="copy-queue-log">Copy</button>
+                                <button id="clear-queue-log">Clear</button>
+                            </div>
+                        </div>
+
+                        <div id="queue-log-list" class="queue-log-list">
+                            <div class="queue-log-empty">No automation logs yet</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <div id="optimizer-tool-panel" class="tool-panel">
