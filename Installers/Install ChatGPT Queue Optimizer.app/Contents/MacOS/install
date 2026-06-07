@@ -1,0 +1,165 @@
+#!/bin/zsh
+set -u
+
+APP_MACOS_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "${APP_MACOS_DIR}/../../../.." && pwd)"
+INSTALLER_DIR="${REPO_ROOT}/Installers"
+BUILD_DIR="${REPO_ROOT}/build"
+LOG_FILE="${BUILD_DIR}/installer.log"
+HELP_LINKS_FILE="${BUILD_DIR}/installer-help-links.txt"
+PYTHON_SCRIPT="${INSTALLER_DIR}/install_chatgpt_queue_optimizer.py"
+
+mkdir -p "$BUILD_DIR"
+: > "$HELP_LINKS_FILE"
+
+log() {
+  local line
+  line="[$(date '+%Y-%m-%d %H:%M:%S %z')] $*"
+  print -r -- "$line"
+  print -r -- "$line" >> "$LOG_FILE"
+}
+
+add_help_link() {
+  local label="$1"
+  local url="${2:-}"
+  [[ -n "$label" && -n "$url" ]] || return 0
+  print -r -- "$label - $url" >> "$HELP_LINKS_FILE"
+}
+
+print_help_links() {
+  [[ -s "$HELP_LINKS_FILE" ]] || return 0
+  {
+    print -r -- ""
+    print -r -- "Help links for anything that needs attention:"
+    sort -u "$HELP_LINKS_FILE"
+  } | tee -a "$LOG_FILE"
+}
+
+dialog() {
+  local title="$1"
+  local message="$2"
+  if [[ "${CHATGPT_QUEUE_OPTIMIZER_INSTALLER_NO_DIALOG:-false}" == true ]]; then
+    return 0
+  fi
+  if command -v osascript >/dev/null 2>&1; then
+    osascript -e "display dialog \"$message\" with title \"$title\" buttons {\"OK\"} default button \"OK\"" >/dev/null 2>&1 || true
+  fi
+}
+
+load_brew_shellenv() {
+  if [[ -x /opt/homebrew/bin/brew ]]; then
+    eval "$(/opt/homebrew/bin/brew shellenv)"
+  elif [[ -x /usr/local/bin/brew ]]; then
+    eval "$(/usr/local/bin/brew shellenv)"
+  fi
+}
+
+ensure_homebrew_available() {
+  load_brew_shellenv
+  command -v brew >/dev/null 2>&1
+}
+
+ensure_python() {
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python3)"
+    log "Python found: $PYTHON_BIN"
+    return 0
+  fi
+
+  if ensure_homebrew_available; then
+    log "Python was not found. Installing Python with Homebrew."
+    brew install python >> "$LOG_FILE" 2>&1 || true
+    load_brew_shellenv
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python3)"
+    log "Python installed: $PYTHON_BIN"
+    return 0
+  fi
+
+  log "Python was not found."
+  add_help_link "Install Python for macOS" "https://www.python.org/downloads/macos/"
+  return 1
+}
+
+app_exists() {
+  local app_name="$1"
+  [[ -d "/Applications/${app_name}" || -d "${HOME}/Applications/${app_name}" ]]
+}
+
+ensure_cask_app() {
+  local app_name="$1"
+  local cask_name="$2"
+  local help_url="$3"
+
+  if app_exists "$app_name"; then
+    log "$app_name found."
+    return 0
+  fi
+
+  if ensure_homebrew_available; then
+    log "$app_name was not found. Installing $cask_name with Homebrew."
+    brew install --cask "$cask_name" >> "$LOG_FILE" 2>&1 || true
+  fi
+
+  if app_exists "$app_name"; then
+    log "$app_name installed."
+    return 0
+  fi
+
+  log "$app_name was not found; that browser may be skipped."
+  add_help_link "Install $app_name" "$help_url"
+  return 0
+}
+
+ensure_node() {
+  load_brew_shellenv
+  if command -v npm >/dev/null 2>&1; then
+    log "npm found: $(command -v npm)"
+    return 0
+  fi
+
+  if ensure_homebrew_available; then
+    log "npm was not found. Installing Node.js with Homebrew."
+    brew install node >> "$LOG_FILE" 2>&1 || true
+    load_brew_shellenv
+  fi
+
+  if command -v npm >/dev/null 2>&1; then
+    log "npm installed: $(command -v npm)"
+    return 0
+  fi
+
+  log "npm was not found; Firefox temporary loader may be skipped."
+  add_help_link "Install Node.js" "https://nodejs.org/en/download"
+  return 0
+}
+
+run_install() {
+  log "Installing ChatGPT Queue Optimizer from $REPO_ROOT."
+  ensure_python || return 1
+  ensure_cask_app "Google Chrome.app" "google-chrome" "https://www.google.com/chrome/"
+  ensure_cask_app "Firefox.app" "firefox" "https://www.mozilla.org/firefox/mac/"
+  ensure_node
+
+  "$PYTHON_BIN" "$PYTHON_SCRIPT" --repo-dir "$REPO_ROOT" "$@" >> "$LOG_FILE" 2>&1
+}
+
+run_install "$@"
+exit_code=$?
+
+if (( exit_code == 0 )); then
+  log "ChatGPT Queue Optimizer install completed."
+  print_help_links
+  dialog "ChatGPT Queue Optimizer" "Install completed. Log: $LOG_FILE"
+else
+  log "Install finished with something that needs attention."
+  add_help_link "ChatGPT Queue Optimizer repository" "https://github.com/MarsLuay/chatgpt-queue-optimizer"
+  add_help_link "Chrome extension install help" "https://support.google.com/chrome_webstore/answer/2664769"
+  add_help_link "Firefox extension install help" "https://support.mozilla.org/kb/find-and-install-add-ons-add-features-to-firefox"
+  print_help_links
+  dialog "ChatGPT Queue Optimizer" "Install needs attention. Log: $LOG_FILE"
+fi
+
+exit "$exit_code"
