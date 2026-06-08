@@ -21,7 +21,11 @@
         lastMessageCount: 0,
         _autoArmed: true,
         _autoWasIntersecting: false,
-        _autoLoadInProgress: false
+        _autoLoadInProgress: false,
+        enterQueueListenerAttached: false,
+        inlineQueueInFlight: false,
+        lastQueuedAt: 0,
+        lastQueuedText: ''
       };
 
       this._cachedMessages = null;
@@ -131,6 +135,8 @@
     }
 
     bootstrap() {
+      this.setupComposerQueueShortcut();
+
       this.waitForMessages().then(() => {
         this.setupContainer();
         this.setupObservers();
@@ -145,6 +151,189 @@
         this.state.isInitialized = true;
         console.log('CPO: Initialized successfully');
       });
+    }
+
+    setupComposerQueueShortcut() {
+      if (this.state.enterQueueListenerAttached) return;
+
+      document.addEventListener('keydown', (event) => {
+        this.handleComposerKeydown(event);
+      }, true);
+
+      this.state.enterQueueListenerAttached = true;
+    }
+
+    handleComposerKeydown(event) {
+      if (
+        event.key !== 'Enter' ||
+        event.shiftKey ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.isComposing ||
+        event.defaultPrevented
+      ) {
+        return;
+      }
+
+      const composer = this.getComposerFromEventTarget(event.target);
+      if (!composer) return;
+
+      const text = this.getComposerText(composer).trim();
+      if (!text) return;
+      if (!this.isChatGPTGenerating()) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (typeof event.stopImmediatePropagation === 'function') {
+        event.stopImmediatePropagation();
+      }
+
+      const now = Date.now();
+
+      if (
+        this.state.inlineQueueInFlight ||
+        (this.state.lastQueuedText === text && now - this.state.lastQueuedAt < 1200)
+      ) {
+        return;
+      }
+
+      this.queueComposerMessage(text, composer);
+    }
+
+    getComposerFromEventTarget(target) {
+      const element = target && target.nodeType === Node.ELEMENT_NODE
+        ? target
+        : target?.parentElement;
+
+      if (!element || element.closest('#cpo-root')) return null;
+
+      const composer = element.closest(
+        'textarea, #prompt-textarea, [data-testid="prompt-textarea"], div[contenteditable="true"], [contenteditable="true"]'
+      );
+
+      if (!composer) return null;
+
+      const tagName = composer.tagName ? composer.tagName.toLowerCase() : '';
+      const isTextArea = tagName === 'textarea';
+      const isEditable = composer.getAttribute('contenteditable') === 'true';
+
+      if (!isTextArea && !isEditable) return null;
+      if (composer.closest('[data-message-author-role], [data-message-id], [data-testid^="conversation-turn"]')) {
+        return null;
+      }
+
+      return composer;
+    }
+
+    getComposerText(composer) {
+      if (!composer) return '';
+
+      if (composer.tagName && composer.tagName.toLowerCase() === 'textarea') {
+        return composer.value || '';
+      }
+
+      return composer.innerText || composer.textContent || '';
+    }
+
+    clearComposer(composer) {
+      if (!composer) return;
+
+      composer.focus();
+
+      if (composer.tagName && composer.tagName.toLowerCase() === 'textarea') {
+        composer.value = '';
+      } else {
+        composer.innerHTML = '';
+      }
+
+      composer.dispatchEvent(new InputEvent('input', {
+        bubbles: true,
+        inputType: 'deleteContentBackward',
+        data: null
+      }));
+    }
+
+    isChatGPTGenerating() {
+      const stopButton =
+        document.querySelector('button[data-testid="stop-button"]') ||
+        Array.from(document.querySelectorAll('button')).find((button) => {
+          const label = (
+            button.getAttribute('aria-label') ||
+            button.innerText ||
+            button.textContent ||
+            ''
+          ).toLowerCase();
+
+          return (
+            label.includes('stop generating') ||
+            label.includes('stop streaming') ||
+            label.includes('stop response') ||
+            label.includes('interrupt')
+          );
+        });
+
+      const resultStreaming =
+        document.querySelector('.result-streaming') ||
+        document.querySelector('[data-testid*="conversation-turn"] .result-streaming') ||
+        document.querySelector('[data-message-streaming="true"]') ||
+        document.querySelector('[data-testid*="streaming"]');
+
+      return !!(stopButton || resultStreaming);
+    }
+
+    queueComposerMessage(text, composer) {
+      this.state.inlineQueueInFlight = true;
+      this.state.lastQueuedAt = Date.now();
+      this.state.lastQueuedText = text;
+
+      chrome.runtime.sendMessage({
+        action: 'enqueueMessage',
+        message: text,
+        source: 'composer-enter',
+        position: 'end',
+        waitForIdleBeforeStart: true
+      }, (response) => {
+        const error = chrome.runtime.lastError;
+        this.state.inlineQueueInFlight = false;
+
+        if (error || !response || !response.ok) {
+          this.showInlineQueueToast(
+            error?.message || response?.error || 'Could not add message to queue.',
+            'error'
+          );
+          return;
+        }
+
+        this.clearComposer(composer);
+        this.showInlineQueueToast('Queued to send after the current response.');
+      });
+    }
+
+    showInlineQueueToast(message, type = 'success') {
+      const existing = document.querySelector('.cpo-inline-queue-toast');
+      if (existing && existing.parentNode) {
+        existing.parentNode.removeChild(existing);
+      }
+
+      const toast = document.createElement('div');
+      toast.className = `cpo-inline-queue-toast cpo-inline-queue-toast-${type}`;
+      toast.textContent = message;
+      document.body.appendChild(toast);
+
+      requestAnimationFrame(() => {
+        toast.classList.add('cpo-inline-queue-toast-visible');
+      });
+
+      setTimeout(() => {
+        toast.classList.remove('cpo-inline-queue-toast-visible');
+        setTimeout(() => {
+          if (toast.parentNode) {
+            toast.parentNode.removeChild(toast);
+          }
+        }, 180);
+      }, 2200);
     }
 
     async waitForMessages() {

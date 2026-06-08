@@ -19,7 +19,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     if (request.action === 'enqueueMessage') {
-        handleEnqueueMessage(request, sendResponse);
+        handleEnqueueMessage(request, sender, sendResponse);
         return true;
     }
 
@@ -250,7 +250,8 @@ function restoreDurableJobs(durableJobs) {
             totalMessages: Number(rawJob.totalMessages || 0),
             completedCount: Number(rawJob.completedCount || 0),
             currentCommandNumber: Number(rawJob.currentCommandNumber || 0),
-            currentPhase: rawJob.currentPhase || (currentMessage ? 'waiting' : 'queued'),
+            currentPhase: rawJob.currentPhase || (rawJob.waitForIdleBeforeSend ? 'waiting-for-idle' : (currentMessage ? 'waiting' : 'queued')),
+            waitForIdleBeforeSend: rawJob.waitForIdleBeforeSend === true,
             startedAt: Number(rawJob.startedAt || Date.now()),
             updatedAt: Number(rawJob.updatedAt || Date.now())
         };
@@ -427,9 +428,12 @@ function handleStartSequence(request, sendResponse) {
     sendResponse({ ok: true, tabId });
 }
 
-function handleEnqueueMessage(request, sendResponse) {
-    const tabId = request.tabId;
+function handleEnqueueMessage(request, sender, sendResponse) {
+    const tabId = Number(request.tabId || sender?.tab?.id || 0);
     const message = String(request.message || '').trim();
+    const addToEnd = request.position === 'end';
+    const waitForIdleBeforeStart = request.waitForIdleBeforeStart === true;
+    const source = request.source || 'popup';
 
     if (!tabId || !message) {
         logQueueEvent(tabId, 'warn', 'Could not enqueue command: missing tab or message.');
@@ -440,7 +444,9 @@ function handleEnqueueMessage(request, sendResponse) {
     const existingJob = jobs.get(tabId);
 
     if (existingJob && existingJob.isPaused) {
-        if (existingJob.queue.length > 0) {
+        if (addToEnd) {
+            existingJob.queue.push(message);
+        } else if (existingJob.queue.length > 0) {
             existingJob.queue.splice(1, 0, message);
         } else {
             existingJob.queue.push(message);
@@ -449,6 +455,7 @@ function handleEnqueueMessage(request, sendResponse) {
         existingJob.totalMessages = getTotalMessages(existingJob) + 1;
         existingJob.updatedAt = Date.now();
         logQueueEvent(tabId, 'info', 'Added command to paused queue.', {
+            source,
             totalMessages: getTotalMessages(existingJob),
             remaining: getRemainingCount(existingJob),
             messagePreview: previewText(message, 160)
@@ -466,11 +473,18 @@ function handleEnqueueMessage(request, sendResponse) {
     }
 
     if (existingJob && existingJob.isRunning) {
-        existingJob.queue.unshift(message);
+        if (addToEnd) {
+            existingJob.queue.push(message);
+        } else {
+            existingJob.queue.unshift(message);
+        }
+
         existingJob.totalMessages = getTotalMessages(existingJob) + 1;
         existingJob.updatedAt = Date.now();
 
         logQueueEvent(tabId, 'info', 'Added command to run next in active queue.', {
+            source,
+            position: addToEnd ? 'end' : 'next',
             totalMessages: getTotalMessages(existingJob),
             remaining: getRemainingCount(existingJob),
             messagePreview: previewText(message, 160)
@@ -483,7 +497,9 @@ function handleEnqueueMessage(request, sendResponse) {
             queued: true,
             started: false,
             remaining: getRemainingCount(existingJob),
-            message: 'Message added next in the running queue.'
+            message: addToEnd
+                ? 'Message added to the running queue.'
+                : 'Message added next in the running queue.'
         });
         return;
     }
@@ -501,15 +517,24 @@ function handleEnqueueMessage(request, sendResponse) {
         totalMessages: 1,
         completedCount: 0,
         currentCommandNumber: 0,
-        currentPhase: 'queued',
+        currentPhase: waitForIdleBeforeStart ? 'waiting-for-idle' : 'queued',
+        waitForIdleBeforeSend: waitForIdleBeforeStart,
         startedAt: Date.now(),
         updatedAt: Date.now()
     });
 
-    logQueueEvent(tabId, 'info', 'Started a new one-command queue.', {
-        totalMessages: 1,
-        messagePreview: previewText(message, 160)
-    });
+    logQueueEvent(
+        tabId,
+        'info',
+        waitForIdleBeforeStart
+            ? 'Started a new one-command queue that will wait for the current response.'
+            : 'Started a new one-command queue.',
+        {
+            source,
+            totalMessages: 1,
+            messagePreview: previewText(message, 160)
+        }
+    );
 
     updateRunningJobsStorage();
     processQueue(tabId);
@@ -519,7 +544,10 @@ function handleEnqueueMessage(request, sendResponse) {
         queued: true,
         started: true,
         remaining: 1,
-        message: 'Started a new queue with this message.'
+        waitingForIdle: waitForIdleBeforeStart,
+        message: waitForIdleBeforeStart
+            ? 'Message queued to send after the current response.'
+            : 'Started a new queue with this message.'
     });
 }
 
@@ -696,6 +724,55 @@ async function processQueue(tabId) {
 
             if (job.queue.length === 0) {
                 break;
+            }
+
+            if (job.waitForIdleBeforeSend) {
+                const totalMessages = getTotalMessages(job);
+                const queueSettings = await getQueueSettings();
+
+                job.currentPhase = 'waiting-for-idle';
+                job.updatedAt = Date.now();
+
+                logQueueEvent(tabId, 'info', 'Waiting for the current ChatGPT response before sending queued command.', {
+                    totalMessages,
+                    remaining: getRemainingCount(job),
+                    nextMessagePreview: previewText(job.queue[0] || '', 160),
+                    settings: queueSettings
+                });
+
+                updateRunningJobsStorage();
+
+                const idleResult = await waitForTabResponse(tabId, {
+                    commandNumber: Number(job.completedCount || 0) + 1,
+                    totalMessages,
+                    queueSettings,
+                    waitForExistingGeneration: true,
+                    waitLabel: 'the current ChatGPT response'
+                });
+
+                if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+                    return;
+                }
+
+                if (!idleResult.ok) {
+                    logQueueEvent(tabId, 'error', 'Failed while waiting for the current ChatGPT response to finish.', {
+                        error: idleResult.error || 'ChatGPT response failed.',
+                        diagnostics: idleResult.details || {}
+                    });
+
+                    pauseJob(tabId, idleResult.error || 'ChatGPT response failed.', {
+                        phase: 'wait-for-idle',
+                        diagnostics: idleResult.details || {}
+                    });
+                    return;
+                }
+
+                job.waitForIdleBeforeSend = false;
+                job.currentPhase = 'queued';
+                job.updatedAt = Date.now();
+                updateRunningJobsStorage();
+                await sleep(500);
+                continue;
             }
 
             job.currentMessage = job.queue.shift();
@@ -1094,6 +1171,7 @@ async function waitForTabResponse(tabId, context = {}) {
     let sawGenerating = false;
     let sawDeepResearch = false;
     let lastProgressLogAt = startedAt;
+    const waitLabel = getWaitContextLabel(context);
 
     return new Promise((resolve) => {
         const checkInterval = setInterval(() => {
@@ -1148,14 +1226,32 @@ async function waitForTabResponse(tabId, context = {}) {
                 chrome.scripting.executeScript({
                     target: { tabId },
                     func: () => {
+                        const buttons = Array.from(document.querySelectorAll('button'));
                         const stopButton =
                             document.querySelector('button[data-testid="stop-button"]') ||
                             document.querySelector('[aria-label="Stop generating"]') ||
-                            document.querySelector('button[aria-label="Stop streaming"]');
+                            document.querySelector('button[aria-label="Stop streaming"]') ||
+                            buttons.find(button => {
+                                const label = (
+                                    button.getAttribute('aria-label') ||
+                                    button.innerText ||
+                                    button.textContent ||
+                                    ''
+                                ).toLowerCase();
+
+                                return (
+                                    label.includes('stop generating') ||
+                                    label.includes('stop streaming') ||
+                                    label.includes('stop response') ||
+                                    label.includes('interrupt')
+                                );
+                            });
 
                         const resultStreaming =
                             document.querySelector('.result-streaming') ||
-                            document.querySelector('[data-testid*="conversation-turn"] .result-streaming');
+                            document.querySelector('[data-testid*="conversation-turn"] .result-streaming') ||
+                            document.querySelector('[data-message-streaming="true"]') ||
+                            document.querySelector('[data-testid*="streaming"]');
 
                         const bodyText = document.body ? document.body.innerText : '';
                         const pageText = bodyText.toLowerCase();
@@ -1177,7 +1273,6 @@ async function waitForTabResponse(tabId, context = {}) {
                             : '';
 
                         const hasKnownError = !!matchedError;
-                        const buttons = Array.from(document.querySelectorAll('button'));
                         const hasTryAgainButton = buttons.some(btn => {
                             const text = (btn.innerText || btn.getAttribute('aria-label') || '').toLowerCase().trim();
                             return text === 'retry' || text === 'try again';
@@ -1261,7 +1356,7 @@ async function waitForTabResponse(tabId, context = {}) {
                 const deepResearchActive = queueSettings.queueDeepResearchAware && !!state.deepResearchActive;
 
                 if (deepResearchActive && !sawDeepResearch) {
-                    logQueueEvent(tabId, 'info', `Deep research activity detected for command ${context.commandNumber || '?'}/${context.totalMessages || '?'}.`, {
+                    logQueueEvent(tabId, 'info', `Deep research activity detected for ${waitLabel}.`, {
                         commandNumber: context.commandNumber || 0,
                         totalMessages: context.totalMessages || 0,
                         elapsedMs: Date.now() - startedAt,
@@ -1272,7 +1367,7 @@ async function waitForTabResponse(tabId, context = {}) {
 
                 if (state.generating || deepResearchActive) {
                     if (!sawGenerating) {
-                        logQueueEvent(tabId, 'info', `ChatGPT started responding for command ${context.commandNumber || '?'}/${context.totalMessages || '?'}.`, {
+                        logQueueEvent(tabId, 'info', `ChatGPT is responding for ${waitLabel}.`, {
                             commandNumber: context.commandNumber || 0,
                             totalMessages: context.totalMessages || 0,
                             elapsedMs: Date.now() - startedAt,
@@ -1284,7 +1379,7 @@ async function waitForTabResponse(tabId, context = {}) {
                     sawDeepResearch = sawDeepResearch || deepResearchActive;
 
                     if (Date.now() - lastProgressLogAt > 30000) {
-                        logQueueEvent(tabId, 'info', `Still waiting for command ${context.commandNumber || '?'}/${context.totalMessages || '?'}.`, {
+                        logQueueEvent(tabId, 'info', `Still waiting for ${waitLabel}.`, {
                             commandNumber: context.commandNumber || 0,
                             totalMessages: context.totalMessages || 0,
                             elapsedSeconds: Math.round((Date.now() - startedAt) / 1000),
@@ -1297,6 +1392,24 @@ async function waitForTabResponse(tabId, context = {}) {
                         lastProgressLogAt = Date.now();
                     }
 
+                    return;
+                }
+
+                if (context.waitForExistingGeneration) {
+                    clearInterval(checkInterval);
+                    setTimeout(() => {
+                        resolve({
+                            ok: true,
+                            details: {
+                                waitedForExistingGeneration: true,
+                                elapsedMs: Date.now() - startedAt,
+                                sawGenerating,
+                                sawDeepResearch,
+                                settings: queueSettings,
+                                state
+                            }
+                        });
+                    }, sawGenerating || sawDeepResearch ? 800 : 0);
                     return;
                 }
 
@@ -1319,7 +1432,7 @@ async function waitForTabResponse(tabId, context = {}) {
 
                 if (!queueSettings.queueUnlimitedRetryWait && Date.now() - startedAt > 5000) {
                     clearInterval(checkInterval);
-                    logQueueEvent(tabId, 'warn', `No generating indicator after command ${context.commandNumber || '?'}/${context.totalMessages || '?'}; assuming it completed.`, {
+                    logQueueEvent(tabId, 'warn', `No generating indicator after ${waitLabel}; assuming it completed.`, {
                         commandNumber: context.commandNumber || 0,
                         totalMessages: context.totalMessages || 0,
                         elapsedMs: Date.now() - startedAt,
@@ -1341,7 +1454,7 @@ async function waitForTabResponse(tabId, context = {}) {
                 }
 
                 if (queueSettings.queueUnlimitedRetryWait && Date.now() - lastProgressLogAt > 30000) {
-                    logQueueEvent(tabId, 'info', `Unlimited wait mode is still waiting for command ${context.commandNumber || '?'}/${context.totalMessages || '?'}.`, {
+                    logQueueEvent(tabId, 'info', `Unlimited wait mode is still waiting for ${waitLabel}.`, {
                         commandNumber: context.commandNumber || 0,
                         totalMessages: context.totalMessages || 0,
                         elapsedSeconds: Math.round((Date.now() - startedAt) / 1000),
@@ -1372,6 +1485,14 @@ async function waitForTabResponse(tabId, context = {}) {
     });
 }
 
+function getWaitContextLabel(context = {}) {
+    if (context.waitForExistingGeneration) {
+        return context.waitLabel || 'the current ChatGPT response';
+    }
+
+    return `command ${context.commandNumber || '?'}/${context.totalMessages || '?'}`;
+}
+
 function getRunningJobsSnapshot() {
     const snapshot = {};
 
@@ -1394,6 +1515,7 @@ function getRunningJobsSnapshot() {
             completedCount: job.completedCount || 0,
             currentCommandNumber: job.currentCommandNumber || 0,
             currentPhase: job.currentPhase || '',
+            waitForIdleBeforeSend: job.waitForIdleBeforeSend === true,
             startedAt: job.startedAt,
             updatedAt: job.updatedAt
         };
@@ -1454,6 +1576,7 @@ function getDurableJobsState() {
             completedCount: Number(job.completedCount || 0),
             currentCommandNumber: Number(job.currentCommandNumber || 0),
             currentPhase: job.currentPhase || 'queued',
+            waitForIdleBeforeSend: job.waitForIdleBeforeSend === true,
             startedAt: job.startedAt,
             updatedAt: job.updatedAt
         };
