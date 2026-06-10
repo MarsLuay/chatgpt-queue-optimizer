@@ -239,7 +239,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 if (tabs[0]) {
                     return tabs[0];
                 }
-            } catch (error) {
+            } catch {
                 // Try the next active-tab query shape.
             }
         }
@@ -252,11 +252,11 @@ document.addEventListener('DOMContentLoaded', function () {
 
         try {
             collected.push(...await tabsQuery({ url: CHATGPT_URL_PATTERNS }));
-        } catch (error) {
+        } catch {
             for (const pattern of CHATGPT_URL_PATTERNS) {
                 try {
                     collected.push(...await tabsQuery({ url: pattern }));
-                } catch (innerError) {
+                } catch {
                     // Fall back to the unfiltered scan below.
                 }
             }
@@ -265,13 +265,13 @@ document.addEventListener('DOMContentLoaded', function () {
         try {
             const allTabs = await tabsQuery({});
             collected.push(...allTabs.filter(tab => isChatGPTUrl(getTabUrl(tab))));
-        } catch (error) {
+        } catch {
             // URL-filtered tab queries above are enough when all-tabs scanning is unavailable.
         }
 
         return dedupeTabs(collected)
             .filter(tab => isChatGPTUrl(getTabUrl(tab)))
-            .sort((a, b) => {
+            .toSorted((a, b) => {
                 if (!!a.active !== !!b.active) {
                     return a.active ? -1 : 1;
                 }
@@ -448,7 +448,7 @@ document.addEventListener('DOMContentLoaded', function () {
             const parsed = new URL(url);
 
             return parsed.protocol === 'https:' && CHATGPT_HOSTS.has(parsed.hostname.toLowerCase());
-        } catch (error) {
+        } catch {
             return false;
         }
     }
@@ -472,7 +472,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
             try {
                 tab = await tabsGet(selectedTabId);
-            } catch (error) {
+            } catch {
                 alert('Selected ChatGPT tab no longer exists. Refresh the tab list.');
                 await refreshTargetTabs();
                 return null;
@@ -516,7 +516,7 @@ document.addEventListener('DOMContentLoaded', function () {
         if (targetTabSelect && targetTabSelect.value && targetTabSelect.value !== 'current') {
             try {
                 tab = await tabsGet(Number(targetTabSelect.value));
-            } catch (error) {
+            } catch {
                 return null;
             }
         } else {
@@ -759,7 +759,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
                 await copyTextToClipboard(text);
                 showTempStatus('Queue log copied.');
-            } catch (error) {
+            } catch {
                 alert('Could not copy queue log.');
             }
         });
@@ -1136,7 +1136,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
         const recentLogs = (Array.isArray(logs) ? logs : [])
             .slice(-30)
-            .reverse();
+            .toReversed();
 
         if (recentLogs.length === 0) {
             const empty = document.createElement('div');
@@ -1217,7 +1217,7 @@ document.addEventListener('DOMContentLoaded', function () {
         try {
             const text = JSON.stringify(details, null, 2);
             return text.length > 1200 ? `${text.slice(0, 1197)}...` : text;
-        } catch (error) {
+        } catch {
             return '';
         }
     }
@@ -1298,7 +1298,7 @@ document.addEventListener('DOMContentLoaded', function () {
         try {
             const tab = await getActiveTab();
             return tab?.id ? String(tab.id) : '';
-        } catch (error) {
+        } catch {
             return '';
         }
     }
@@ -1314,7 +1314,7 @@ document.addEventListener('DOMContentLoaded', function () {
                     titleMap[String(tab.id)] = cleanTabTitle(tab.title || 'ChatGPT');
                 }
             });
-        } catch (error) {
+        } catch {
             // Ignore title lookup errors.
         }
 
@@ -1474,7 +1474,7 @@ The sequence should do the following: `;
             try {
                 await copyTextToClipboard(promptText);
                 showTempStatus('Prompt copied to clipboard.');
-            } catch (error) {
+            } catch {
                 alert('Copy failed. Please try again.');
             }
         });
@@ -1529,7 +1529,7 @@ The sequence should do the following: `;
                     messages: importedMessages
                 };
             }
-        } catch (error) {
+        } catch {
             // Fall back to line parsing below.
         }
 
@@ -1572,7 +1572,7 @@ The sequence should do the following: `;
 
             try {
                 importedText = await readTextFromClipboard();
-            } catch (error) {
+            } catch {
                 importedText = '';
             }
 
@@ -1759,7 +1759,7 @@ The sequence should do the following: `;
     async function ensureOptimizerContentScript(tabId) {
         try {
             return await sendOptimizerMessage(tabId, { type: 'GET_STATUS' });
-        } catch (initialError) {
+        } catch {
             try {
                 await insertCSS({
                     target: { tabId },
@@ -1773,14 +1773,14 @@ The sequence should do the following: `;
 
                 await sleep(250);
             } catch (injectError) {
-                throw new Error(`Could not inject optimizer into this ChatGPT tab: ${injectError.message || String(injectError)}`);
+                throw new Error(`Could not inject optimizer into this ChatGPT tab: ${injectError.message || String(injectError)}`, { cause: injectError });
             }
         }
 
         try {
             return await sendOptimizerMessage(tabId, { type: 'GET_STATUS' });
         } catch (error) {
-            throw new Error(`Optimizer is still unavailable after injection: ${error.message || String(error)}`);
+            throw new Error(`Optimizer is still unavailable after injection: ${error.message || String(error)}`, { cause: error });
         }
     }
 

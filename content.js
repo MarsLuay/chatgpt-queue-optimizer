@@ -510,7 +510,7 @@
               collected.push(normalized);
             }
           }
-        } catch (error) {
+        } catch {
           // Try the next fallback selector.
         }
       }
@@ -555,7 +555,7 @@
 
     sortMessagesByPosition(messages) {
       return messages
-        .sort((a, b) => {
+        .toSorted((a, b) => {
           if (a === b) return 0;
 
           const position = a.compareDocumentPosition(b);
@@ -845,7 +845,7 @@
         } else if (!this.state.moreBanner.parentNode) {
           this.state.container.appendChild(this.state.moreBanner);
         }
-      } catch (error) {
+      } catch {
         try {
           this.state.container.appendChild(this.state.moreBanner);
         } catch {}

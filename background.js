@@ -1162,7 +1162,7 @@ async function waitForTabResponse(tabId, context = {}) {
     const startedAt = Date.now();
     const queueSettings = {
         ...QUEUE_SETTINGS_DEFAULTS,
-        ...(context.queueSettings || {})
+        ...context.queueSettings
     };
     const maxWaitMs = queueSettings.queueUnlimitedRetryWait
         ? Number.POSITIVE_INFINITY
@@ -1172,12 +1172,28 @@ async function waitForTabResponse(tabId, context = {}) {
     let lastProgressLogAt = startedAt;
     const waitLabel = getWaitContextLabel(context);
 
-    return new Promise((resolve) => {
-        const checkInterval = setInterval(() => {
+    return new Promise((resolveRaw) => {
+        let settled = false;
+        let checkInterval = null;
+        const resolve = (value) => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            if (checkInterval) {
+                clearInterval(checkInterval);
+            }
+            resolveRaw(value);
+        };
+        checkInterval = setInterval(() => {
+            if (settled) {
+                clearInterval(checkInterval);
+                return;
+            }
+
             const job = jobs.get(tabId);
 
             if (!job || job.isStopped) {
-                clearInterval(checkInterval);
                 resolve({
                     ok: false,
                     error: 'Queue was stopped.',
@@ -1319,6 +1335,9 @@ async function waitForTabResponse(tabId, context = {}) {
                         };
                 }
                 }, (results, executionError) => {
+                if (settled) {
+                    return;
+                }
                 if (executionError) {
                     clearInterval(checkInterval);
                     resolve({
@@ -1622,7 +1641,7 @@ function notifyRuntime(message) {
         chrome.runtime.sendMessage(message, () => {
             void chrome.runtime.lastError;
         });
-    } catch (error) {
+    } catch {
         // Popup may be closed. Ignore.
     }
 }
@@ -1801,7 +1820,7 @@ async function getActiveTab() {
             if (tabs[0]) {
                 return tabs[0];
             }
-        } catch (error) {
+        } catch {
             // Try the next active-tab query shape.
         }
     }
@@ -1943,7 +1962,7 @@ function isChatGPTUrl(url) {
         const parsed = new URL(url);
 
         return parsed.protocol === 'https:' && CHATGPT_HOSTS.has(parsed.hostname.toLowerCase());
-    } catch (error) {
+    } catch {
         return false;
     }
 }
