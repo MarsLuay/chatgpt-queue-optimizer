@@ -146,6 +146,14 @@ exit /b 0
 
 :FindFirefox
 set "FIREFOX_EXE="
+if exist "%ProgramFiles%\Firefox Developer Edition\firefox.exe" set "FIREFOX_EXE=%ProgramFiles%\Firefox Developer Edition\firefox.exe"
+if defined FIREFOX_EXE exit /b 0
+if exist "%ProgramFiles(x86)%\Firefox Developer Edition\firefox.exe" set "FIREFOX_EXE=%ProgramFiles(x86)%\Firefox Developer Edition\firefox.exe"
+if defined FIREFOX_EXE exit /b 0
+if exist "%LOCALAPPDATA%\Firefox Developer Edition\firefox.exe" set "FIREFOX_EXE=%LOCALAPPDATA%\Firefox Developer Edition\firefox.exe"
+if defined FIREFOX_EXE exit /b 0
+if exist "%LOCALAPPDATA%\Programs\Firefox Developer Edition\firefox.exe" set "FIREFOX_EXE=%LOCALAPPDATA%\Programs\Firefox Developer Edition\firefox.exe"
+if defined FIREFOX_EXE exit /b 0
 if exist "%ProgramFiles%\Mozilla Firefox\firefox.exe" set "FIREFOX_EXE=%ProgramFiles%\Mozilla Firefox\firefox.exe"
 if defined FIREFOX_EXE exit /b 0
 if exist "%ProgramFiles(x86)%\Mozilla Firefox\firefox.exe" set "FIREFOX_EXE=%ProgramFiles(x86)%\Mozilla Firefox\firefox.exe"

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "ChatGPT Queue + Optimizer",
   "description": "Automate ChatGPT prompts with prompt chains, queues, and ChatGPT performance optimization.",
-  "version": "1.0.1",
+  "version": "1.0.6",
   "offline_enabled": true,
 
   "action": {

@@ -69,6 +69,216 @@ document.addEventListener('DOMContentLoaded', function () {
     const EDIT_SEQUENCE_VALUE = '__edit_selected_sequence__';
     let selectedSequenceName = '';
     let editingSequenceName = '';
+    const CHATGPT_URL_PATTERNS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
+    const CHATGPT_HOSTS = new Set(['chatgpt.com', 'chat.openai.com']);
+
+    function extensionApiPromise(callWithCallback, callWithoutCallback) {
+        return new Promise((resolve, reject) => {
+            let settled = false;
+
+            const settleResolve = (value) => {
+                if (settled) return;
+                settled = true;
+                resolve(value);
+            };
+
+            const settleReject = (error) => {
+                if (settled) return;
+                settled = true;
+                reject(error instanceof Error ? error : new Error(String(error || 'Extension API call failed.')));
+            };
+
+            const finishFromCallback = (value) => {
+                if (settled) return;
+
+                const lastError = chrome.runtime.lastError;
+
+                if (lastError) {
+                    settleReject(new Error(lastError.message || 'Extension API call failed.'));
+                    return;
+                }
+
+                settleResolve(value);
+            };
+
+            let maybePromise;
+
+            try {
+                maybePromise = callWithCallback(finishFromCallback);
+            } catch (callbackError) {
+                if (!callWithoutCallback) {
+                    settleReject(callbackError);
+                    return;
+                }
+
+                try {
+                    maybePromise = callWithoutCallback();
+                } catch (promiseError) {
+                    settleReject(promiseError);
+                    return;
+                }
+            }
+
+            if (maybePromise && typeof maybePromise.then === 'function') {
+                maybePromise.then(settleResolve, settleReject);
+            }
+        });
+    }
+
+    function tabsQuery(queryInfo) {
+        return extensionApiPromise(
+            (done) => chrome.tabs.query(queryInfo, done),
+            () => chrome.tabs.query(queryInfo)
+        ).then((tabs) => Array.isArray(tabs) ? tabs : []);
+    }
+
+    function tabsGet(tabId) {
+        return extensionApiPromise(
+            (done) => chrome.tabs.get(tabId, done),
+            () => chrome.tabs.get(tabId)
+        );
+    }
+
+    function executeScript(details) {
+        return extensionApiPromise(
+            (done) => {
+                if (chrome.scripting && chrome.scripting.executeScript) {
+                    return chrome.scripting.executeScript(details, done);
+                }
+
+                if (chrome.tabs && chrome.tabs.executeScript) {
+                    const tabId = details?.target?.tabId;
+                    const legacyDetails = {};
+
+                    if (Array.isArray(details.files) && details.files[0]) {
+                        legacyDetails.file = details.files[0];
+                    } else if (details.func) {
+                        legacyDetails.code = `(${details.func}).apply(null, ${JSON.stringify(details.args || [])});`;
+                    } else {
+                        throw new Error('No script file or function was provided.');
+                    }
+
+                    return chrome.tabs.executeScript(tabId, legacyDetails, done);
+                }
+
+                throw new Error('Script injection is not available in this browser.');
+            },
+            () => {
+                if (!chrome.scripting || !chrome.scripting.executeScript) {
+                    throw new Error('Script injection is not available in this browser.');
+                }
+
+                return chrome.scripting.executeScript(details);
+            }
+        );
+    }
+
+    function insertCSS(details) {
+        return extensionApiPromise(
+            (done) => {
+                if (chrome.scripting && chrome.scripting.insertCSS) {
+                    return chrome.scripting.insertCSS(details, done);
+                }
+
+                if (chrome.tabs && chrome.tabs.insertCSS) {
+                    const tabId = details?.target?.tabId;
+                    const legacyDetails = {};
+
+                    if (Array.isArray(details.files) && details.files[0]) {
+                        legacyDetails.file = details.files[0];
+                    } else {
+                        throw new Error('No CSS file was provided.');
+                    }
+
+                    return chrome.tabs.insertCSS(tabId, legacyDetails, done);
+                }
+
+                throw new Error('CSS injection is not available in this browser.');
+            },
+            () => {
+                if (!chrome.scripting || !chrome.scripting.insertCSS) {
+                    throw new Error('CSS injection is not available in this browser.');
+                }
+
+                return chrome.scripting.insertCSS(details);
+            }
+        );
+    }
+
+    function sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function getTabUrl(tab) {
+        return tab?.url || tab?.pendingUrl || '';
+    }
+
+    function dedupeTabs(tabs) {
+        const byId = new Map();
+
+        (Array.isArray(tabs) ? tabs : []).forEach((tab) => {
+            if (tab && tab.id && !byId.has(tab.id)) {
+                byId.set(tab.id, tab);
+            }
+        });
+
+        return Array.from(byId.values());
+    }
+
+    async function getActiveTab() {
+        const queries = [
+            { active: true, currentWindow: true },
+            { active: true, lastFocusedWindow: true },
+            { active: true }
+        ];
+
+        for (const queryInfo of queries) {
+            try {
+                const tabs = await tabsQuery(queryInfo);
+
+                if (tabs[0]) {
+                    return tabs[0];
+                }
+            } catch (error) {
+                // Try the next active-tab query shape.
+            }
+        }
+
+        return null;
+    }
+
+    async function getAllChatGPTTabs() {
+        const collected = [];
+
+        try {
+            collected.push(...await tabsQuery({ url: CHATGPT_URL_PATTERNS }));
+        } catch (error) {
+            for (const pattern of CHATGPT_URL_PATTERNS) {
+                try {
+                    collected.push(...await tabsQuery({ url: pattern }));
+                } catch (innerError) {
+                    // Fall back to the unfiltered scan below.
+                }
+            }
+        }
+
+        try {
+            const allTabs = await tabsQuery({});
+            collected.push(...allTabs.filter(tab => isChatGPTUrl(getTabUrl(tab))));
+        } catch (error) {
+            // URL-filtered tab queries above are enough when all-tabs scanning is unavailable.
+        }
+
+        return dedupeTabs(collected)
+            .filter(tab => isChatGPTUrl(getTabUrl(tab)))
+            .sort((a, b) => {
+                if (!!a.active !== !!b.active) {
+                    return a.active ? -1 : 1;
+                }
+
+                return cleanTabTitle(a.title || '').localeCompare(cleanTabTitle(b.title || ''));
+            });
+    }
 
     chrome.storage.local.get(['messages', 'sequences'], function (data) {
         if (Array.isArray(data.messages)) {
@@ -190,23 +400,8 @@ document.addEventListener('DOMContentLoaded', function () {
         currentOption.textContent = 'Current ChatGPT tab';
         targetTabSelect.appendChild(currentOption);
 
-        let activeTab = null;
-        let chatgptTabs = [];
-
-        try {
-            const activeTabs = await chrome.tabs.query({ active: true, currentWindow: true });
-            activeTab = activeTabs[0] || null;
-        } catch (error) {
-            activeTab = null;
-        }
-
-        try {
-            const tabs1 = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
-            const tabs2 = await chrome.tabs.query({ url: 'https://chat.openai.com/*' });
-            chatgptTabs = [...tabs1, ...tabs2];
-        } catch (error) {
-            chatgptTabs = [];
-        }
+        const activeTab = await getActiveTab();
+        const chatgptTabs = await getAllChatGPTTabs();
 
         chatgptTabs.forEach(tab => {
             if (!tab.id) return;
@@ -224,7 +419,7 @@ document.addEventListener('DOMContentLoaded', function () {
             return;
         }
 
-        if (activeTab && activeTab.url && isChatGPTUrl(activeTab.url)) {
+        if (activeTab && isChatGPTUrl(getTabUrl(activeTab))) {
             targetTabSelect.value = 'current';
             return;
         }
@@ -245,8 +440,17 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     function isChatGPTUrl(url) {
-        return typeof url === 'string' &&
-            (url.startsWith('https://chatgpt.com/') || url.startsWith('https://chat.openai.com/'));
+        if (typeof url !== 'string') {
+            return false;
+        }
+
+        try {
+            const parsed = new URL(url);
+
+            return parsed.protocol === 'https:' && CHATGPT_HOSTS.has(parsed.hostname.toLowerCase());
+        } catch (error) {
+            return false;
+        }
     }
 
     if (refreshTargetTabsButton) {
@@ -267,29 +471,29 @@ document.addEventListener('DOMContentLoaded', function () {
             const selectedTabId = Number(targetTabSelect.value);
 
             try {
-                tab = await chrome.tabs.get(selectedTabId);
+                tab = await tabsGet(selectedTabId);
             } catch (error) {
                 alert('Selected ChatGPT tab no longer exists. Refresh the tab list.');
                 await refreshTargetTabs();
                 return null;
             }
         } else {
-            const activeTabs = await chrome.tabs.query({ active: true, currentWindow: true });
-            tab = activeTabs[0] || null;
+            tab = await getActiveTab();
 
-            if (!tab || !tab.url || !isChatGPTUrl(tab.url)) {
-                const tabs1 = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
-                const tabs2 = await chrome.tabs.query({ url: 'https://chat.openai.com/*' });
-                const chatgptTabs = [...tabs1, ...tabs2];
+            if (!tab || !isChatGPTUrl(getTabUrl(tab))) {
+                const chatgptTabs = await getAllChatGPTTabs();
 
                 if (chatgptTabs.length === 0) {
                     alert('No ChatGPT tab is open. Open chatgpt.com, then try again.');
                     return null;
                 }
 
-                alert('You are not on a ChatGPT tab. Select a ChatGPT tab from the dropdown, then try again.');
-                await refreshTargetTabs();
-                return null;
+                tab = chatgptTabs[0];
+
+                if (targetTabSelect && tab.id) {
+                    await refreshTargetTabs();
+                    targetTabSelect.value = String(tab.id);
+                }
             }
         }
 
@@ -298,7 +502,7 @@ document.addEventListener('DOMContentLoaded', function () {
             return null;
         }
 
-        if (!tab.url || !isChatGPTUrl(tab.url)) {
+        if (!isChatGPTUrl(getTabUrl(tab))) {
             alert('Select a ChatGPT tab before starting or adding to the queue.');
             return null;
         }
@@ -311,31 +515,20 @@ document.addEventListener('DOMContentLoaded', function () {
 
         if (targetTabSelect && targetTabSelect.value && targetTabSelect.value !== 'current') {
             try {
-                tab = await chrome.tabs.get(Number(targetTabSelect.value));
+                tab = await tabsGet(Number(targetTabSelect.value));
             } catch (error) {
                 return null;
             }
         } else {
-            try {
-                const activeTabs = await chrome.tabs.query({ active: true, currentWindow: true });
-                tab = activeTabs[0] || null;
-            } catch (error) {
-                tab = null;
-            }
+            tab = await getActiveTab();
 
-            if (!tab || !isChatGPTUrl(tab.url)) {
-                try {
-                    const tabs1 = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
-                    const tabs2 = await chrome.tabs.query({ url: 'https://chat.openai.com/*' });
-                    const chatgptTabs = [...tabs1, ...tabs2];
-                    tab = chatgptTabs[0] || null;
-                } catch (error) {
-                    tab = null;
-                }
+            if (!tab || !isChatGPTUrl(getTabUrl(tab))) {
+                const chatgptTabs = await getAllChatGPTTabs();
+                tab = chatgptTabs[0] || null;
             }
         }
 
-        if (!tab || !tab.id || !isChatGPTUrl(tab.url)) {
+        if (!tab || !tab.id || !isChatGPTUrl(getTabUrl(tab))) {
             return null;
         }
 
@@ -859,18 +1052,18 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     function showTempStatus(msg) {
-        const prevHTML = statusIndicator.innerHTML;
+        const prevChildren = Array.from(statusIndicator.childNodes).map(node => node.cloneNode(true));
         const prevDisplay = statusIndicator.style.display;
         const prevBg = statusIndicator.style.background;
         const prevColor = statusIndicator.style.color;
 
-        statusIndicator.innerHTML = msg;
+        statusIndicator.textContent = msg;
         statusIndicator.style.display = 'block';
         statusIndicator.style.background = 'var(--status-bg)';
         statusIndicator.style.color = 'var(--status-text)';
 
         setTimeout(() => {
-            statusIndicator.innerHTML = prevHTML;
+            statusIndicator.replaceChildren(...prevChildren.map(node => node.cloneNode(true)));
             statusIndicator.style.background = prevBg;
             statusIndicator.style.color = prevColor;
             statusIndicator.style.display = prevDisplay;
@@ -1059,7 +1252,7 @@ document.addEventListener('DOMContentLoaded', function () {
             if (runningCount === 0) {
                 stopAutomationButton.style.display = 'none';
                 statusIndicator.style.display = 'none';
-                statusIndicator.innerHTML = '<i class="fas fa-sync fa-spin"></i> Automation running...';
+                setStatusIndicatorContent('Automation running...');
                 setSendSequenceButtonMode(false);
                 return;
             }
@@ -1073,17 +1266,17 @@ document.addEventListener('DOMContentLoaded', function () {
                 setSendSequenceButtonMode(true);
 
                 if (selectedTabJob.isPaused) {
-                    statusIndicator.innerHTML = `<i class="fas fa-pause-circle"></i> Paused. Remaining: ${selectedTabJob.remaining}`;
+                    setStatusIndicatorContent(`Paused. Remaining: ${selectedTabJob.remaining}`);
                     statusIndicator.style.background = 'var(--disabled-bg)';
                     statusIndicator.style.color = 'var(--disabled-text)';
                 } else {
-                    statusIndicator.innerHTML = `<i class="fas fa-sync fa-spin"></i> Running. Remaining: ${selectedTabJob.remaining}`;
+                    setStatusIndicatorContent(`Running. Remaining: ${selectedTabJob.remaining}`);
                     statusIndicator.style.background = 'var(--status-bg)';
                     statusIndicator.style.color = 'var(--status-text)';
                 }
             } else {
                 setSendSequenceButtonMode(false);
-                statusIndicator.innerHTML = `<i class="fas fa-sync fa-spin"></i> Running on ${runningCount} tab${runningCount === 1 ? '' : 's'}`;
+                setStatusIndicatorContent(`Running on ${runningCount} tab${runningCount === 1 ? '' : 's'}`);
                 statusIndicator.style.background = 'var(--status-bg)';
                 statusIndicator.style.color = 'var(--status-text)';
             }
@@ -1092,13 +1285,18 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     }
 
+    function setStatusIndicatorContent(text) {
+        statusIndicator.replaceChildren();
+        statusIndicator.appendChild(document.createTextNode(text || ''));
+    }
+
     async function getSelectedTabIdForStatus() {
         if (targetTabSelect && targetTabSelect.value && targetTabSelect.value !== 'current') {
             return targetTabSelect.value;
         }
 
         try {
-            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            const tab = await getActiveTab();
             return tab?.id ? String(tab.id) : '';
         } catch (error) {
             return '';
@@ -1109,9 +1307,7 @@ document.addEventListener('DOMContentLoaded', function () {
         const titleMap = {};
 
         try {
-            const tabs1 = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
-            const tabs2 = await chrome.tabs.query({ url: 'https://chat.openai.com/*' });
-            const tabs = [...tabs1, ...tabs2];
+            const tabs = await getAllChatGPTTabs();
 
             tabs.forEach(tab => {
                 if (tab.id) {
@@ -1531,6 +1727,8 @@ The sequence should do the following: `;
             }
 
             try {
+                await ensureOptimizerContentScript(tab.id);
+
                 await sendOptimizerMessage(tab.id, {
                     type: 'UPDATE_CONFIG',
                     config: newConfig
@@ -1552,16 +1750,38 @@ The sequence should do the following: `;
     }
 
     async function sendOptimizerMessage(tabId, message) {
-        return new Promise((resolve, reject) => {
-            chrome.tabs.sendMessage(tabId, message, function (response) {
-                if (chrome.runtime.lastError) {
-                    reject(new Error(chrome.runtime.lastError.message));
-                    return;
-                }
+        return extensionApiPromise(
+            (done) => chrome.tabs.sendMessage(tabId, message, done),
+            () => chrome.tabs.sendMessage(tabId, message)
+        );
+    }
 
-                resolve(response);
-            });
-        });
+    async function ensureOptimizerContentScript(tabId) {
+        try {
+            return await sendOptimizerMessage(tabId, { type: 'GET_STATUS' });
+        } catch (initialError) {
+            try {
+                await insertCSS({
+                    target: { tabId },
+                    files: ['styles.css']
+                }).catch(() => {});
+
+                await executeScript({
+                    target: { tabId },
+                    files: ['content.js']
+                });
+
+                await sleep(250);
+            } catch (injectError) {
+                throw new Error(`Could not inject optimizer into this ChatGPT tab: ${injectError.message || String(injectError)}`);
+            }
+        }
+
+        try {
+            return await sendOptimizerMessage(tabId, { type: 'GET_STATUS' });
+        } catch (error) {
+            throw new Error(`Optimizer is still unavailable after injection: ${error.message || String(error)}`);
+        }
     }
 
     async function refreshOptimizerStatus() {
@@ -1586,20 +1806,13 @@ The sequence should do the following: `;
         }
 
         try {
-            const response = await sendOptimizerMessage(tab.id, { type: 'GET_STATUS' });
+            const response = await ensureOptimizerContentScript(tab.id);
 
             if (response && response.enabled) {
                 setOptimizerStatus('Optimizer Active', 'enabled');
                 optimizerToggle.textContent = 'Disable';
 
-                optimizerStats.innerHTML =
-                    `<strong>Stats:</strong><br>` +
-                    `Target: ${cleanTabTitle(tab.title)}<br>` +
-                    `Total messages: ${response.messageCount}<br>` +
-                    `Hidden: ${response.hiddenCount}<br>` +
-                    `Visible: ${response.visibleCount}<br>` +
-                    `Container: ${response.debugInfo?.containerFound ? 'Found' : 'Missing'}<br>` +
-                    `Initialized: ${response.debugInfo?.initialized ? 'Yes' : 'No'}`;
+                renderOptimizerStats(tab, response);
 
                 optimizerStats.style.display = 'block';
             } else {
@@ -1621,6 +1834,29 @@ The sequence should do the following: `;
         }
     }
 
+    function renderOptimizerStats(tab, response) {
+        optimizerStats.replaceChildren();
+
+        const label = document.createElement('strong');
+        label.textContent = 'Stats:';
+
+        const lines = [
+            `Target: ${cleanTabTitle(tab.title)}`,
+            `Total messages: ${response.messageCount}`,
+            `Hidden: ${response.hiddenCount}`,
+            `Visible: ${response.visibleCount}`,
+            `Container: ${response.debugInfo?.containerFound ? 'Found' : 'Missing'}`,
+            `Initialized: ${response.debugInfo?.initialized ? 'Yes' : 'No'}`
+        ];
+
+        optimizerStats.appendChild(label);
+
+        lines.forEach((line) => {
+            optimizerStats.appendChild(document.createElement('br'));
+            optimizerStats.appendChild(document.createTextNode(line));
+        });
+    }
+
     if (optimizerToggle) {
         optimizerToggle.addEventListener('click', async function () {
             const tab = await getOptimizerTargetTab();
@@ -1634,6 +1870,8 @@ The sequence should do the following: `;
             }
 
             try {
+                await ensureOptimizerContentScript(tab.id);
+
                 const response = await sendOptimizerMessage(tab.id, {
                     type: 'TOGGLE_OPTIMIZER'
                 });

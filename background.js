@@ -9,6 +9,7 @@ const QUEUE_SETTINGS_DEFAULTS = {
 const UNLIMITED_RETRY_DELAY_MS = 15000;
 const QUEUE_WAKE_ALARM_NAME = 'queue-wake';
 const QUEUE_WAKE_ALARM_PERIOD_MINUTES = 0.5;
+const CHATGPT_HOSTS = new Set(['chatgpt.com', 'chat.openai.com']);
 
 let queueLogWrite = Promise.resolve();
 
@@ -64,30 +65,28 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return false;
 });
 
+if (chrome.browserAction && chrome.browserAction.onClicked) {
+    chrome.browserAction.onClicked.addListener(() => {
+        openExtensionPopupPage().catch((error) => {
+            console.warn('Could not open extension page:', error);
+        });
+    });
+}
+
 chrome.commands.onCommand.addListener(async (command) => {
     if (command !== 'toggle-optimizer') return;
 
     try {
-        const [tab] = await chrome.tabs.query({
-            active: true,
-            currentWindow: true
-        });
+        const tab = await getActiveTab();
 
         if (!tab || !tab.id || !isChatGPTUrl(tab.url)) {
             return;
         }
 
-        chrome.tabs.sendMessage(
-            tab.id,
-            {
-                type: 'TOGGLE_OPTIMIZER',
-                source: 'keyboard'
-            },
-            () => {
-                // Ignore if content script is not ready.
-                void chrome.runtime.lastError;
-            }
-        );
+        await sendTabMessage(tab.id, {
+            type: 'TOGGLE_OPTIMIZER',
+            source: 'keyboard'
+        }).catch(() => {});
     } catch (error) {
         console.warn('Could not toggle optimizer:', error);
     }
@@ -1004,7 +1003,7 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
 
 async function sendPromptToSpecificTab(tabId, text) {
     try {
-        const results = await chrome.scripting.executeScript({
+        const results = await executeScript({
             target: { tabId },
             func: async (msg) => {
                 function sleepInPage(ms) {
@@ -1223,7 +1222,7 @@ async function waitForTabResponse(tabId, context = {}) {
             }
 
             try {
-                chrome.scripting.executeScript({
+                executeScript({
                     target: { tabId },
                     func: () => {
                         const buttons = Array.from(document.querySelectorAll('button'));
@@ -1319,17 +1318,18 @@ async function waitForTabResponse(tabId, context = {}) {
                             title: document.title
                         };
                 }
-                }, (results) => {
-                if (chrome.runtime.lastError) {
+                }, (results, executionError) => {
+                if (executionError) {
                     clearInterval(checkInterval);
                     resolve({
                         ok: false,
-                        error: chrome.runtime.lastError.message || 'Could not read ChatGPT tab.',
+                        error: executionError.message || 'Could not read ChatGPT tab.',
                         details: {
                             elapsedMs: Date.now() - startedAt,
                             sawGenerating,
                             sawDeepResearch,
-                            settings: queueSettings
+                            settings: queueSettings,
+                            error: serializeError(executionError)
                         }
                     });
                     return;
@@ -1727,6 +1727,153 @@ function readSyncStorage(defaults) {
     });
 }
 
+function extensionApiPromise(callWithCallback, callWithoutCallback) {
+    return new Promise((resolve, reject) => {
+        let settled = false;
+
+        const settleResolve = (value) => {
+            if (settled) return;
+            settled = true;
+            resolve(value);
+        };
+
+        const settleReject = (error) => {
+            if (settled) return;
+            settled = true;
+            reject(error instanceof Error ? error : new Error(String(error || 'Extension API call failed.')));
+        };
+
+        const finishFromCallback = (value) => {
+            if (settled) return;
+
+            const lastError = chrome.runtime.lastError;
+
+            if (lastError) {
+                settleReject(new Error(lastError.message || 'Extension API call failed.'));
+                return;
+            }
+
+            settleResolve(value);
+        };
+
+        let maybePromise;
+
+        try {
+            maybePromise = callWithCallback(finishFromCallback);
+        } catch (callbackError) {
+            if (!callWithoutCallback) {
+                settleReject(callbackError);
+                return;
+            }
+
+            try {
+                maybePromise = callWithoutCallback();
+            } catch (promiseError) {
+                settleReject(promiseError);
+                return;
+            }
+        }
+
+        if (maybePromise && typeof maybePromise.then === 'function') {
+            maybePromise.then(settleResolve, settleReject);
+        }
+    });
+}
+
+function queryTabs(queryInfo) {
+    return extensionApiPromise(
+        (done) => chrome.tabs.query(queryInfo, done),
+        () => chrome.tabs.query(queryInfo)
+    ).then((tabs) => Array.isArray(tabs) ? tabs : []);
+}
+
+async function getActiveTab() {
+    const queries = [
+        { active: true, currentWindow: true },
+        { active: true, lastFocusedWindow: true },
+        { active: true }
+    ];
+
+    for (const queryInfo of queries) {
+        try {
+            const tabs = await queryTabs(queryInfo);
+
+            if (tabs[0]) {
+                return tabs[0];
+            }
+        } catch (error) {
+            // Try the next active-tab query shape.
+        }
+    }
+
+    return null;
+}
+
+function sendTabMessage(tabId, message) {
+    return extensionApiPromise(
+        (done) => chrome.tabs.sendMessage(tabId, message, done),
+        () => chrome.tabs.sendMessage(tabId, message)
+    );
+}
+
+function createTab(createProperties) {
+    return extensionApiPromise(
+        (done) => chrome.tabs.create(createProperties, done),
+        () => chrome.tabs.create(createProperties)
+    );
+}
+
+async function openExtensionPopupPage() {
+    await createTab({
+        url: chrome.runtime.getURL('popup.html'),
+        active: true
+    });
+}
+
+function executeScript(details, callback) {
+    const promise = extensionApiPromise(
+        (done) => {
+            if (chrome.scripting && chrome.scripting.executeScript) {
+                return chrome.scripting.executeScript(details, done);
+            }
+
+            if (chrome.tabs && chrome.tabs.executeScript) {
+                const tabId = details?.target?.tabId;
+                const legacyDetails = {};
+
+                if (Array.isArray(details.files) && details.files[0]) {
+                    legacyDetails.file = details.files[0];
+                } else if (details.func) {
+                    legacyDetails.code = `(${details.func}).apply(null, ${JSON.stringify(details.args || [])});`;
+                } else {
+                    throw new Error('No script file or function was provided.');
+                }
+
+                return chrome.tabs.executeScript(tabId, legacyDetails, done);
+            }
+
+            throw new Error('Script injection is not available in this browser.');
+        },
+        () => {
+            if (!chrome.scripting || !chrome.scripting.executeScript) {
+                throw new Error('Script injection is not available in this browser.');
+            }
+
+            return chrome.scripting.executeScript(details);
+        }
+    );
+
+    if (typeof callback === 'function') {
+        promise.then(
+            (results) => callback(results, null),
+            (error) => callback(null, error)
+        );
+        return undefined;
+    }
+
+    return promise;
+}
+
 function sanitizeLogValue(value, depth = 0) {
     if (value === null || value === undefined) {
         return value;
@@ -1788,8 +1935,17 @@ function createRunId() {
 }
 
 function isChatGPTUrl(url) {
-    return typeof url === 'string' &&
-        (url.startsWith('https://chatgpt.com/') || url.startsWith('https://chat.openai.com/'));
+    if (typeof url !== 'string') {
+        return false;
+    }
+
+    try {
+        const parsed = new URL(url);
+
+        return parsed.protocol === 'https:' && CHATGPT_HOSTS.has(parsed.hostname.toLowerCase());
+    } catch (error) {
+        return false;
+    }
 }
 
 function previewText(text, maxLength = 70) {

@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ChatGPT Queue + Optimizer</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.1.1/css/all.min.css">
     <style>
         :root {
             color-scheme: light dark;
@@ -138,6 +137,12 @@
             width: 38px;
             margin-left: auto;
             padding: 8px 0;
+        }
+
+        .settings-glyph {
+            display: inline-block;
+            font-size: 16px;
+            line-height: 1;
         }
 
         .tool-tab:hover {
@@ -775,13 +780,13 @@
             <button id="queue-tool-tab" class="tool-tab active">Queue Tool</button>
             <button id="optimizer-tool-tab" class="tool-tab">Optimizer Tool</button>
             <button id="settings-tool-tab" class="tool-tab settings-tool-tab" title="Settings" aria-label="Settings">
-                <i class="fas fa-cog" aria-hidden="true"></i>
+                <span class="settings-glyph" aria-hidden="true">&#9881;</span>
             </button>
         </div>
 
         <div id="queue-tool-panel" class="tool-panel active">
             <div id="status-indicator">
-                <i class="fas fa-sync fa-spin"></i> Automation running...
+                Automation running...
             </div>
 
             <div class="form-group">

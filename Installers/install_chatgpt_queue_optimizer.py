@@ -95,16 +95,17 @@ def copy_source(repo_dir, target_dir):
 def build_firefox_source(repo_dir, target_dir):
     copy_source(repo_dir, target_dir)
     base = json.loads((repo_dir / "manifest.json").read_text())
+    browser_action = dict(base["action"])
     manifest = {
         "manifest_version": 2,
         "name": base["name"],
         "description": base["description"],
         "version": base["version"],
         "offline_enabled": base.get("offline_enabled", True),
-        "browser_action": base["action"],
+        "browser_action": browser_action,
         "background": {
             "scripts": ["background.js"],
-            "persistent": False,
+            "persistent": True,
         },
         "options_ui": {
             "page": "options.html",
@@ -114,11 +115,24 @@ def build_firefox_source(repo_dir, target_dir):
         "content_scripts": base.get("content_scripts", []),
         "permissions": sorted(set(base.get("permissions", []) + base.get("host_permissions", []))),
         "icons": base.get("icons", {}),
-        "web_accessible_resources": ["icon_16.png", "icon_48.png", "icon_128.png"],
+        "web_accessible_resources": [
+            "icon_16.png",
+            "icon_48.png",
+            "icon_128.png",
+            "popup.html",
+            "popup.js",
+            "styles.css",
+        ],
         "browser_specific_settings": {
             "gecko": {
                 "id": ADDON_ID,
-                "strict_min_version": "78.0",
+                "strict_min_version": "140.0",
+                "data_collection_permissions": {
+                    "required": ["none"],
+                },
+            },
+            "gecko_android": {
+                "strict_min_version": "142.0",
             }
         },
     }
@@ -158,11 +172,22 @@ def chrome_candidates():
 
 def firefox_candidates():
     if platform.system() == "Darwin":
-        return ["/Applications/Firefox.app/Contents/MacOS/firefox"]
+        return [
+            "/Applications/Firefox Developer Edition.app/Contents/MacOS/firefox",
+            Path.home() / "Applications/Firefox Developer Edition.app/Contents/MacOS/firefox",
+            "/Applications/Firefox.app/Contents/MacOS/firefox",
+            Path.home() / "Applications/Firefox.app/Contents/MacOS/firefox",
+        ]
     if platform.system() == "Windows":
         roots = [os.environ.get("PROGRAMFILES"), os.environ.get("PROGRAMFILES(X86)"), os.environ.get("LOCALAPPDATA")]
-        return [Path(root) / "Mozilla Firefox/firefox.exe" for root in roots if root] + ["firefox.exe"]
-    return ["firefox"]
+        return (
+            [Path(root) / "Firefox Developer Edition/firefox.exe" for root in roots if root] +
+            [Path(root) / "Mozilla Firefox/firefox.exe" for root in roots if root] +
+            [Path(root) / "Programs/Firefox Developer Edition/firefox.exe" for root in roots if root] +
+            [Path(root) / "Programs/Mozilla Firefox/firefox.exe" for root in roots if root] +
+            ["firefox.exe"]
+        )
+    return ["firefox-developer-edition", "firefoxdeveloperedition", "firefox"]
 
 
 def openssl_candidates():
@@ -364,6 +389,52 @@ def firefox_root():
     return Path.home() / ".mozilla/firefox"
 
 
+def firefox_resources_dir():
+    firefox = find_executable(firefox_candidates())
+    if not firefox:
+        return None
+
+    if platform.system() == "Darwin":
+        for parent in firefox.parents:
+            if parent.name == "Contents":
+                return parent / "Resources"
+
+    return firefox.parent
+
+
+def resolve_firefox_profile_path(root, path_text):
+    if not path_text:
+        return None
+
+    path = Path(path_text)
+
+    if not path.is_absolute():
+        path = root / path
+
+    return path
+
+
+def profile_matches_firefox_app(profile_path, resources_dir):
+    if not profile_path or not resources_dir:
+        return False
+
+    compatibility = profile_path / "compatibility.ini"
+    if not compatibility.exists():
+        return False
+
+    parser = configparser.ConfigParser()
+    parser.read(compatibility)
+
+    if not parser.has_section("Compatibility"):
+        return False
+
+    expected = str(resources_dir.resolve())
+    platform_dir = parser.get("Compatibility", "LastPlatformDir", fallback="")
+    app_dir = parser.get("Compatibility", "LastAppDir", fallback="")
+
+    return platform_dir == expected or app_dir.startswith(expected + os.sep)
+
+
 def firefox_profile():
     root = firefox_root()
     profiles_ini = root / "profiles.ini"
@@ -372,27 +443,48 @@ def firefox_profile():
 
     parser = configparser.ConfigParser()
     parser.read(profiles_ini)
-    install_default = None
+    resources_dir = firefox_resources_dir()
+    firefox_path = find_executable(firefox_candidates())
+    prefers_developer = firefox_path and "developer" in str(firefox_path).lower()
+
+    profile_entries = []
+    install_defaults = []
+    candidates = []
+
     for section in parser.sections():
         if section.startswith("Install") and parser.has_option(section, "Default"):
-            install_default = parser.get(section, "Default")
-            break
+            install_defaults.append(parser.get(section, "Default"))
 
-    candidates = []
-    if install_default:
-        candidates.append(install_default)
-    for section in parser.sections():
         if section.startswith("Profile"):
             path = parser.get(section, "Path", fallback="")
-            if not install_default and parser.get(section, "Default", fallback="0") == "1":
-                candidates.insert(0, path)
-            else:
-                candidates.append(path)
+            profile_path = resolve_firefox_profile_path(root, path)
+            profile_entries.append({
+                "name": parser.get(section, "Name", fallback=""),
+                "path_text": path,
+                "path": profile_path,
+                "is_default": parser.get(section, "Default", fallback="0") == "1",
+            })
+
+    if resources_dir:
+        candidates.extend(
+            entry["path_text"]
+            for entry in profile_entries
+            if profile_matches_firefox_app(entry["path"], resources_dir)
+        )
+
+    if prefers_developer:
+        candidates.extend(
+            entry["path_text"]
+            for entry in profile_entries
+            if "dev-edition" in entry["name"].lower() or "dev-edition" in entry["path_text"].lower()
+        )
+
+    candidates.extend(install_defaults)
+    candidates.extend(entry["path_text"] for entry in profile_entries if entry["is_default"])
+    candidates.extend(entry["path_text"] for entry in profile_entries)
 
     for path_text in candidates:
-        path = Path(path_text)
-        if not path.is_absolute():
-            path = root / path
+        path = resolve_firefox_profile_path(root, path_text)
         if path.exists():
             return path
     return None
@@ -400,12 +492,32 @@ def firefox_profile():
 
 def firefox_policy_path():
     if platform.system() == "Darwin":
-        return Path("/Applications/Firefox.app/Contents/Resources/distribution/policies.json")
+        firefox = find_executable(firefox_candidates())
+        if firefox:
+            for parent in firefox.parents:
+                if parent.name == "Contents":
+                    return parent / "Resources/distribution/policies.json"
+        return None
     if platform.system() == "Windows":
         firefox = find_executable(firefox_candidates())
         if firefox:
             return firefox.parent / "distribution/policies.json"
     return None
+
+
+def firefox_app_name():
+    if platform.system() != "Darwin":
+        return None
+
+    firefox = find_executable(firefox_candidates())
+    if not firefox:
+        return "Firefox"
+
+    for parent in firefox.parents:
+        if parent.suffix == ".app":
+            return parent.stem
+
+    return "Firefox"
 
 
 def install_firefox_persistent(xpi_path):
@@ -444,9 +556,10 @@ def install_firefox_persistent(xpi_path):
 
 def restart_firefox():
     if platform.system() == "Darwin":
-        run(["osascript", "-e", 'tell application "Firefox" to quit'], capture=True)
+        app_name = firefox_app_name() or "Firefox"
+        run(["osascript", "-e", f'tell application "{app_name}" to quit'], capture=True)
         time.sleep(3)
-        run(["open", "-a", "Firefox"], capture=True)
+        run(["open", "-a", app_name], capture=True)
         time.sleep(10)
     elif platform.system() == "Windows":
         run(["taskkill", "/IM", "firefox.exe", "/F"], capture=True)
@@ -484,7 +597,8 @@ def start_firefox_temporary_loader(firefox_src, logs_dir):
         return False
 
     if platform.system() == "Darwin":
-        run(["osascript", "-e", 'tell application "Firefox" to quit'], capture=True)
+        app_name = firefox_app_name() or "Firefox"
+        run(["osascript", "-e", f'tell application "{app_name}" to quit'], capture=True)
         time.sleep(3)
     elif platform.system() == "Windows":
         run(["taskkill", "/IM", "firefox.exe", "/F"], capture=True)
@@ -590,7 +704,9 @@ def main():
         if not args.no_restart:
             restart_firefox()
         if not verify_firefox_persistent():
-            if args.no_temporary_loader:
+            if args.no_restart:
+                log("Firefox extension files were installed. Restart Firefox to activate and verify them.")
+            elif args.no_temporary_loader:
                 failures.append("Firefox release did not accept the unsigned persistent XPI.")
             else:
                 log("Firefox release did not accept persistent unsigned install; starting web-ext temporary loader.")

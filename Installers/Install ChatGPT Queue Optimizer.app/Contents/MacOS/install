@@ -113,6 +113,32 @@ ensure_cask_app() {
   return 0
 }
 
+ensure_firefox() {
+  if app_exists "Firefox Developer Edition.app"; then
+    log "Firefox Developer Edition.app found."
+    return 0
+  fi
+
+  if app_exists "Firefox.app"; then
+    log "Firefox.app found."
+    return 0
+  fi
+
+  if ensure_homebrew_available; then
+    log "Firefox was not found. Installing firefox with Homebrew."
+    brew install --cask firefox >> "$LOG_FILE" 2>&1 || true
+  fi
+
+  if app_exists "Firefox.app"; then
+    log "Firefox.app installed."
+    return 0
+  fi
+
+  log "Firefox was not found; that browser may be skipped."
+  add_help_link "Install Firefox" "https://www.mozilla.org/firefox/mac/"
+  return 0
+}
+
 ensure_node() {
   load_brew_shellenv
   if command -v npm >/dev/null 2>&1; then
@@ -140,7 +166,7 @@ run_install() {
   log "Installing ChatGPT Queue Optimizer from $REPO_ROOT."
   ensure_python || return 1
   ensure_cask_app "Google Chrome.app" "google-chrome" "https://www.google.com/chrome/"
-  ensure_cask_app "Firefox.app" "firefox" "https://www.mozilla.org/firefox/mac/"
+  ensure_firefox
   ensure_node
 
   "$PYTHON_BIN" "$PYTHON_SCRIPT" --repo-dir "$REPO_ROOT" "$@" >> "$LOG_FILE" 2>&1
