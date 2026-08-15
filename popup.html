@@ -777,9 +777,9 @@
         <div class="title">ChatGPT Queue + Optimizer</div>
 
         <div class="tool-tabs">
-            <button id="queue-tool-tab" class="tool-tab active">Queue Tool</button>
-            <button id="optimizer-tool-tab" class="tool-tab">Optimizer Tool</button>
-            <button id="settings-tool-tab" class="tool-tab settings-tool-tab" title="Settings" aria-label="Settings">
+            <button type="button" id="queue-tool-tab" class="tool-tab active">Queue Tool</button>
+            <button type="button" id="optimizer-tool-tab" class="tool-tab">Optimizer Tool</button>
+            <button type="button" id="settings-tool-tab" class="tool-tab settings-tool-tab" title="Settings" aria-label="Settings">
                 <span class="settings-glyph" aria-hidden="true">&#9881;</span>
             </button>
         </div>
@@ -799,21 +799,21 @@
                             <select id="target-tab-select">
                                 <option value="current">Current ChatGPT tab</option>
                             </select>
-                            <button id="refresh-target-tabs">Refresh</button>
+                            <button type="button" id="refresh-target-tabs">Refresh</button>
                         </div>
                     </div>
 
                     <div class="queue-control-section">
                         <div class="instances-header">
                             <span>Running instances</span>
-                            <button id="refresh-instances">Refresh</button>
+                            <button type="button" id="refresh-instances">Refresh</button>
                         </div>
 
                         <div id="running-instances-list" class="instances-list">
                             <div class="instance-empty">No running instances</div>
                         </div>
 
-                        <button id="stop-all-instances">Stop all instances</button>
+                        <button type="button" id="stop-all-instances">Stop all instances</button>
                     </div>
 
                 </div>
@@ -827,7 +827,7 @@
                     <div class="input-group">
                         <textarea id="new-message" placeholder="Type a sequence message, then press +"></textarea>
                         <div class="button-stack">
-                            <button id="add-message" class="add-message-btn">+</button>
+                            <button type="button" id="add-message" class="add-message-btn">+</button>
                         </div>
                     </div>
                 </div>
@@ -836,8 +836,8 @@
                     <div id="messages-container">
                         <div id="messages-list"></div>
                         <div class="button-group">
-                            <button id="save-sequence" class="save-sequence-btn">Save Sequence</button>
-                            <button id="clear-messages" class="clear-messages-btn">Clear Messages</button>
+                            <button type="button" id="save-sequence" class="save-sequence-btn">Save Sequence</button>
+                            <button type="button" id="clear-messages" class="clear-messages-btn">Clear Messages</button>
                         </div>
                     </div>
                 </div>
@@ -847,10 +847,11 @@
 
             <div class="form-group">
                 <div class="dropdown-container">
+                    <label for="sequence-dropdown">Saved sequence:</label>
                     <select id="sequence-dropdown">
                         <option value="" disabled selected>Save a sequence first</option>
                     </select>
-                    <button id="delete-sequence" class="delete-sequence-btn">&times;</button>
+                    <button type="button" id="delete-sequence" class="delete-sequence-btn">&times;</button>
                 </div>
             </div>
 
@@ -861,15 +862,15 @@
 
             <div class="form-group">
                 <div class="prompt-button-group">
-                    <button id="copy-sequence-prompt">Copy prompt for making a sequence</button>
-                    <button id="import-prompt-output">Import prompt output</button>
+                    <button type="button" id="copy-sequence-prompt">Copy prompt for making a sequence</button>
+                    <button type="button" id="import-prompt-output">Import prompt output</button>
                 </div>
             </div>
 
             <div class="form-group">
-                <button id="send-messages">Send Sequence</button>
-                <button id="enqueue-message">Send message next</button>
-                <button id="stop-automation">Stop Automation</button>
+                <button type="button" id="send-messages">Send Sequence</button>
+                <button type="button" id="enqueue-message">Send message next</button>
+                <button type="button" id="stop-automation">Stop Automation</button>
             </div>
 
             <div id="messages-to-go-footer">0 messages to go...</div>
@@ -896,9 +897,9 @@
                         <div class="queue-log-header">
                             <span>Automation log</span>
                             <div class="queue-log-actions">
-                                <button id="refresh-queue-log">Refresh</button>
-                                <button id="copy-queue-log">Copy</button>
-                                <button id="clear-queue-log">Clear</button>
+                                <button type="button" id="refresh-queue-log">Refresh</button>
+                                <button type="button" id="copy-queue-log">Copy</button>
+                                <button type="button" id="clear-queue-log">Clear</button>
                             </div>
                         </div>
 
@@ -936,7 +937,7 @@
                 <div class="optimizer-autosave-note">Settings auto-save after changes.</div>
 
                 <div class="optimizer-actions optimizer-actions-single">
-                    <button id="optimizer-toggle">Toggle</button>
+                    <button type="button" id="optimizer-toggle">Toggle</button>
                 </div>
 
                 <div id="optimizer-stats" class="optimizer-stats" style="display: none;"></div>
