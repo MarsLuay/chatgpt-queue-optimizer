@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "projectKey": "chatgpt-queue-optimizer",
+  "tasks": [
+    {
+      "id": "project-memory-contract",
+      "title": "Maintain canonical project memory contract",
+      "status": "done",
+      "notes": "Contract, route, task ledger, and memory pages are reconciled from the current checkout."
+    }
+  ],
+  "projectId": "chatgpt-queue-optimizer"
+}

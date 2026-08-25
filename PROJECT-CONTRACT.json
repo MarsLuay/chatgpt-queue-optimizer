@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "contractId": "chatgpt-queue-optimizer-context-v1",
+  "sourceOfTruth": "README.md",
+  "instructionFiles": [],
+  "taskLedger": {
+    "path": "PROJECT-TASKS.md",
+    "section": "Project task ledger"
+  },
+  "projectMemory": {
+    "taskPath": "PROJECT-TASKS.json",
+    "candidatePath": null,
+    "verifiedPath": null,
+    "humanReadablePaths": [
+      "project-memory/architecture.md",
+      "project-memory/decisions.md",
+      "project-memory/quirks.md",
+      "project-memory/known-failures.md"
+    ]
+  },
+  "privacy": {
+    "forbiddenPatterns": [
+      "absolute filesystem paths",
+      "credential-like assignments",
+      "runtime or generated state"
+    ]
+  },
+  "contextBudget": {
+    "maxTokens": 1600
+  },
+  "routes": [
+    {
+      "id": "project-memory",
+      "path": "context/routes/project-memory.json"
+    }
+  ],
+  "project": {
+    "key": "chatgpt-queue-optimizer"
+  }
+}
