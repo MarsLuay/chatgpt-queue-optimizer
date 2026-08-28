@@ -4,11 +4,11 @@
   "sourceOfTruth": "README.md",
   "instructionFiles": [],
   "taskLedger": {
-    "path": "PROJECT-TASKS.md",
+    "path": "docs/project-memory/PROJECT-TASKS.md",
     "section": "Project task ledger"
   },
   "projectMemory": {
-    "taskPath": "PROJECT-TASKS.json",
+    "taskPath": "docs/project-memory/PROJECT-TASKS.json",
     "candidatePath": null,
     "verifiedPath": null,
     "humanReadablePaths": [
