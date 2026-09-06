@@ -1238,139 +1238,43 @@ async function waitForTabResponse(tabId, context = {}) {
             }
 
             try {
-                executeScript({
-                    target: { tabId },
-                    func: () => {
-                        const buttons = Array.from(document.querySelectorAll('button'));
-                        const stopButton =
-                            document.querySelector('button[data-testid="stop-button"]') ||
-                            document.querySelector('[aria-label="Stop generating"]') ||
-                            document.querySelector('button[aria-label="Stop streaming"]') ||
-                            buttons.find(button => {
-                                const label = (
-                                    button.getAttribute('aria-label') ||
-                                    button.innerText ||
-                                    button.textContent ||
-                                    ''
-                                ).toLowerCase();
+                sendTabMessage(tabId, { type: 'CHECK_GENERATION_STATUS' })
+                    .then((state) => {
+                        if (settled) {
+                            return;
+                        }
 
-                                return (
-                                    label.includes('stop generating') ||
-                                    label.includes('stop streaming') ||
-                                    label.includes('stop response') ||
-                                    label.includes('interrupt')
-                                );
+                        if (!state) {
+                            clearInterval(checkInterval);
+                            resolve({
+                                ok: false,
+                                error: 'Could not read ChatGPT tab.',
+                                details: {
+                                    elapsedMs: Date.now() - startedAt,
+                                    sawGenerating,
+                                    sawDeepResearch,
+                                    settings: queueSettings
+                                }
                             });
-
-                        const resultStreaming =
-                            document.querySelector('.result-streaming') ||
-                            document.querySelector('[data-testid*="conversation-turn"] .result-streaming') ||
-                            document.querySelector('[data-message-streaming="true"]') ||
-                            document.querySelector('[data-testid*="streaming"]');
-
-                        const bodyText = document.body ? document.body.innerText : '';
-                        const pageText = bodyText.toLowerCase();
-                        const errorMarkers = [
-                            'something went wrong',
-                            'there was an error',
-                            'error generating a response',
-                            'network error',
-                            'failed to generate',
-                            'try again later'
-                        ];
-                        const matchedError = errorMarkers.find(marker => pageText.includes(marker)) || '';
-                        const matchedErrorIndex = matchedError ? pageText.indexOf(matchedError) : -1;
-                        const errorSnippet = matchedErrorIndex >= 0
-                            ? bodyText
-                                .slice(Math.max(0, matchedErrorIndex - 120), matchedErrorIndex + 260)
-                                .replace(/\s+/g, ' ')
-                                .trim()
-                            : '';
-
-                        const hasKnownError = !!matchedError;
-                        const hasTryAgainButton = buttons.some(btn => {
-                            const text = (btn.innerText || btn.getAttribute('aria-label') || '').toLowerCase().trim();
-                            return text === 'retry' || text === 'try again';
-                        });
-
-                        const statusText = Array.from(document.querySelectorAll(
-                            '[role="status"], [aria-live], [data-testid*="status"], [data-testid*="progress"], [data-testid*="research"]'
-                        ))
-                            .map(node => node.innerText || node.textContent || '')
-                            .join(' ')
-                            .replace(/\s+/g, ' ')
-                            .trim()
-                            .slice(0, 1200);
-                        const researchText = `${statusText} ${buttons.map(btn => btn.innerText || btn.getAttribute('aria-label') || '').join(' ')}`.toLowerCase();
-                        const researchProgressMarkers = [
-                            'deep research',
-                            'researching',
-                            'searching the web',
-                            'searching sources',
-                            'reading sources',
-                            'analyzing sources',
-                            'gathering sources',
-                            'checking sources',
-                            'synthesizing',
-                            'creating report',
-                            'writing report'
-                        ];
-                        const matchedResearchMarker =
-                            researchProgressMarkers.find(marker => researchText.includes(marker)) ||
-                            researchProgressMarkers.find(marker => pageText.includes(marker)) ||
-                            '';
-                        const deepResearchActive = !!matchedResearchMarker && !!(stopButton || resultStreaming);
-
-                        return {
-                            generating: !!(stopButton || resultStreaming),
-                            deepResearchActive,
-                            matchedResearchMarker,
-                            researchStatusPreview: statusText,
-                            hasError: !!hasKnownError,
-                            hasTryAgainButton: !!hasTryAgainButton,
-                            errorSnippet,
-                            matchedError,
-                            url: location.href,
-                            title: document.title
-                        };
-                }
-                }, (results, executionError) => {
-                if (settled) {
-                    return;
-                }
-                if (executionError) {
-                    clearInterval(checkInterval);
-                    resolve({
-                        ok: false,
-                        error: executionError.message || 'Could not read ChatGPT tab.',
-                        details: {
-                            elapsedMs: Date.now() - startedAt,
-                            sawGenerating,
-                            sawDeepResearch,
-                            settings: queueSettings,
-                            error: serializeError(executionError)
+                            return;
                         }
-                    });
-                    return;
-                }
 
-                const state = results?.[0]?.result || {};
-
-                if (state.hasError || state.hasTryAgainButton) {
-                    clearInterval(checkInterval);
-                    resolve({
-                        ok: false,
-                        error: 'ChatGPT showed an error or retry state.',
-                        details: {
-                            elapsedMs: Date.now() - startedAt,
-                            sawGenerating,
-                            sawDeepResearch,
-                            settings: queueSettings,
-                            state
+                        if (state.hasError || state.hasTryAgainButton) {
+                            clearInterval(checkInterval);
+                            resolve({
+                                ok: false,
+                                error: 'ChatGPT showed an error or retry state.',
+                                details: {
+                                    elapsedMs: Date.now() - startedAt,
+                                    sawGenerating,
+                                    sawDeepResearch,
+                                    settings: queueSettings,
+                                    state
+                                }
+                            });
+                            return;
                         }
-                    });
-                    return;
-                }
+
 
                 const deepResearchActive = queueSettings.queueDeepResearchAware && !!state.deepResearchActive;
 
@@ -1485,7 +1389,24 @@ async function waitForTabResponse(tabId, context = {}) {
                     });
                     lastProgressLogAt = Date.now();
                 }
-                });
+                    })
+                    .catch((error) => {
+                        if (settled) {
+                            return;
+                        }
+                        clearInterval(checkInterval);
+                        resolve({
+                            ok: false,
+                            error: error?.message || 'Could not read ChatGPT tab.',
+                            details: {
+                                elapsedMs: Date.now() - startedAt,
+                                sawGenerating,
+                                sawDeepResearch,
+                                settings: queueSettings,
+                                error: serializeError(error)
+                            }
+                        });
+                    });
             } catch (error) {
                 clearInterval(checkInterval);
                 resolve({
