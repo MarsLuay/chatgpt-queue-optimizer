@@ -492,27 +492,26 @@
 
       const collected = [];
 
-      for (const selector of fallbackSelectors) {
-        try {
-          const nodes = Array.from(document.querySelectorAll(selector));
+      try {
+        const combinedSelector = fallbackSelectors.join(', ');
+        const nodes = Array.from(document.querySelectorAll(combinedSelector));
 
-          for (const node of nodes) {
-            if (!mainRoot.contains(node)) continue;
-            if (node.closest('#cpo-root')) continue;
-            if (node.id && node.id.includes('thread-bottom')) continue;
-            if (node.querySelector('textarea, input[type="text"], form')) continue;
+        for (const node of nodes) {
+          if (!mainRoot.contains(node)) continue;
+          if (node.closest('#cpo-root')) continue;
+          if (node.id && node.id.includes('thread-bottom')) continue;
+          if (node.querySelector('textarea, input[type="text"], form')) continue;
 
-            const text = node.textContent.trim();
-            if (text.length < 15) continue;
+          const text = node.textContent.trim();
+          if (text.length < 15) continue;
 
-            const normalized = this.normalizeMessageNode(node, mainRoot);
-            if (normalized && this.isValidFallbackNode(normalized, mainRoot)) {
-              collected.push(normalized);
-            }
+          const normalized = this.normalizeMessageNode(node, mainRoot);
+          if (normalized && this.isValidFallbackNode(normalized, mainRoot)) {
+            collected.push(normalized);
           }
-        } catch {
-          // Try the next fallback selector.
         }
+      } catch (e) {
+        console.warn('CPO: Fallback querySelectorAll failed', e);
       }
 
       const result = this.sortMessagesByPosition(this.removeDuplicates(collected));
