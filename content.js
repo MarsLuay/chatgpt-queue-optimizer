@@ -110,20 +110,22 @@
         case 'DEBUG_MESSAGES': {
           const debugMessages = this.getMessageNodes();
 
-          console.log('CPO Debug: Found messages:', debugMessages.length);
-          console.log('CPO Debug Selectors:');
-          console.log('- [data-testid^="conversation-turn"]:', document.querySelectorAll('[data-testid^="conversation-turn"]').length);
-          console.log('- [data-testid*="conversation-turn"]:', document.querySelectorAll('[data-testid*="conversation-turn"]').length);
-          console.log('- article:', document.querySelectorAll('article').length);
-          console.log('- [data-message-author-role]:', document.querySelectorAll('[data-message-author-role]').length);
-          console.log('- [data-message-id]:', document.querySelectorAll('[data-message-id]').length);
-          console.log('- main:', document.querySelectorAll('main').length);
+          if (this.config.debug) {
+            console.log('CPO Debug: Found messages:', debugMessages.length);
+            console.log('CPO Debug Selectors:');
+            console.log('- [data-testid^="conversation-turn"]:', document.querySelectorAll('[data-testid^="conversation-turn"]').length);
+            console.log('- [data-testid*="conversation-turn"]:', document.querySelectorAll('[data-testid*="conversation-turn"]').length);
+            console.log('- article:', document.querySelectorAll('article').length);
+            console.log('- [data-message-author-role]:', document.querySelectorAll('[data-message-author-role]').length);
+            console.log('- [data-message-id]:', document.querySelectorAll('[data-message-id]').length);
+            console.log('- main:', document.querySelectorAll('main').length);
 
-          debugMessages.forEach((msg, i) => {
-            if (i < 10) {
-              console.log(`CPO Debug Message ${i + 1}:`, msg, 'Text preview:', msg.textContent.trim().substring(0, 160));
-            }
-          });
+            debugMessages.forEach((msg, i) => {
+              if (i < 10) {
+                console.log(`CPO Debug Message ${i + 1}:`, msg, 'Text preview:', msg.textContent.trim().substring(0, 160));
+              }
+            });
+          }
 
           sendResponse({ count: debugMessages.length });
           break;
