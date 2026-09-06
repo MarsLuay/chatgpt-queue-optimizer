@@ -388,22 +388,21 @@
         '[data-testid="conversation-turn"]'
       ];
 
-      for (const selector of selectors) {
-        try {
-          const nodes = Array.from(document.querySelectorAll(selector));
+      try {
+        const combinedSelector = selectors.join(',');
+        const nodes = Array.from(document.querySelectorAll(combinedSelector));
 
-          for (const node of nodes) {
-            if (!mainRoot.contains(node)) continue;
+        for (const node of nodes) {
+          if (!mainRoot.contains(node)) continue;
 
-            const normalized = this.normalizeMessageNode(node, mainRoot);
+          const normalized = this.normalizeMessageNode(node, mainRoot);
 
-            if (normalized && this.isValidMessageNode(normalized, mainRoot)) {
-              collected.push(normalized);
-            }
+          if (normalized && this.isValidMessageNode(normalized, mainRoot)) {
+            collected.push(normalized);
           }
-        } catch (error) {
-          console.warn(`CPO: Selector failed: ${selector}`, error);
         }
+      } catch (error) {
+        console.warn(`CPO: Combined selector failed`, error);
       }
 
       let messages = this.sortMessagesByPosition(this.removeDuplicates(collected));
