@@ -1132,7 +1132,7 @@ document.addEventListener('DOMContentLoaded', function () {
     function renderQueueLog(logs) {
         if (!queueLogList) return;
 
-        queueLogList.innerHTML = '';
+        queueLogList.textContent = '';
 
         const recentLogs = (Array.isArray(logs) ? logs : [])
             .slice(-30)
