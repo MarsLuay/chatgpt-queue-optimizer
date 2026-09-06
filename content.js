@@ -129,9 +129,110 @@
           break;
         }
 
+        case 'CHECK_GENERATION_STATUS': {
+          const status = this.checkGenerationStatus();
+          sendResponse(status);
+          break;
+        }
+
         default:
           sendResponse({ error: 'Unknown message type' });
       }
+    }
+
+    checkGenerationStatus() {
+      const buttons = Array.from(document.querySelectorAll('button'));
+      const stopButton =
+        document.querySelector('button[data-testid="stop-button"]') ||
+        document.querySelector('[aria-label="Stop generating"]') ||
+        document.querySelector('button[aria-label="Stop streaming"]') ||
+        buttons.find(button => {
+          const label = (
+            button.getAttribute('aria-label') ||
+            button.innerText ||
+            button.textContent ||
+            ''
+          ).toLowerCase();
+
+          return (
+            label.includes('stop generating') ||
+            label.includes('stop streaming') ||
+            label.includes('stop response') ||
+            label.includes('interrupt')
+          );
+        });
+
+      const resultStreaming =
+        document.querySelector('.result-streaming') ||
+        document.querySelector('[data-testid*="conversation-turn"] .result-streaming') ||
+        document.querySelector('[data-message-streaming="true"]') ||
+        document.querySelector('[data-testid*="streaming"]');
+
+      const bodyText = document.body ? document.body.innerText : '';
+      const pageText = bodyText.toLowerCase();
+      const errorMarkers = [
+        'something went wrong',
+        'there was an error',
+        'error generating a response',
+        'network error',
+        'failed to generate',
+        'try again later'
+      ];
+      const matchedError = errorMarkers.find(marker => pageText.includes(marker)) || '';
+      const matchedErrorIndex = matchedError ? pageText.indexOf(matchedError) : -1;
+      const errorSnippet = matchedErrorIndex >= 0
+        ? bodyText
+          .slice(Math.max(0, matchedErrorIndex - 120), matchedErrorIndex + 260)
+          .replace(/\s+/g, ' ')
+          .trim()
+        : '';
+
+      const hasKnownError = !!matchedError;
+      const hasTryAgainButton = buttons.some(btn => {
+        const text = (btn.innerText || btn.getAttribute('aria-label') || '').toLowerCase().trim();
+        return text === 'retry' || text === 'try again';
+      });
+
+      const statusText = Array.from(document.querySelectorAll(
+        '[role="status"], [aria-live], [data-testid*="status"], [data-testid*="progress"], [data-testid*="research"]'
+      ))
+        .map(node => node.innerText || node.textContent || '')
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 1200);
+      const researchText = `${statusText} ${buttons.map(btn => btn.innerText || btn.getAttribute('aria-label') || '').join(' ')}`.toLowerCase();
+      const researchProgressMarkers = [
+        'deep research',
+        'researching',
+        'searching the web',
+        'searching sources',
+        'reading sources',
+        'analyzing sources',
+        'gathering sources',
+        'checking sources',
+        'synthesizing',
+        'creating report',
+        'writing report'
+      ];
+      const matchedResearchMarker =
+        researchProgressMarkers.find(marker => researchText.includes(marker)) ||
+        researchProgressMarkers.find(marker => pageText.includes(marker)) ||
+        '';
+      const deepResearchActive = !!matchedResearchMarker && !!(stopButton || resultStreaming);
+
+      return {
+        generating: !!(stopButton || resultStreaming),
+        deepResearchActive,
+        matchedResearchMarker,
+        researchStatusPreview: statusText,
+        hasError: !!hasKnownError,
+        hasTryAgainButton: !!hasTryAgainButton,
+        errorSnippet,
+        matchedError,
+        url: location.href,
+        title: document.title
+      };
     }
 
     bootstrap() {
