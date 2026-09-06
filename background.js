@@ -1980,3 +1980,10 @@ function previewText(text, maxLength = 70) {
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
+
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+        serializeError,
+        previewText
+    };
+}

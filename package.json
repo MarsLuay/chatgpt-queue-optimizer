@@ -1,0 +1,28 @@
+{
+  "name": "app",
+  "version": "1.0.0",
+  "description": "Browser extension for ChatGPT prompt queues and optimization controls.",
+  "main": "background.js",
+  "directories": {
+    "doc": "docs",
+    "test": "test"
+  },
+  "scripts": {
+    "test": "jest"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MarsLuay/chatgpt-queue-optimizer.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/MarsLuay/chatgpt-queue-optimizer/issues"
+  },
+  "homepage": "https://github.com/MarsLuay/chatgpt-queue-optimizer#readme",
+  "devDependencies": {
+    "jest": "^30.5.1"
+  }
+}
