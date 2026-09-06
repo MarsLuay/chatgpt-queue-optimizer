@@ -9,7 +9,8 @@ const QUEUE_SETTINGS_DEFAULTS = {
 const UNLIMITED_RETRY_DELAY_MS = 15000;
 const QUEUE_WAKE_ALARM_NAME = 'queue-wake';
 const QUEUE_WAKE_ALARM_PERIOD_MINUTES = 0.5;
-const CHATGPT_HOSTS = new Set(['chatgpt.com', 'chat.openai.com']);
+
+importScripts('utils.js');
 
 let queueLogWrite = Promise.resolve();
 
@@ -1951,20 +1952,6 @@ function serializeError(error) {
 
 function createRunId() {
     return `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
-}
-
-function isChatGPTUrl(url) {
-    if (typeof url !== 'string') {
-        return false;
-    }
-
-    try {
-        const parsed = new URL(url);
-
-        return parsed.protocol === 'https:' && CHATGPT_HOSTS.has(parsed.hostname.toLowerCase());
-    } catch {
-        return false;
-    }
 }
 
 function previewText(text, maxLength = 70) {
