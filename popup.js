@@ -393,7 +393,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
         const previousValue = targetTabSelect.value || 'current';
 
-        targetTabSelect.innerHTML = '';
+        targetTabSelect.textContent = '';
 
         const currentOption = document.createElement('option');
         currentOption.value = 'current';
@@ -797,7 +797,7 @@ document.addEventListener('DOMContentLoaded', function () {
     });
 
     function updateMessagesList() {
-        messageList.innerHTML = '';
+        messageList.textContent = '';
 
         messages.forEach((msg, index) => {
             const div = document.createElement('div');
@@ -878,7 +878,7 @@ document.addEventListener('DOMContentLoaded', function () {
     function updateSequenceDropdown(shouldLoadFirstSequence = true, newSeqName) {
         const names = Object.keys(savedSequences);
 
-        sequenceDropdown.innerHTML = '';
+        sequenceDropdown.textContent = '';
 
         if (names.length === 0) {
             const opt = document.createElement('option');
@@ -1132,7 +1132,7 @@ document.addEventListener('DOMContentLoaded', function () {
     function renderQueueLog(logs) {
         if (!queueLogList) return;
 
-        queueLogList.innerHTML = '';
+        queueLogList.textContent = '';
 
         const recentLogs = (Array.isArray(logs) ? logs : [])
             .slice(-30)
@@ -1327,7 +1327,7 @@ document.addEventListener('DOMContentLoaded', function () {
         const entries = Object.entries(runningJobs || {});
         const titleMap = await getTabTitleMap();
 
-        runningInstancesList.innerHTML = '';
+        runningInstancesList.textContent = '';
 
         if (entries.length === 0) {
             const empty = document.createElement('div');
