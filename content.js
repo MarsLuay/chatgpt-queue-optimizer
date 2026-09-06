@@ -694,14 +694,24 @@
     createMoreBanner() {
       const banner = document.createElement('div');
       banner.className = 'cpo-more-banner';
-      banner.innerHTML = `
-        <div class="cpo-banner-content">
-          <span class="cpo-banner-text">Show older messages</span>
-          <button class="cpo-banner-button" type="button">Load More</button>
-        </div>
-      `;
 
-      banner.querySelector('.cpo-banner-button').addEventListener('click', () => {
+      const bannerContent = document.createElement('div');
+      bannerContent.className = 'cpo-banner-content';
+
+      const bannerText = document.createElement('span');
+      bannerText.className = 'cpo-banner-text';
+      bannerText.textContent = 'Show older messages';
+
+      const bannerButton = document.createElement('button');
+      bannerButton.className = 'cpo-banner-button';
+      bannerButton.type = 'button';
+      bannerButton.textContent = 'Load More';
+
+      bannerContent.appendChild(bannerText);
+      bannerContent.appendChild(bannerButton);
+      banner.appendChild(bannerContent);
+
+      bannerButton.addEventListener('click', () => {
         this.showOlderMessages();
       });
 
