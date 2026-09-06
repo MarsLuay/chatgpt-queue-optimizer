@@ -1063,7 +1063,7 @@ async function sendPromptToSpecificTab(tabId, text) {
                 }
 
                 input.focus();
-                input.innerHTML = '';
+                input.textContent = '';
 
                 const paragraph = document.createElement('p');
                 paragraph.innerText = msg;
