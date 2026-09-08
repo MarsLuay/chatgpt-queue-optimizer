@@ -70,7 +70,6 @@ document.addEventListener('DOMContentLoaded', function () {
     let selectedSequenceName = '';
     let editingSequenceName = '';
     const CHATGPT_URL_PATTERNS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-    const CHATGPT_HOSTS = new Set(['chatgpt.com', 'chat.openai.com']);
 
     function extensionApiPromise(callWithCallback, callWithoutCallback) {
         return new Promise((resolve, reject) => {
@@ -437,20 +436,6 @@ document.addEventListener('DOMContentLoaded', function () {
             .replace(/^ChatGPT\s*[-–]\s*/i, '')
             .replace(/\s*[-–]\s*ChatGPT$/i, '')
             .trim() || 'ChatGPT';
-    }
-
-    function isChatGPTUrl(url) {
-        if (typeof url !== 'string') {
-            return false;
-        }
-
-        try {
-            const parsed = new URL(url);
-
-            return parsed.protocol === 'https:' && CHATGPT_HOSTS.has(parsed.hostname.toLowerCase());
-        } catch {
-            return false;
-        }
     }
 
     if (refreshTargetTabsButton) {
