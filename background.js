@@ -427,82 +427,66 @@ function handleStartSequence(request, sendResponse) {
     sendResponse({ ok: true, tabId });
 }
 
-function handleEnqueueMessage(request, sender, sendResponse) {
-    const tabId = Number(request.tabId || sender?.tab?.id || 0);
-    const message = String(request.message || '').trim();
-    const addToEnd = request.position === 'end';
-    const waitForIdleBeforeStart = request.waitForIdleBeforeStart === true;
-    const source = request.source || 'popup';
-
-    if (!tabId || !message) {
-        logQueueEvent(tabId, 'warn', 'Could not enqueue command: missing tab or message.');
-        sendResponse({ ok: false, error: 'Missing tabId or message.' });
-        return;
+function enqueueToPausedJob(tabId, existingJob, message, addToEnd, source, sendResponse) {
+    if (addToEnd) {
+        existingJob.queue.push(message);
+    } else if (existingJob.queue.length > 0) {
+        existingJob.queue.splice(1, 0, message);
+    } else {
+        existingJob.queue.push(message);
     }
 
-    const existingJob = jobs.get(tabId);
+    existingJob.totalMessages = getTotalMessages(existingJob) + 1;
+    existingJob.updatedAt = Date.now();
+    logQueueEvent(tabId, 'info', 'Added command to paused queue.', {
+        source,
+        totalMessages: getTotalMessages(existingJob),
+        remaining: getRemainingCount(existingJob),
+        messagePreview: previewText(message, 160)
+    });
+    updateRunningJobsStorage();
 
-    if (existingJob && existingJob.isPaused) {
-        if (addToEnd) {
-            existingJob.queue.push(message);
-        } else if (existingJob.queue.length > 0) {
-            existingJob.queue.splice(1, 0, message);
-        } else {
-            existingJob.queue.push(message);
-        }
+    sendResponse({
+        ok: true,
+        queued: true,
+        paused: true,
+        remaining: getRemainingCount(existingJob),
+        message: 'Message added to paused queue. Click Retry to continue.'
+    });
+}
 
-        existingJob.totalMessages = getTotalMessages(existingJob) + 1;
-        existingJob.updatedAt = Date.now();
-        logQueueEvent(tabId, 'info', 'Added command to paused queue.', {
-            source,
-            totalMessages: getTotalMessages(existingJob),
-            remaining: getRemainingCount(existingJob),
-            messagePreview: previewText(message, 160)
-        });
-        updateRunningJobsStorage();
-
-        sendResponse({
-            ok: true,
-            queued: true,
-            paused: true,
-            remaining: getRemainingCount(existingJob),
-            message: 'Message added to paused queue. Click Retry to continue.'
-        });
-        return;
+function enqueueToRunningJob(tabId, existingJob, message, addToEnd, source, sendResponse) {
+    if (addToEnd) {
+        existingJob.queue.push(message);
+    } else {
+        existingJob.queue.unshift(message);
     }
 
-    if (existingJob && existingJob.isRunning) {
-        if (addToEnd) {
-            existingJob.queue.push(message);
-        } else {
-            existingJob.queue.unshift(message);
-        }
+    existingJob.totalMessages = getTotalMessages(existingJob) + 1;
+    existingJob.updatedAt = Date.now();
 
-        existingJob.totalMessages = getTotalMessages(existingJob) + 1;
-        existingJob.updatedAt = Date.now();
+    logQueueEvent(tabId, 'info', 'Added command to run next in active queue.', {
+        source,
+        position: addToEnd ? 'end' : 'next',
+        totalMessages: getTotalMessages(existingJob),
+        remaining: getRemainingCount(existingJob),
+        messagePreview: previewText(message, 160)
+    });
 
-        logQueueEvent(tabId, 'info', 'Added command to run next in active queue.', {
-            source,
-            position: addToEnd ? 'end' : 'next',
-            totalMessages: getTotalMessages(existingJob),
-            remaining: getRemainingCount(existingJob),
-            messagePreview: previewText(message, 160)
-        });
+    updateRunningJobsStorage();
 
-        updateRunningJobsStorage();
+    sendResponse({
+        ok: true,
+        queued: true,
+        started: false,
+        remaining: getRemainingCount(existingJob),
+        message: addToEnd
+            ? 'Message added to the running queue.'
+            : 'Message added next in the running queue.'
+    });
+}
 
-        sendResponse({
-            ok: true,
-            queued: true,
-            started: false,
-            remaining: getRemainingCount(existingJob),
-            message: addToEnd
-                ? 'Message added to the running queue.'
-                : 'Message added next in the running queue.'
-        });
-        return;
-    }
-
+function startNewJobFromEnqueue(tabId, message, waitForIdleBeforeStart, source, sendResponse) {
     jobs.set(tabId, {
         tabId,
         queue: [message],
@@ -548,6 +532,34 @@ function handleEnqueueMessage(request, sender, sendResponse) {
             ? 'Message queued to send after the current response.'
             : 'Started a new queue with this message.'
     });
+}
+
+function handleEnqueueMessage(request, sender, sendResponse) {
+    const tabId = Number(request.tabId || sender?.tab?.id || 0);
+    const message = String(request.message || '').trim();
+    const addToEnd = request.position === 'end';
+    const waitForIdleBeforeStart = request.waitForIdleBeforeStart === true;
+    const source = request.source || 'popup';
+
+    if (!tabId || !message) {
+        logQueueEvent(tabId, 'warn', 'Could not enqueue command: missing tab or message.');
+        sendResponse({ ok: false, error: 'Missing tabId or message.' });
+        return;
+    }
+
+    const existingJob = jobs.get(tabId);
+
+    if (existingJob && existingJob.isPaused) {
+        enqueueToPausedJob(tabId, existingJob, message, addToEnd, source, sendResponse);
+        return;
+    }
+
+    if (existingJob && existingJob.isRunning) {
+        enqueueToRunningJob(tabId, existingJob, message, addToEnd, source, sendResponse);
+        return;
+    }
+
+    startNewJobFromEnqueue(tabId, message, waitForIdleBeforeStart, source, sendResponse);
 }
 
 function handleRetryPausedJob(request, sendResponse) {
