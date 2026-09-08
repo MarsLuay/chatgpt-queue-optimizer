@@ -9,7 +9,10 @@ const QUEUE_SETTINGS_DEFAULTS = {
 const UNLIMITED_RETRY_DELAY_MS = 15000;
 const QUEUE_WAKE_ALARM_NAME = 'queue-wake';
 const QUEUE_WAKE_ALARM_PERIOD_MINUTES = 0.5;
-const CHATGPT_HOSTS = new Set(['chatgpt.com', 'chat.openai.com']);
+
+if (typeof importScripts === 'function') {
+    importScripts('utils.js');
+}
 
 let queueLogWrite = Promise.resolve();
 
@@ -427,82 +430,66 @@ function handleStartSequence(request, sendResponse) {
     sendResponse({ ok: true, tabId });
 }
 
-function handleEnqueueMessage(request, sender, sendResponse) {
-    const tabId = Number(request.tabId || sender?.tab?.id || 0);
-    const message = String(request.message || '').trim();
-    const addToEnd = request.position === 'end';
-    const waitForIdleBeforeStart = request.waitForIdleBeforeStart === true;
-    const source = request.source || 'popup';
-
-    if (!tabId || !message) {
-        logQueueEvent(tabId, 'warn', 'Could not enqueue command: missing tab or message.');
-        sendResponse({ ok: false, error: 'Missing tabId or message.' });
-        return;
+function enqueueToPausedJob(tabId, existingJob, message, addToEnd, source, sendResponse) {
+    if (addToEnd) {
+        existingJob.queue.push(message);
+    } else if (existingJob.queue.length > 0) {
+        existingJob.queue.splice(1, 0, message);
+    } else {
+        existingJob.queue.push(message);
     }
 
-    const existingJob = jobs.get(tabId);
+    existingJob.totalMessages = getTotalMessages(existingJob) + 1;
+    existingJob.updatedAt = Date.now();
+    logQueueEvent(tabId, 'info', 'Added command to paused queue.', {
+        source,
+        totalMessages: getTotalMessages(existingJob),
+        remaining: getRemainingCount(existingJob),
+        messagePreview: previewText(message, 160)
+    });
+    updateRunningJobsStorage();
 
-    if (existingJob && existingJob.isPaused) {
-        if (addToEnd) {
-            existingJob.queue.push(message);
-        } else if (existingJob.queue.length > 0) {
-            existingJob.queue.splice(1, 0, message);
-        } else {
-            existingJob.queue.push(message);
-        }
+    sendResponse({
+        ok: true,
+        queued: true,
+        paused: true,
+        remaining: getRemainingCount(existingJob),
+        message: 'Message added to paused queue. Click Retry to continue.'
+    });
+}
 
-        existingJob.totalMessages = getTotalMessages(existingJob) + 1;
-        existingJob.updatedAt = Date.now();
-        logQueueEvent(tabId, 'info', 'Added command to paused queue.', {
-            source,
-            totalMessages: getTotalMessages(existingJob),
-            remaining: getRemainingCount(existingJob),
-            messagePreview: previewText(message, 160)
-        });
-        updateRunningJobsStorage();
-
-        sendResponse({
-            ok: true,
-            queued: true,
-            paused: true,
-            remaining: getRemainingCount(existingJob),
-            message: 'Message added to paused queue. Click Retry to continue.'
-        });
-        return;
+function enqueueToRunningJob(tabId, existingJob, message, addToEnd, source, sendResponse) {
+    if (addToEnd) {
+        existingJob.queue.push(message);
+    } else {
+        existingJob.queue.unshift(message);
     }
 
-    if (existingJob && existingJob.isRunning) {
-        if (addToEnd) {
-            existingJob.queue.push(message);
-        } else {
-            existingJob.queue.unshift(message);
-        }
+    existingJob.totalMessages = getTotalMessages(existingJob) + 1;
+    existingJob.updatedAt = Date.now();
 
-        existingJob.totalMessages = getTotalMessages(existingJob) + 1;
-        existingJob.updatedAt = Date.now();
+    logQueueEvent(tabId, 'info', 'Added command to run next in active queue.', {
+        source,
+        position: addToEnd ? 'end' : 'next',
+        totalMessages: getTotalMessages(existingJob),
+        remaining: getRemainingCount(existingJob),
+        messagePreview: previewText(message, 160)
+    });
 
-        logQueueEvent(tabId, 'info', 'Added command to run next in active queue.', {
-            source,
-            position: addToEnd ? 'end' : 'next',
-            totalMessages: getTotalMessages(existingJob),
-            remaining: getRemainingCount(existingJob),
-            messagePreview: previewText(message, 160)
-        });
+    updateRunningJobsStorage();
 
-        updateRunningJobsStorage();
+    sendResponse({
+        ok: true,
+        queued: true,
+        started: false,
+        remaining: getRemainingCount(existingJob),
+        message: addToEnd
+            ? 'Message added to the running queue.'
+            : 'Message added next in the running queue.'
+    });
+}
 
-        sendResponse({
-            ok: true,
-            queued: true,
-            started: false,
-            remaining: getRemainingCount(existingJob),
-            message: addToEnd
-                ? 'Message added to the running queue.'
-                : 'Message added next in the running queue.'
-        });
-        return;
-    }
-
+function startNewJobFromEnqueue(tabId, message, waitForIdleBeforeStart, source, sendResponse) {
     jobs.set(tabId, {
         tabId,
         queue: [message],
@@ -548,6 +535,34 @@ function handleEnqueueMessage(request, sender, sendResponse) {
             ? 'Message queued to send after the current response.'
             : 'Started a new queue with this message.'
     });
+}
+
+function handleEnqueueMessage(request, sender, sendResponse) {
+    const tabId = Number(request.tabId || sender?.tab?.id || 0);
+    const message = String(request.message || '').trim();
+    const addToEnd = request.position === 'end';
+    const waitForIdleBeforeStart = request.waitForIdleBeforeStart === true;
+    const source = request.source || 'popup';
+
+    if (!tabId || !message) {
+        logQueueEvent(tabId, 'warn', 'Could not enqueue command: missing tab or message.');
+        sendResponse({ ok: false, error: 'Missing tabId or message.' });
+        return;
+    }
+
+    const existingJob = jobs.get(tabId);
+
+    if (existingJob && existingJob.isPaused) {
+        enqueueToPausedJob(tabId, existingJob, message, addToEnd, source, sendResponse);
+        return;
+    }
+
+    if (existingJob && existingJob.isRunning) {
+        enqueueToRunningJob(tabId, existingJob, message, addToEnd, source, sendResponse);
+        return;
+    }
+
+    startNewJobFromEnqueue(tabId, message, waitForIdleBeforeStart, source, sendResponse);
 }
 
 function handleRetryPausedJob(request, sendResponse) {
@@ -657,68 +672,14 @@ async function processQueue(tabId) {
     try {
         while (job.isRunning && !job.isPaused && !job.isStopped) {
             if (job.currentMessage && job.currentPhase === 'waiting') {
-                const totalMessages = getTotalMessages(job);
-                const queueSettings = await getQueueSettings();
-
-                logQueueEvent(tabId, 'info', `Resumed waiting for command ${job.currentCommandNumber || '?'}/${totalMessages}.`, {
-                    commandNumber: job.currentCommandNumber || 0,
-                    totalMessages,
-                    settings: queueSettings
-                });
-
-                const waitResult = await waitForTabResponse(tabId, {
-                    commandNumber: job.currentCommandNumber,
-                    totalMessages,
-                    queueSettings
-                });
-
-                if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
-                    return;
-                }
-
-                if (!waitResult.ok) {
-                    logQueueEvent(tabId, 'error', `Command ${job.currentCommandNumber}/${totalMessages} failed while waiting for ChatGPT.`, {
-                        commandNumber: job.currentCommandNumber,
-                        totalMessages,
-                        error: waitResult.error || 'ChatGPT response failed.',
-                        diagnostics: waitResult.details || {}
-                    });
-
-                    if (await retryCurrentCommandIfEnabled(tabId, job, 'wait', waitResult.error || 'ChatGPT response failed.', waitResult.details || {})) {
-                        continue;
-                    }
-
-                    pauseJob(tabId, waitResult.error || 'ChatGPT response failed.', {
-                        phase: 'wait',
-                        diagnostics: waitResult.details || {}
-                    });
-                    return;
-                }
-
-                completeCurrentCommand(tabId, job, totalMessages, waitResult.details || {});
-
-                if (job.queue.length > 0) {
-                    await sleep(2000);
-                }
-
-                continue;
+                const result = await handleProcessWaiting(tabId, job);
+                if (result.action === 'return') return;
+                if (result.action === 'continue') continue;
             }
 
             if (job.currentMessage) {
-                logQueueEvent(tabId, 'warn', 'Recovered a command without a confirmed waiting state; retrying it before moving forward.', {
-                    phase: job.currentPhase || '',
-                    commandNumber: job.currentCommandNumber || 0,
-                    totalMessages: getTotalMessages(job),
-                    messagePreview: previewText(job.currentMessage || '', 160)
-                });
-
-                job.queue.unshift(job.currentMessage);
-                job.currentMessage = null;
-                job.currentCommandNumber = 0;
-                job.currentPhase = 'queued';
-                job.updatedAt = Date.now();
-                updateRunningJobsStorage();
-                continue;
+                const result = handleProcessRecovered(tabId, job);
+                if (result.action === 'continue') continue;
             }
 
             if (job.queue.length === 0) {
@@ -726,141 +687,14 @@ async function processQueue(tabId) {
             }
 
             if (job.waitForIdleBeforeSend) {
-                const totalMessages = getTotalMessages(job);
-                const queueSettings = await getQueueSettings();
-
-                job.currentPhase = 'waiting-for-idle';
-                job.updatedAt = Date.now();
-
-                logQueueEvent(tabId, 'info', 'Waiting for the current ChatGPT response before sending queued command.', {
-                    totalMessages,
-                    remaining: getRemainingCount(job),
-                    nextMessagePreview: previewText(job.queue[0] || '', 160),
-                    settings: queueSettings
-                });
-
-                updateRunningJobsStorage();
-
-                const idleResult = await waitForTabResponse(tabId, {
-                    commandNumber: Number(job.completedCount || 0) + 1,
-                    totalMessages,
-                    queueSettings,
-                    waitForExistingGeneration: true,
-                    waitLabel: 'the current ChatGPT response'
-                });
-
-                if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
-                    return;
-                }
-
-                if (!idleResult.ok) {
-                    logQueueEvent(tabId, 'error', 'Failed while waiting for the current ChatGPT response to finish.', {
-                        error: idleResult.error || 'ChatGPT response failed.',
-                        diagnostics: idleResult.details || {}
-                    });
-
-                    pauseJob(tabId, idleResult.error || 'ChatGPT response failed.', {
-                        phase: 'wait-for-idle',
-                        diagnostics: idleResult.details || {}
-                    });
-                    return;
-                }
-
-                job.waitForIdleBeforeSend = false;
-                job.currentPhase = 'queued';
-                job.updatedAt = Date.now();
-                updateRunningJobsStorage();
-                await sleep(500);
-                continue;
+                const result = await handleProcessWaitForIdle(tabId, job);
+                if (result.action === 'return') return;
+                if (result.action === 'continue') continue;
             }
 
-            job.currentMessage = job.queue.shift();
-            job.currentCommandNumber = Number(job.completedCount || 0) + 1;
-            job.lastError = '';
-            job.currentPhase = 'sending';
-            job.updatedAt = Date.now();
-            const totalMessages = getTotalMessages(job);
-            const queueSettings = await getQueueSettings();
-
-            logQueueEvent(tabId, 'info', `Sending command ${job.currentCommandNumber}/${totalMessages}.`, {
-                commandNumber: job.currentCommandNumber,
-                totalMessages,
-                remainingBeforeSend: getRemainingCount(job),
-                messagePreview: previewText(job.currentMessage || '', 160),
-                settings: queueSettings
-            });
-
-            updateRunningJobsStorage();
-
-            const sendResult = await sendPromptToSpecificTab(tabId, job.currentMessage);
-
-            if (!jobs.has(tabId) || job.isStopped) {
-                return;
-            }
-
-            if (!sendResult.ok) {
-                logQueueEvent(tabId, 'error', `Failed to submit command ${job.currentCommandNumber}/${totalMessages}.`, {
-                    commandNumber: job.currentCommandNumber,
-                    totalMessages,
-                    error: sendResult.error || 'Could not send message to ChatGPT.',
-                    diagnostics: sendResult.details || {}
-                });
-
-                if (await retryCurrentCommandIfEnabled(tabId, job, 'send', sendResult.error || 'Could not send message to ChatGPT.', sendResult.details || {})) {
-                    continue;
-                }
-
-                pauseJob(tabId, sendResult.error || 'Could not send message to ChatGPT.', {
-                    phase: 'send',
-                    diagnostics: sendResult.details || {}
-                });
-                return;
-            }
-
-            job.currentPhase = 'waiting';
-            job.updatedAt = Date.now();
-            updateRunningJobsStorage();
-
-            logQueueEvent(tabId, 'success', `Submitted command ${job.currentCommandNumber}/${totalMessages}.`, {
-                commandNumber: job.currentCommandNumber,
-                totalMessages,
-                diagnostics: sendResult.details || {}
-            });
-
-            const waitResult = await waitForTabResponse(tabId, {
-                commandNumber: job.currentCommandNumber,
-                totalMessages,
-                queueSettings
-            });
-
-            if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
-                return;
-            }
-
-            if (!waitResult.ok) {
-                logQueueEvent(tabId, 'error', `Command ${job.currentCommandNumber}/${totalMessages} failed while waiting for ChatGPT.`, {
-                    commandNumber: job.currentCommandNumber,
-                    totalMessages,
-                    error: waitResult.error || 'ChatGPT response failed.',
-                    diagnostics: waitResult.details || {}
-                });
-
-                if (await retryCurrentCommandIfEnabled(tabId, job, 'wait', waitResult.error || 'ChatGPT response failed.', waitResult.details || {})) {
-                    continue;
-                }
-
-                pauseJob(tabId, waitResult.error || 'ChatGPT response failed.', {
-                    phase: 'wait',
-                    diagnostics: waitResult.details || {}
-                });
-                return;
-            }
-
-            completeCurrentCommand(tabId, job, totalMessages, waitResult.details || {});
-
-            if (job.queue.length > 0) {
-                await sleep(2000);
-            }
+            const result = await handleProcessSending(tabId, job);
+            if (result.action === 'return') return;
+            if (result.action === 'continue') continue;
         }
 
         if (job.isStopped) {
@@ -895,6 +729,212 @@ async function processQueue(tabId) {
             job.isProcessing = false;
         }
     }
+}
+
+async function handleProcessWaiting(tabId, job) {
+    const totalMessages = getTotalMessages(job);
+    const queueSettings = await getQueueSettings();
+
+    logQueueEvent(tabId, 'info', `Resumed waiting for command ${job.currentCommandNumber || '?'}/${totalMessages}.`, {
+        commandNumber: job.currentCommandNumber || 0,
+        totalMessages,
+        settings: queueSettings
+    });
+
+    const waitResult = await waitForTabResponse(tabId, {
+        commandNumber: job.currentCommandNumber,
+        totalMessages,
+        queueSettings
+    });
+
+    if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+        return { action: 'return' };
+    }
+
+    if (!waitResult.ok) {
+        logQueueEvent(tabId, 'error', `Command ${job.currentCommandNumber}/${totalMessages} failed while waiting for ChatGPT.`, {
+            commandNumber: job.currentCommandNumber,
+            totalMessages,
+            error: waitResult.error || 'ChatGPT response failed.',
+            diagnostics: waitResult.details || {}
+        });
+
+        if (await retryCurrentCommandIfEnabled(tabId, job, 'wait', waitResult.error || 'ChatGPT response failed.', waitResult.details || {})) {
+            return { action: 'continue' };
+        }
+
+        pauseJob(tabId, waitResult.error || 'ChatGPT response failed.', {
+            phase: 'wait',
+            diagnostics: waitResult.details || {}
+        });
+        return { action: 'return' };
+    }
+
+    completeCurrentCommand(tabId, job, totalMessages, waitResult.details || {});
+
+    if (job.queue.length > 0) {
+        await sleep(2000);
+    }
+
+    return { action: 'continue' };
+}
+
+function handleProcessRecovered(tabId, job) {
+    logQueueEvent(tabId, 'warn', 'Recovered a command without a confirmed waiting state; retrying it before moving forward.', {
+        phase: job.currentPhase || '',
+        commandNumber: job.currentCommandNumber || 0,
+        totalMessages: getTotalMessages(job),
+        messagePreview: previewText(job.currentMessage || '', 160)
+    });
+
+    job.queue.unshift(job.currentMessage);
+    job.currentMessage = null;
+    job.currentCommandNumber = 0;
+    job.currentPhase = 'queued';
+    job.updatedAt = Date.now();
+    updateRunningJobsStorage();
+    return { action: 'continue' };
+}
+
+async function handleProcessWaitForIdle(tabId, job) {
+    const totalMessages = getTotalMessages(job);
+    const queueSettings = await getQueueSettings();
+
+    job.currentPhase = 'waiting-for-idle';
+    job.updatedAt = Date.now();
+
+    logQueueEvent(tabId, 'info', 'Waiting for the current ChatGPT response before sending queued command.', {
+        totalMessages,
+        remaining: getRemainingCount(job),
+        nextMessagePreview: previewText(job.queue[0] || '', 160),
+        settings: queueSettings
+    });
+
+    updateRunningJobsStorage();
+
+    const idleResult = await waitForTabResponse(tabId, {
+        commandNumber: Number(job.completedCount || 0) + 1,
+        totalMessages,
+        queueSettings,
+        waitForExistingGeneration: true,
+        waitLabel: 'the current ChatGPT response'
+    });
+
+    if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+        return { action: 'return' };
+    }
+
+    if (!idleResult.ok) {
+        logQueueEvent(tabId, 'error', 'Failed while waiting for the current ChatGPT response to finish.', {
+            error: idleResult.error || 'ChatGPT response failed.',
+            diagnostics: idleResult.details || {}
+        });
+
+        pauseJob(tabId, idleResult.error || 'ChatGPT response failed.', {
+            phase: 'wait-for-idle',
+            diagnostics: idleResult.details || {}
+        });
+        return { action: 'return' };
+    }
+
+    job.waitForIdleBeforeSend = false;
+    job.currentPhase = 'queued';
+    job.updatedAt = Date.now();
+    updateRunningJobsStorage();
+    await sleep(500);
+    return { action: 'continue' };
+}
+
+async function handleProcessSending(tabId, job) {
+    job.currentMessage = job.queue.shift();
+    job.currentCommandNumber = Number(job.completedCount || 0) + 1;
+    job.lastError = '';
+    job.currentPhase = 'sending';
+    job.updatedAt = Date.now();
+    const totalMessages = getTotalMessages(job);
+    const queueSettings = await getQueueSettings();
+
+    logQueueEvent(tabId, 'info', `Sending command ${job.currentCommandNumber}/${totalMessages}.`, {
+        commandNumber: job.currentCommandNumber,
+        totalMessages,
+        remainingBeforeSend: getRemainingCount(job),
+        messagePreview: previewText(job.currentMessage || '', 160),
+        settings: queueSettings
+    });
+
+    updateRunningJobsStorage();
+
+    const sendResult = await sendPromptToSpecificTab(tabId, job.currentMessage);
+
+    if (!jobs.has(tabId) || job.isStopped) {
+        return { action: 'return' };
+    }
+
+    if (!sendResult.ok) {
+        logQueueEvent(tabId, 'error', `Failed to submit command ${job.currentCommandNumber}/${totalMessages}.`, {
+            commandNumber: job.currentCommandNumber,
+            totalMessages,
+            error: sendResult.error || 'Could not send message to ChatGPT.',
+            diagnostics: sendResult.details || {}
+        });
+
+        if (await retryCurrentCommandIfEnabled(tabId, job, 'send', sendResult.error || 'Could not send message to ChatGPT.', sendResult.details || {})) {
+            return { action: 'continue' };
+        }
+
+        pauseJob(tabId, sendResult.error || 'Could not send message to ChatGPT.', {
+            phase: 'send',
+            diagnostics: sendResult.details || {}
+        });
+        return { action: 'return' };
+    }
+
+    job.currentPhase = 'waiting';
+    job.updatedAt = Date.now();
+    updateRunningJobsStorage();
+
+    logQueueEvent(tabId, 'success', `Submitted command ${job.currentCommandNumber}/${totalMessages}.`, {
+        commandNumber: job.currentCommandNumber,
+        totalMessages,
+        diagnostics: sendResult.details || {}
+    });
+
+    const waitResult = await waitForTabResponse(tabId, {
+        commandNumber: job.currentCommandNumber,
+        totalMessages,
+        queueSettings
+    });
+
+    if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+        return { action: 'return' };
+    }
+
+    if (!waitResult.ok) {
+        logQueueEvent(tabId, 'error', `Command ${job.currentCommandNumber}/${totalMessages} failed while waiting for ChatGPT.`, {
+            commandNumber: job.currentCommandNumber,
+            totalMessages,
+            error: waitResult.error || 'ChatGPT response failed.',
+            diagnostics: waitResult.details || {}
+        });
+
+        if (await retryCurrentCommandIfEnabled(tabId, job, 'wait', waitResult.error || 'ChatGPT response failed.', waitResult.details || {})) {
+            return { action: 'continue' };
+        }
+
+        pauseJob(tabId, waitResult.error || 'ChatGPT response failed.', {
+            phase: 'wait',
+            diagnostics: waitResult.details || {}
+        });
+        return { action: 'return' };
+    }
+
+    completeCurrentCommand(tabId, job, totalMessages, waitResult.details || {});
+
+    if (job.queue.length > 0) {
+        await sleep(2000);
+    }
+
+    return { action: 'next' };
 }
 
 function completeCurrentCommand(tabId, job, totalMessages, diagnostics = {}) {
@@ -1025,14 +1065,20 @@ async function sendPromptToSpecificTab(tabId, text) {
                 }
 
                 function findFirstSelector(selectors) {
-                    for (const selector of selectors) {
-                        const element = document.querySelector(selector);
+                    const joined = selectors.join(',');
+                    const elements = document.querySelectorAll(joined);
 
-                        if (element) {
-                            return {
-                                selector,
-                                element
-                            };
+                    if (elements.length > 0) {
+                        for (const selector of selectors) {
+                            for (let i = 0; i < elements.length; i++) {
+                                const element = elements[i];
+                                if (element.matches(selector)) {
+                                    return {
+                                        selector,
+                                        element
+                                    };
+                                }
+                            }
                         }
                     }
 
@@ -1063,7 +1109,7 @@ async function sendPromptToSpecificTab(tabId, text) {
                 }
 
                 input.focus();
-                input.innerHTML = '';
+                input.textContent = '';
 
                 const paragraph = document.createElement('p');
                 paragraph.innerText = msg;
@@ -1238,125 +1284,14 @@ async function waitForTabResponse(tabId, context = {}) {
             }
 
             try {
-                executeScript({
-                    target: { tabId },
-                    func: () => {
-                        const buttons = Array.from(document.querySelectorAll('button'));
-                        const stopButton =
-                            document.querySelector('button[data-testid="stop-button"]') ||
-                            document.querySelector('[aria-label="Stop generating"]') ||
-                            document.querySelector('button[aria-label="Stop streaming"]') ||
-                            buttons.find(button => {
-                                const label = (
-                                    button.getAttribute('aria-label') ||
-                                    button.innerText ||
-                                    button.textContent ||
-                                    ''
-                                ).toLowerCase();
+                sendTabMessage(tabId, { type: 'CHECK_GENERATION_STATE' }).then((response) => {
+                    if (settled) {
+                        return;
+                    }
 
-                                return (
-                                    label.includes('stop generating') ||
-                                    label.includes('stop streaming') ||
-                                    label.includes('stop response') ||
-                                    label.includes('interrupt')
-                                );
-                            });
+                    const state = response?.state || {};
 
-                        const resultStreaming =
-                            document.querySelector('.result-streaming') ||
-                            document.querySelector('[data-testid*="conversation-turn"] .result-streaming') ||
-                            document.querySelector('[data-message-streaming="true"]') ||
-                            document.querySelector('[data-testid*="streaming"]');
-
-                        const bodyText = document.body ? document.body.innerText : '';
-                        const pageText = bodyText.toLowerCase();
-                        const errorMarkers = [
-                            'something went wrong',
-                            'there was an error',
-                            'error generating a response',
-                            'network error',
-                            'failed to generate',
-                            'try again later'
-                        ];
-                        const matchedError = errorMarkers.find(marker => pageText.includes(marker)) || '';
-                        const matchedErrorIndex = matchedError ? pageText.indexOf(matchedError) : -1;
-                        const errorSnippet = matchedErrorIndex >= 0
-                            ? bodyText
-                                .slice(Math.max(0, matchedErrorIndex - 120), matchedErrorIndex + 260)
-                                .replace(/\s+/g, ' ')
-                                .trim()
-                            : '';
-
-                        const hasKnownError = !!matchedError;
-                        const hasTryAgainButton = buttons.some(btn => {
-                            const text = (btn.innerText || btn.getAttribute('aria-label') || '').toLowerCase().trim();
-                            return text === 'retry' || text === 'try again';
-                        });
-
-                        const statusText = Array.from(document.querySelectorAll(
-                            '[role="status"], [aria-live], [data-testid*="status"], [data-testid*="progress"], [data-testid*="research"]'
-                        ))
-                            .map(node => node.innerText || node.textContent || '')
-                            .join(' ')
-                            .replace(/\s+/g, ' ')
-                            .trim()
-                            .slice(0, 1200);
-                        const researchText = `${statusText} ${buttons.map(btn => btn.innerText || btn.getAttribute('aria-label') || '').join(' ')}`.toLowerCase();
-                        const researchProgressMarkers = [
-                            'deep research',
-                            'researching',
-                            'searching the web',
-                            'searching sources',
-                            'reading sources',
-                            'analyzing sources',
-                            'gathering sources',
-                            'checking sources',
-                            'synthesizing',
-                            'creating report',
-                            'writing report'
-                        ];
-                        const matchedResearchMarker =
-                            researchProgressMarkers.find(marker => researchText.includes(marker)) ||
-                            researchProgressMarkers.find(marker => pageText.includes(marker)) ||
-                            '';
-                        const deepResearchActive = !!matchedResearchMarker && !!(stopButton || resultStreaming);
-
-                        return {
-                            generating: !!(stopButton || resultStreaming),
-                            deepResearchActive,
-                            matchedResearchMarker,
-                            researchStatusPreview: statusText,
-                            hasError: !!hasKnownError,
-                            hasTryAgainButton: !!hasTryAgainButton,
-                            errorSnippet,
-                            matchedError,
-                            url: location.href,
-                            title: document.title
-                        };
-                }
-                }, (results, executionError) => {
-                if (settled) {
-                    return;
-                }
-                if (executionError) {
-                    clearInterval(checkInterval);
-                    resolve({
-                        ok: false,
-                        error: executionError.message || 'Could not read ChatGPT tab.',
-                        details: {
-                            elapsedMs: Date.now() - startedAt,
-                            sawGenerating,
-                            sawDeepResearch,
-                            settings: queueSettings,
-                            error: serializeError(executionError)
-                        }
-                    });
-                    return;
-                }
-
-                const state = results?.[0]?.result || {};
-
-                if (state.hasError || state.hasTryAgainButton) {
+                    if (state.hasError || state.hasTryAgainButton) {
                     clearInterval(checkInterval);
                     resolve({
                         ok: false,
@@ -1485,6 +1420,22 @@ async function waitForTabResponse(tabId, context = {}) {
                     });
                     lastProgressLogAt = Date.now();
                 }
+                }).catch((executionError) => {
+                    if (settled) {
+                        return;
+                    }
+                    clearInterval(checkInterval);
+                    resolve({
+                        ok: false,
+                        error: executionError.message || 'Could not read ChatGPT tab.',
+                        details: {
+                            elapsedMs: Date.now() - startedAt,
+                            sawGenerating,
+                            sawDeepResearch,
+                            settings: queueSettings,
+                            error: serializeError(executionError)
+                        }
+                    });
                 });
             } catch (error) {
                 clearInterval(checkInterval);
@@ -1746,59 +1697,6 @@ function readSyncStorage(defaults) {
     });
 }
 
-function extensionApiPromise(callWithCallback, callWithoutCallback) {
-    return new Promise((resolve, reject) => {
-        let settled = false;
-
-        const settleResolve = (value) => {
-            if (settled) return;
-            settled = true;
-            resolve(value);
-        };
-
-        const settleReject = (error) => {
-            if (settled) return;
-            settled = true;
-            reject(error instanceof Error ? error : new Error(String(error || 'Extension API call failed.')));
-        };
-
-        const finishFromCallback = (value) => {
-            if (settled) return;
-
-            const lastError = chrome.runtime.lastError;
-
-            if (lastError) {
-                settleReject(new Error(lastError.message || 'Extension API call failed.'));
-                return;
-            }
-
-            settleResolve(value);
-        };
-
-        let maybePromise;
-
-        try {
-            maybePromise = callWithCallback(finishFromCallback);
-        } catch (callbackError) {
-            if (!callWithoutCallback) {
-                settleReject(callbackError);
-                return;
-            }
-
-            try {
-                maybePromise = callWithoutCallback();
-            } catch (promiseError) {
-                settleReject(promiseError);
-                return;
-            }
-        }
-
-        if (maybePromise && typeof maybePromise.then === 'function') {
-            maybePromise.then(settleResolve, settleReject);
-        }
-    });
-}
-
 function queryTabs(queryInfo) {
     return extensionApiPromise(
         (done) => chrome.tabs.query(queryInfo, done),
@@ -1953,20 +1851,6 @@ function createRunId() {
     return `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
 }
 
-function isChatGPTUrl(url) {
-    if (typeof url !== 'string') {
-        return false;
-    }
-
-    try {
-        const parsed = new URL(url);
-
-        return parsed.protocol === 'https:' && CHATGPT_HOSTS.has(parsed.hostname.toLowerCase());
-    } catch {
-        return false;
-    }
-}
-
 function previewText(text, maxLength = 70) {
     const clean = String(text || '').replace(/\s+/g, ' ').trim();
 
@@ -1980,4 +1864,11 @@ function previewText(text, maxLength = 70) {
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
-if (typeof module !== 'undefined' && module.exports) { module.exports = { previewText }; }
+
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+        sanitizeLogValue,
+        serializeError,
+        previewText
+    };
+}

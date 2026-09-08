@@ -107,23 +107,31 @@
           break;
         }
 
+        case 'CHECK_GENERATION_STATE': {
+          const state = this.getGenerationState();
+          sendResponse({ state });
+          break;
+        }
+
         case 'DEBUG_MESSAGES': {
           const debugMessages = this.getMessageNodes();
 
-          console.log('CPO Debug: Found messages:', debugMessages.length);
-          console.log('CPO Debug Selectors:');
-          console.log('- [data-testid^="conversation-turn"]:', document.querySelectorAll('[data-testid^="conversation-turn"]').length);
-          console.log('- [data-testid*="conversation-turn"]:', document.querySelectorAll('[data-testid*="conversation-turn"]').length);
-          console.log('- article:', document.querySelectorAll('article').length);
-          console.log('- [data-message-author-role]:', document.querySelectorAll('[data-message-author-role]').length);
-          console.log('- [data-message-id]:', document.querySelectorAll('[data-message-id]').length);
-          console.log('- main:', document.querySelectorAll('main').length);
+          if (this.config.debug) {
+            console.log('CPO Debug: Found messages:', debugMessages.length);
+            console.log('CPO Debug Selectors:');
+            console.log('- [data-testid^="conversation-turn"]:', document.querySelectorAll('[data-testid^="conversation-turn"]').length);
+            console.log('- [data-testid*="conversation-turn"]:', document.querySelectorAll('[data-testid*="conversation-turn"]').length);
+            console.log('- article:', document.querySelectorAll('article').length);
+            console.log('- [data-message-author-role]:', document.querySelectorAll('[data-message-author-role]').length);
+            console.log('- [data-message-id]:', document.querySelectorAll('[data-message-id]').length);
+            console.log('- main:', document.querySelectorAll('main').length);
 
-          debugMessages.forEach((msg, i) => {
-            if (i < 10) {
-              console.log(`CPO Debug Message ${i + 1}:`, msg, 'Text preview:', msg.textContent.trim().substring(0, 160));
-            }
-          });
+            debugMessages.forEach((msg, i) => {
+              if (i < 10) {
+                console.log(`CPO Debug Message ${i + 1}:`, msg, 'Text preview:', msg.textContent.trim().substring(0, 160));
+              }
+            });
+          }
 
           sendResponse({ count: debugMessages.length });
           break;
@@ -245,7 +253,7 @@
       if (composer.tagName && composer.tagName.toLowerCase() === 'textarea') {
         composer.value = '';
       } else {
-        composer.innerHTML = '';
+        composer.textContent = '';
       }
 
       composer.dispatchEvent(new InputEvent('input', {
@@ -256,31 +264,103 @@
     }
 
     isChatGPTGenerating() {
-      const stopButton =
-        document.querySelector('button[data-testid="stop-button"]') ||
-        Array.from(document.querySelectorAll('button')).find((button) => {
-          const label = (
-            button.getAttribute('aria-label') ||
-            button.innerText ||
-            button.textContent ||
-            ''
-          ).toLowerCase();
+      const state = this.getGenerationState();
+      return state.generating;
+    }
 
-          return (
-            label.includes('stop generating') ||
-            label.includes('stop streaming') ||
-            label.includes('stop response') ||
-            label.includes('interrupt')
-          );
+    getGenerationState() {
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const stopButton =
+            document.querySelector('button[data-testid="stop-button"]') ||
+            document.querySelector('[aria-label="Stop generating"]') ||
+            document.querySelector('button[aria-label="Stop streaming"]') ||
+            buttons.find(button => {
+                const label = (
+                    button.getAttribute('aria-label') ||
+                    button.innerText ||
+                    button.textContent ||
+                    ''
+                ).toLowerCase();
+
+                return (
+                    label.includes('stop generating') ||
+                    label.includes('stop streaming') ||
+                    label.includes('stop response') ||
+                    label.includes('interrupt')
+                );
+            });
+
+        const resultStreaming =
+            document.querySelector('.result-streaming') ||
+            document.querySelector('[data-testid*="conversation-turn"] .result-streaming') ||
+            document.querySelector('[data-message-streaming="true"]') ||
+            document.querySelector('[data-testid*="streaming"]');
+
+        const bodyText = document.body ? document.body.innerText : '';
+        const pageText = bodyText.toLowerCase();
+        const errorMarkers = [
+            'something went wrong',
+            'there was an error',
+            'error generating a response',
+            'network error',
+            'failed to generate',
+            'try again later'
+        ];
+        const matchedError = errorMarkers.find(marker => pageText.includes(marker)) || '';
+        const matchedErrorIndex = matchedError ? pageText.indexOf(matchedError) : -1;
+        const errorSnippet = matchedErrorIndex >= 0
+            ? bodyText
+                .slice(Math.max(0, matchedErrorIndex - 120), matchedErrorIndex + 260)
+                .replace(/\s+/g, ' ')
+                .trim()
+            : '';
+
+        const hasKnownError = !!matchedError;
+        const hasTryAgainButton = buttons.some(btn => {
+            const text = (btn.innerText || btn.getAttribute('aria-label') || '').toLowerCase().trim();
+            return text === 'retry' || text === 'try again';
         });
 
-      const resultStreaming =
-        document.querySelector('.result-streaming') ||
-        document.querySelector('[data-testid*="conversation-turn"] .result-streaming') ||
-        document.querySelector('[data-message-streaming="true"]') ||
-        document.querySelector('[data-testid*="streaming"]');
+        const statusText = Array.from(document.querySelectorAll(
+            '[role="status"], [aria-live], [data-testid*="status"], [data-testid*="progress"], [data-testid*="research"]'
+        ))
+            .map(node => node.innerText || node.textContent || '')
+            .join(' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 1200);
+        const researchText = `${statusText} ${buttons.map(btn => btn.innerText || btn.getAttribute('aria-label') || '').join(' ')}`.toLowerCase();
+        const researchProgressMarkers = [
+            'deep research',
+            'researching',
+            'searching the web',
+            'searching sources',
+            'reading sources',
+            'analyzing sources',
+            'gathering sources',
+            'checking sources',
+            'synthesizing',
+            'creating report',
+            'writing report'
+        ];
+        const matchedResearchMarker =
+            researchProgressMarkers.find(marker => researchText.includes(marker)) ||
+            researchProgressMarkers.find(marker => pageText.includes(marker)) ||
+            '';
+        const deepResearchActive = !!matchedResearchMarker && !!(stopButton || resultStreaming);
 
-      return !!(stopButton || resultStreaming);
+        return {
+            generating: !!(stopButton || resultStreaming),
+            deepResearchActive,
+            matchedResearchMarker,
+            researchStatusPreview: statusText,
+            hasError: !!hasKnownError,
+            hasTryAgainButton: !!hasTryAgainButton,
+            errorSnippet,
+            matchedError,
+            url: location.href,
+            title: document.title
+        };
     }
 
     queueComposerMessage(text, composer) {
@@ -388,22 +468,21 @@
         '[data-testid="conversation-turn"]'
       ];
 
-      for (const selector of selectors) {
-        try {
-          const nodes = Array.from(document.querySelectorAll(selector));
+      try {
+        const combinedSelector = selectors.join(',');
+        const nodes = Array.from(document.querySelectorAll(combinedSelector));
 
-          for (const node of nodes) {
-            if (!mainRoot.contains(node)) continue;
+        for (const node of nodes) {
+          if (!mainRoot.contains(node)) continue;
 
-            const normalized = this.normalizeMessageNode(node, mainRoot);
+          const normalized = this.normalizeMessageNode(node, mainRoot);
 
-            if (normalized && this.isValidMessageNode(normalized, mainRoot)) {
-              collected.push(normalized);
-            }
+          if (normalized && this.isValidMessageNode(normalized, mainRoot)) {
+            collected.push(normalized);
           }
-        } catch (error) {
-          console.warn(`CPO: Selector failed: ${selector}`, error);
         }
+      } catch (error) {
+        console.warn(`CPO: Combined selector failed`, error);
       }
 
       let messages = this.sortMessagesByPosition(this.removeDuplicates(collected));
@@ -492,27 +571,26 @@
 
       const collected = [];
 
-      for (const selector of fallbackSelectors) {
-        try {
-          const nodes = Array.from(document.querySelectorAll(selector));
+      try {
+        const combinedSelector = fallbackSelectors.join(', ');
+        const nodes = Array.from(document.querySelectorAll(combinedSelector));
 
-          for (const node of nodes) {
-            if (!mainRoot.contains(node)) continue;
-            if (node.closest('#cpo-root')) continue;
-            if (node.id && node.id.includes('thread-bottom')) continue;
-            if (node.querySelector('textarea, input[type="text"], form')) continue;
+        for (const node of nodes) {
+          if (!mainRoot.contains(node)) continue;
+          if (node.closest('#cpo-root')) continue;
+          if (node.id && node.id.includes('thread-bottom')) continue;
+          if (node.querySelector('textarea, input[type="text"], form')) continue;
 
-            const text = node.textContent.trim();
-            if (text.length < 15) continue;
+          const text = node.textContent.trim();
+          if (text.length < 15) continue;
 
-            const normalized = this.normalizeMessageNode(node, mainRoot);
-            if (normalized && this.isValidFallbackNode(normalized, mainRoot)) {
-              collected.push(normalized);
-            }
+          const normalized = this.normalizeMessageNode(node, mainRoot);
+          if (normalized && this.isValidFallbackNode(normalized, mainRoot)) {
+            collected.push(normalized);
           }
-        } catch {
-          // Try the next fallback selector.
         }
+      } catch (e) {
+        console.warn('CPO: Fallback querySelectorAll failed', e);
       }
 
       const result = this.sortMessagesByPosition(this.removeDuplicates(collected));
@@ -694,14 +772,24 @@
     createMoreBanner() {
       const banner = document.createElement('div');
       banner.className = 'cpo-more-banner';
-      banner.innerHTML = `
-        <div class="cpo-banner-content">
-          <span class="cpo-banner-text">Show older messages</span>
-          <button class="cpo-banner-button" type="button">Load More</button>
-        </div>
-      `;
 
-      banner.querySelector('.cpo-banner-button').addEventListener('click', () => {
+      const bannerContent = document.createElement('div');
+      bannerContent.className = 'cpo-banner-content';
+
+      const bannerText = document.createElement('span');
+      bannerText.className = 'cpo-banner-text';
+      bannerText.textContent = 'Show older messages';
+
+      const bannerButton = document.createElement('button');
+      bannerButton.className = 'cpo-banner-button';
+      bannerButton.type = 'button';
+      bannerButton.textContent = 'Load More';
+
+      bannerContent.appendChild(bannerText);
+      bannerContent.appendChild(bannerButton);
+      banner.appendChild(bannerContent);
+
+      bannerButton.addEventListener('click', () => {
         this.showOlderMessages();
       });
 
@@ -987,59 +1075,6 @@
 
   if (!window.ChatGPTOptimizerInstance) {
     window.ChatGPTOptimizerInstance = new ChatGPTOptimizer();
-  }
-
-  function extensionApiPromise(callWithCallback, callWithoutCallback) {
-    return new Promise((resolve, reject) => {
-      let settled = false;
-
-      const settleResolve = (value) => {
-        if (settled) return;
-        settled = true;
-        resolve(value);
-      };
-
-      const settleReject = (error) => {
-        if (settled) return;
-        settled = true;
-        reject(error instanceof Error ? error : new Error(String(error || 'Extension API call failed.')));
-      };
-
-      const finishFromCallback = (value) => {
-        if (settled) return;
-
-        const lastError = chrome.runtime.lastError;
-
-        if (lastError) {
-          settleReject(new Error(lastError.message || 'Extension API call failed.'));
-          return;
-        }
-
-        settleResolve(value);
-      };
-
-      let maybePromise;
-
-      try {
-        maybePromise = callWithCallback(finishFromCallback);
-      } catch (callbackError) {
-        if (!callWithoutCallback) {
-          settleReject(callbackError);
-          return;
-        }
-
-        try {
-          maybePromise = callWithoutCallback();
-        } catch (promiseError) {
-          settleReject(promiseError);
-          return;
-        }
-      }
-
-      if (maybePromise && typeof maybePromise.then === 'function') {
-        maybePromise.then(settleResolve, settleReject);
-      }
-    });
   }
 
   function storageSyncGet(defaults) {
