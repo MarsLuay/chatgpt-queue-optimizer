@@ -1025,14 +1025,20 @@ async function sendPromptToSpecificTab(tabId, text) {
                 }
 
                 function findFirstSelector(selectors) {
-                    for (const selector of selectors) {
-                        const element = document.querySelector(selector);
+                    const joined = selectors.join(',');
+                    const elements = document.querySelectorAll(joined);
 
-                        if (element) {
-                            return {
-                                selector,
-                                element
-                            };
+                    if (elements.length > 0) {
+                        for (const selector of selectors) {
+                            for (let i = 0; i < elements.length; i++) {
+                                const element = elements[i];
+                                if (element.matches(selector)) {
+                                    return {
+                                        selector,
+                                        element
+                                    };
+                                }
+                            }
                         }
                     }
 
