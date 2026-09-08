@@ -245,7 +245,7 @@
       if (composer.tagName && composer.tagName.toLowerCase() === 'textarea') {
         composer.value = '';
       } else {
-        composer.innerHTML = '';
+        composer.textContent = '';
       }
 
       composer.dispatchEvent(new InputEvent('input', {
