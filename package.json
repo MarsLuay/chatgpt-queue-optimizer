@@ -2,7 +2,7 @@
   "name": "chatgpt-queue-optimizer",
   "version": "1.0.0",
   "scripts": {
-    "test": "node --test tests/background.test.js"
+    "test": "node --test"
   },
   "license": "ISC"
 }
