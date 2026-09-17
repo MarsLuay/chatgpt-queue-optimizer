@@ -37,7 +37,38 @@
       this._lastNoMessageLog = 0;
       this.refreshTimeout = null;
 
+      this.provider = this.resolveProvider();
+
       this.init();
+    }
+
+    resolveProvider() {
+      let registry = typeof globalThis !== 'undefined' ? globalThis.ProviderAdapterRegistry : null;
+      if (!registry && typeof require === 'function') {
+        try {
+          registry = require('./provider-adapter.js');
+        } catch {}
+      }
+
+      const currentUrl = typeof location !== 'undefined' ? location.href : (typeof window !== 'undefined' ? window.location?.href : '');
+      if (typeof getProviderForUrl === 'function') {
+        const found = getProviderForUrl(currentUrl);
+        if (found) return found;
+      }
+      if (registry && typeof registry.getProviderForUrl === 'function') {
+        const found = registry.getProviderForUrl(currentUrl);
+        if (found) return found;
+      }
+      if (typeof getProvider === 'function') {
+        return getProvider('chatgpt');
+      }
+      if (registry && typeof registry.getProvider === 'function') {
+        return registry.getProvider('chatgpt');
+      }
+      if (typeof globalThis !== 'undefined' && globalThis.ProviderAdapters?.chatgpt) {
+        return globalThis.ProviderAdapters.chatgpt;
+      }
+      return null;
     }
 
     async init() {
@@ -110,6 +141,15 @@
             }
           });
 
+          break;
+        }
+
+        case 'GET_CONVERSATION_IDENTITY': {
+          const locationOrUrl = typeof window !== 'undefined' ? window.location : (typeof location !== 'undefined' ? location : '');
+          const identity = this.provider && typeof this.provider.getConversationIdentity === 'function'
+            ? this.provider.getConversationIdentity(locationOrUrl)
+            : { provider: 'chatgpt', type: 'unknown', conversationId: null, key: 'chatgpt:unknown' };
+          sendResponse({ ok: true, identity });
           break;
         }
 
@@ -204,7 +244,10 @@
 
       target.addEventListener('submit', markSubmission, true);
       target.addEventListener('click', (event) => {
-        const button = event.target?.closest?.('button[data-testid="send-button"], button[data-testid="fruitjuice-send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"]');
+        const sendButtonSelectors = this.provider?.selectors?.sendButton
+          ? this.provider.selectors.sendButton.join(', ')
+          : 'button[data-testid="send-button"], button[data-testid="fruitjuice-send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"]';
+        const button = event.target?.closest?.(sendButtonSelectors);
         if (button) {
           markSubmission();
         }
@@ -339,7 +382,11 @@
     }
 
     getComposerFromEventTarget(target) {
-      const element = target && target.nodeType === Node.ELEMENT_NODE
+      if (this.provider && typeof this.provider.getComposerFromEventTarget === 'function') {
+        return this.provider.getComposerFromEventTarget(target, '#cpo-root');
+      }
+
+      const element = target && (target.nodeType === 1 || target.nodeType === (typeof Node !== 'undefined' ? Node.ELEMENT_NODE : 1))
         ? target
         : target?.parentElement;
 
@@ -366,6 +413,10 @@
     getComposerText(composer) {
       if (!composer) return '';
 
+      if (this.provider && typeof this.provider.getComposerText === 'function') {
+        return this.provider.getComposerText(composer);
+      }
+
       if (composer.tagName && composer.tagName.toLowerCase() === 'textarea') {
         return composer.value || '';
       }
@@ -376,7 +427,14 @@
     clearComposer(composer) {
       if (!composer) return;
 
-      composer.focus();
+      if (this.provider && typeof this.provider.clearComposer === 'function') {
+        this.provider.clearComposer(composer);
+        return;
+      }
+
+      if (typeof composer.focus === 'function') {
+        composer.focus();
+      }
 
       if (composer.tagName && composer.tagName.toLowerCase() === 'textarea') {
         composer.value = '';
@@ -384,11 +442,13 @@
         composer.textContent = '';
       }
 
-      composer.dispatchEvent(new InputEvent('input', {
-        bubbles: true,
-        inputType: 'deleteContentBackward',
-        data: null
-      }));
+      if (typeof InputEvent !== 'undefined') {
+        composer.dispatchEvent(new InputEvent('input', {
+          bubbles: true,
+          inputType: 'deleteContentBackward',
+          data: null
+        }));
+      }
     }
 
     isChatGPTGenerating() {
@@ -397,145 +457,25 @@
     }
 
     getGenerationState() {
-        const buttons = Array.from(document.querySelectorAll('button'));
-        const stopButton = buttons.find(button => {
-            if (button.disabled || button.getAttribute('aria-disabled') === 'true') {
-                return false;
-            }
-            const testId = (button.getAttribute('data-testid') || '').toLowerCase();
-            if (testId === 'stop-button' || testId.includes('stop')) {
-                return true;
-            }
-            const label = (
-                button.getAttribute('aria-label') ||
-                button.innerText ||
-                button.textContent ||
-                ''
-            ).toLowerCase().trim();
+      if (this.provider && typeof this.provider.getGenerationState === 'function') {
+        return this.provider.getGenerationState(document);
+      }
 
-            return (
-                label === 'stop generating' ||
-                label === 'stop streaming' ||
-                label === 'stop response' ||
-                label.includes('stop generating') ||
-                label.includes('stop streaming') ||
-                label.includes('stop response') ||
-                label.includes('interrupt') ||
-                (label === 'stop' && (button.closest?.('form, [data-testid*="composer"], [data-testid*="action"]') || testId.includes('stop')))
-            );
-        });
-        const hasActiveStopButton = !!stopButton;
-
-        const resultStreaming =
-            document.querySelector('.result-streaming') ||
-            document.querySelector('[data-testid*="conversation-turn"] .result-streaming') ||
-            document.querySelector('[data-message-streaming="true"]') ||
-            document.querySelector('[data-is-streaming="true"]') ||
-            document.querySelector('[data-testid*="streaming"]');
-        const hasResultStreaming = !!resultStreaming;
-
-        // Active status/tool/reasoning/research detection in active status elements or latest turn
-        const statusNodes = Array.from(document.querySelectorAll(
-            '[role="status"], [aria-live], [data-testid*="status"], [data-testid*="progress"], [data-testid*="research"], [data-testid*="thinking"], [data-testid*="reasoning"], [data-testid*="thought"], [data-testid*="tool-progress"], .result-thinking'
-        )).filter(node => node.getAttribute('aria-live') !== 'off');
-
-        const turns = Array.from(document.querySelectorAll('[data-testid^="conversation-turn"], article'));
-        const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
-        const latestTurnActiveElement = latestTurn
-            ? latestTurn.querySelector(
-                '[role="status"], [aria-live], [data-testid*="status"], [data-testid*="progress"], [data-testid*="research"], [data-testid*="thinking"], [data-testid*="reasoning"], [data-testid*="thought"], [data-testid*="tool-progress"], .result-thinking, svg.animate-spin, [class*="animate-spin"], [data-testid*="loading-spinner"]'
-            )
-            : null;
-
-        const activeNodes = [...statusNodes];
-        if (latestTurnActiveElement && !activeNodes.includes(latestTurnActiveElement)) {
-            activeNodes.push(latestTurnActiveElement);
-        }
-
-        const visibleActiveNodes = activeNodes.filter(node => !node.hidden && node.getAttribute('aria-hidden') !== 'true');
-        const hasActiveSpinner = visibleActiveNodes.some(node => node.querySelector?.('svg.animate-spin, [class*="animate-spin"]') || node.classList?.contains('animate-spin')) ||
-            !!latestTurn?.querySelector?.('svg.animate-spin, [class*="animate-spin"], [data-testid*="loading-spinner"]');
-
-        const statusText = visibleActiveNodes
-            .map(node => node.innerText || node.textContent || '')
-            .join(' ')
-            .replace(/\s+/g, ' ')
-            .trim()
-            .slice(0, 1200);
-        const activeTextLower = statusText.toLowerCase();
-
-        const researchProgressMarkers = [
-            'deep research',
-            'researching',
-            'searching the web',
-            'searching sources',
-            'reading sources',
-            'analyzing sources',
-            'gathering sources',
-            'checking sources',
-            'synthesizing',
-            'creating report',
-            'writing report',
-            'thinking',
-            'working'
-        ];
-
-        const matchedResearchMarker = researchProgressMarkers.find(marker => activeTextLower.includes(marker)) || '';
-        const hasActiveToolOrResearch = !!matchedResearchMarker || hasActiveSpinner;
-        const isDeepResearch = matchedResearchMarker === 'deep research' ||
-            activeTextLower.includes('deep research') ||
-            activeTextLower.includes('researching');
-
-        // Error detection in active alerts or latest turn
-        const alertNodes = Array.from(document.querySelectorAll(
-            '[role="alert"], [data-testid*="error"], .text-red-500, .border-red-500'
-        ));
-        const alertText = alertNodes.map(node => node.innerText || node.textContent || '').join(' ').toLowerCase();
-        const latestTurnText = latestTurn ? (latestTurn.innerText || latestTurn.textContent || '').toLowerCase() : '';
-        const errorSearchText = alertText || latestTurnText;
-
-        const errorMarkers = [
-            'something went wrong',
-            'there was an error',
-            'error generating a response',
-            'network error',
-            'failed to generate',
-            'try again later'
-        ];
-        const matchedError = errorMarkers.find(marker => errorSearchText.includes(marker)) || '';
-        const errorSnippet = matchedError
-            ? errorSearchText
-                .slice(Math.max(0, errorSearchText.indexOf(matchedError) - 60), errorSearchText.indexOf(matchedError) + 160)
-                .replace(/\s+/g, ' ')
-                .trim()
-            : '';
-
-        const hasTryAgainButton = buttons.some(btn => {
-            if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') return false;
-            const text = (btn.innerText || btn.getAttribute('aria-label') || '').toLowerCase().trim();
-            return text === 'retry' || text === 'try again';
-        });
-
-        const hasKnownError = !!matchedError;
-        const isWorking = hasActiveStopButton || hasResultStreaming || hasActiveToolOrResearch;
-        const generating = !hasKnownError && isWorking;
-        const deepResearchActive = !hasKnownError && isWorking && isDeepResearch;
-
-        return {
-            generating,
-            hasActiveStopButton,
-            hasResultStreaming,
-            hasActiveToolOrResearch,
-            deepResearchActive,
-            matchedResearchMarker,
-            researchStatusPreview: statusText,
-            hasError: hasKnownError,
-            hasTryAgainButton: !!hasTryAgainButton,
-            errorSnippet,
-            matchedError,
-            url: typeof location !== 'undefined' ? location.href : '',
-            title: typeof document !== 'undefined' ? document.title : ''
-        };
+      return {
+        generating: false,
+        hasActiveStopButton: false,
+        hasResultStreaming: false,
+        hasActiveToolOrResearch: false,
+        deepResearchActive: false,
+        matchedResearchMarker: null,
+        researchStatusPreview: null,
+        hasError: false,
+        hasTryAgainButton: false,
+        errorSnippet: '',
+        matchedError: '',
+        url: typeof location !== 'undefined' ? location.href : '',
+        title: typeof document !== 'undefined' ? document.title : ''
+      };
     }
 
     queueComposerMessage(text, composer, diagnostic = null) {
@@ -545,12 +485,18 @@
 
       if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
         try {
+          const locationOrUrl = typeof window !== 'undefined' ? window.location : (typeof location !== 'undefined' ? location : '');
+          const conversationIdentity = this.provider && typeof this.provider.getConversationIdentity === 'function'
+            ? this.provider.getConversationIdentity(locationOrUrl)
+            : null;
+
           chrome.runtime.sendMessage({
             action: 'enqueueMessage',
             message: text,
             source: 'composer-enter',
             position: 'end',
-            waitForIdleBeforeStart: true
+            waitForIdleBeforeStart: true,
+            conversationIdentity
           }, (response) => {
             const error = chrome.runtime?.lastError;
             this.state.inlineQueueInFlight = false;
@@ -637,6 +583,10 @@
     }
 
     getMainRoot() {
+      if (this.provider && typeof this.provider.getMainRoot === 'function') {
+        return this.provider.getMainRoot(document);
+      }
+
       return (
         document.querySelector('main') ||
         document.querySelector('[role="main"]') ||
@@ -655,41 +605,18 @@
       }
 
       const mainRoot = this.getMainRoot();
-      const collected = [];
+      let messages = [];
 
-      const selectors = [
-        '[data-testid^="conversation-turn"]',
-        '[data-testid*="conversation-turn"]',
-        'article[data-testid]',
-        'article',
-        '[data-message-author-role]',
-        '[data-message-id]',
-        '[data-testid="conversation-turn"]'
-      ];
-
-      try {
-        const combinedSelector = selectors.join(',');
-        const nodes = Array.from(document.querySelectorAll(combinedSelector));
-
-        for (const node of nodes) {
-          if (!mainRoot.contains(node)) continue;
-
-          const normalized = this.normalizeMessageNode(node, mainRoot);
-
-          if (normalized && this.isValidMessageNode(normalized, mainRoot)) {
-            collected.push(normalized);
-          }
-        }
-      } catch (error) {
-        console.warn(`CPO: Combined selector failed`, error);
+      if (this.provider && typeof this.provider.getMessageNodes === 'function') {
+        messages = this.provider.getMessageNodes(document, mainRoot);
+      } else {
+        messages = this.getFallbackMessages(mainRoot);
       }
 
-      let messages = this.sortMessagesByPosition(this.removeDuplicates(collected));
-
-      if (messages.length > 0) {
+      if (messages && messages.length > 0) {
         if (!this._loggedSelector) {
-          this._loggedSelector = 'combined-chatgpt-selectors';
-          console.log(`CPO: Found ${messages.length} messages using combined selectors`);
+          this._loggedSelector = 'provider-adapter-messages';
+          console.log(`CPO: Found ${messages.length} messages using ${this.provider?.name || 'ChatGPT'} adapter`);
         }
 
         this._cachedMessages = messages;
@@ -698,17 +625,21 @@
         return messages;
       }
 
-      messages = this.getFallbackMessages(mainRoot);
+      const now = Date.now();
+      if (now - this._lastNoMessageLog > 5000) {
+        console.warn(`CPO: No ${this.provider?.name || 'ChatGPT'} messages found. Open a conversation with visible messages, then refresh the tab.`);
+        this._lastNoMessageLog = now;
+      }
 
-      this._cachedMessages = messages;
-      this._cacheTimestamp = Date.now();
-
-      return messages;
+      return [];
     }
 
     normalizeMessageNode(node, mainRoot) {
-      if (!node || !mainRoot.contains(node)) return null;
+      if (this.provider && typeof this.provider.normalizeMessageNode === 'function') {
+        return this.provider.normalizeMessageNode(node, mainRoot);
+      }
 
+      if (!node || !mainRoot.contains(node)) return null;
       if (node.closest('#cpo-root')) return null;
       if (node.classList && node.classList.contains('cpo-more-banner')) return null;
 
@@ -726,6 +657,10 @@
     }
 
     isValidMessageNode(node, mainRoot) {
+      if (this.provider && typeof this.provider.isValidMessageNode === 'function') {
+        return this.provider.isValidMessageNode(node, mainRoot);
+      }
+
       if (!node || !mainRoot.contains(node)) return false;
       if (node.closest('#cpo-root')) return false;
       if (node.classList && node.classList.contains('cpo-more-banner')) return false;
@@ -746,10 +681,12 @@
       if (text.length < 1) return false;
 
       const hasMessageMarker =
-        node.matches('[data-testid^="conversation-turn"]') ||
-        node.matches('[data-testid*="conversation-turn"]') ||
-        node.matches('article') ||
-        node.matches('[data-message-id]') ||
+        (typeof node.matches === 'function' && (
+          node.matches('[data-testid^="conversation-turn"]') ||
+          node.matches('[data-testid*="conversation-turn"]') ||
+          node.matches('article') ||
+          node.matches('[data-message-id]')
+        )) ||
         !!node.querySelector('[data-message-author-role], [data-message-id]');
 
       if (!hasMessageMarker) return false;
@@ -758,60 +695,18 @@
     }
 
     getFallbackMessages(mainRoot = this.getMainRoot()) {
-      const fallbackSelectors = [
-        'main article',
-        'main [data-message-author-role]',
-        'main [data-message-id]',
-        'main div[class*="group"]',
-        '[role="main"] article',
-        '[role="main"] [data-message-author-role]',
-        '[role="main"] div[class*="group"]'
-      ];
-
-      const collected = [];
-
-      try {
-        const combinedSelector = fallbackSelectors.join(', ');
-        const nodes = Array.from(document.querySelectorAll(combinedSelector));
-
-        for (const node of nodes) {
-          if (!mainRoot.contains(node)) continue;
-          if (node.closest('#cpo-root')) continue;
-          if (node.id && node.id.includes('thread-bottom')) continue;
-          if (node.querySelector('textarea, input[type="text"], form')) continue;
-
-          const text = node.textContent.trim();
-          if (text.length < 15) continue;
-
-          const normalized = this.normalizeMessageNode(node, mainRoot);
-          if (normalized && this.isValidFallbackNode(normalized, mainRoot)) {
-            collected.push(normalized);
-          }
-        }
-      } catch (e) {
-        console.warn('CPO: Fallback querySelectorAll failed', e);
-      }
-
-      const result = this.sortMessagesByPosition(this.removeDuplicates(collected));
-
-      if (result.length > 0) {
-        if (!this._loggedSelector) {
-          this._loggedSelector = 'fallback-selectors';
-          console.log(`CPO: Fallback selectors found ${result.length} messages`);
-        }
-        return result;
-      }
-
-      const now = Date.now();
-      if (now - this._lastNoMessageLog > 5000) {
-        console.warn('CPO: No ChatGPT messages found. Open a conversation with visible messages, then refresh the tab.');
-        this._lastNoMessageLog = now;
+      if (this.provider && typeof this.provider.getFallbackMessages === 'function') {
+        return this.provider.getFallbackMessages(document, mainRoot);
       }
 
       return [];
     }
 
     isValidFallbackNode(node, mainRoot) {
+      if (this.provider && typeof this.provider.isValidFallbackNode === 'function') {
+        return this.provider.isValidFallbackNode(node, mainRoot);
+      }
+
       if (!node || !mainRoot.contains(node)) return false;
       if (node.closest('#cpo-root')) return false;
       if (node.classList && node.classList.contains('cpo-more-banner')) return false;
@@ -823,9 +718,11 @@
 
       const hasContent =
         node.querySelector('p, pre, code, ul, ol, h1, h2, h3, h4, h5, h6, [data-message-author-role]') ||
-        node.matches('article') ||
-        node.matches('[data-message-id]') ||
-        node.matches('[data-testid*="conversation-turn"]');
+        (typeof node.matches === 'function' && (
+          node.matches('article') ||
+          node.matches('[data-message-id]') ||
+          node.matches('[data-testid*="conversation-turn"]')
+        ));
 
       return !!hasContent;
     }

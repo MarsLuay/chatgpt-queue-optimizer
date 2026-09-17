@@ -1,17 +1,41 @@
 const CHATGPT_HOSTS = new Set(['chatgpt.com', 'chat.openai.com']);
 
-function isChatGPTUrl(url) {
+const PROVIDER_HOSTS = {
+    chatgpt: CHATGPT_HOSTS
+};
+
+function getUrlProvider(url) {
     if (typeof url !== 'string') {
-        return false;
+        return null;
     }
 
     try {
         const parsed = new URL(url);
 
-        return parsed.protocol === 'https:' && CHATGPT_HOSTS.has(parsed.hostname.toLowerCase());
+        if (parsed.protocol !== 'https:') {
+            return null;
+        }
+
+        const hostname = parsed.hostname.toLowerCase();
+
+        for (const [providerId, hosts] of Object.entries(PROVIDER_HOSTS)) {
+            if (hosts.has(hostname)) {
+                return providerId;
+            }
+        }
+
+        return null;
     } catch {
-        return false;
+        return null;
     }
+}
+
+function isSupportedProviderUrl(url) {
+    return getUrlProvider(url) !== null;
+}
+
+function isChatGPTUrl(url) {
+    return getUrlProvider(url) === 'chatgpt';
 }
 
 function extensionApiPromise(callWithCallback, callWithoutCallback) {
@@ -69,12 +93,19 @@ function extensionApiPromise(callWithCallback, callWithoutCallback) {
 
 if (typeof globalThis !== 'undefined') {
     globalThis.extensionApiPromise = extensionApiPromise;
+    globalThis.CHATGPT_HOSTS = CHATGPT_HOSTS;
+    globalThis.PROVIDER_HOSTS = PROVIDER_HOSTS;
+    globalThis.getUrlProvider = getUrlProvider;
+    globalThis.isSupportedProviderUrl = isSupportedProviderUrl;
     globalThis.isChatGPTUrl = isChatGPTUrl;
 }
 
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
         CHATGPT_HOSTS,
+        PROVIDER_HOSTS,
+        getUrlProvider,
+        isSupportedProviderUrl,
         isChatGPTUrl,
         extensionApiPromise
     };

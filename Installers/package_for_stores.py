@@ -21,6 +21,8 @@ REPO_FILES = [
     "manifest.json",
     "background.js",
     "content.js",
+    "provider-adapter.js",
+    "utils.js",
     "popup.html",
     "popup.js",
     "options.html",
@@ -59,7 +61,7 @@ def build_firefox_source(repo_dir, target_dir):
         "offline_enabled": base.get("offline_enabled", True),
         "browser_action": browser_action,
         "background": {
-            "scripts": ["background.js"],
+            "scripts": ["utils.js", "provider-adapter.js", "background.js"],
             "persistent": True,
         },
         "options_ui": {

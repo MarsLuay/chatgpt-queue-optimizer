@@ -5,7 +5,7 @@ const path = require('node:path');
 
 const repoRoot = path.resolve(__dirname, '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(repoRoot, 'manifest.json'), 'utf8'));
-const sourceFiles = ['background.js', 'content.js', 'popup.js', 'utils.js'];
+const sourceFiles = ['background.js', 'content.js', 'popup.js', 'provider-adapter.js', 'utils.js'];
 const source = sourceFiles
     .map((file) => fs.readFileSync(path.join(repoRoot, file), 'utf8'))
     .join('\n');

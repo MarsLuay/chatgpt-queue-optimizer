@@ -69,7 +69,8 @@ document.addEventListener('DOMContentLoaded', function () {
     const EDIT_SEQUENCE_VALUE = '__edit_selected_sequence__';
     let selectedSequenceName = '';
     let editingSequenceName = '';
-    const CHATGPT_URL_PATTERNS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
+    const PROVIDER_URL_PATTERNS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
+    const CHATGPT_URL_PATTERNS = PROVIDER_URL_PATTERNS;
 
     function tabsQuery(queryInfo) {
         return extensionApiPromise(
@@ -193,13 +194,13 @@ document.addEventListener('DOMContentLoaded', function () {
         return null;
     }
 
-    async function getAllChatGPTTabs() {
+    async function getAllSupportedTabs() {
         const collected = [];
 
         try {
-            collected.push(...await tabsQuery({ url: CHATGPT_URL_PATTERNS }));
+            collected.push(...await tabsQuery({ url: PROVIDER_URL_PATTERNS }));
         } catch {
-            for (const pattern of CHATGPT_URL_PATTERNS) {
+            for (const pattern of PROVIDER_URL_PATTERNS) {
                 try {
                     collected.push(...await tabsQuery({ url: pattern }));
                 } catch {
@@ -210,13 +211,13 @@ document.addEventListener('DOMContentLoaded', function () {
 
         try {
             const allTabs = await tabsQuery({});
-            collected.push(...allTabs.filter(tab => isChatGPTUrl(getTabUrl(tab))));
+            collected.push(...allTabs.filter(tab => isSupportedProviderUrl(getTabUrl(tab))));
         } catch {
             // URL-filtered tab queries above are enough when all-tabs scanning is unavailable.
         }
 
         return dedupeTabs(collected)
-            .filter(tab => isChatGPTUrl(getTabUrl(tab)))
+            .filter(tab => isSupportedProviderUrl(getTabUrl(tab)))
             .toSorted((a, b) => {
                 if (!!a.active !== !!b.active) {
                     return a.active ? -1 : 1;
@@ -225,6 +226,8 @@ document.addEventListener('DOMContentLoaded', function () {
                 return cleanTabTitle(a.title || '').localeCompare(cleanTabTitle(b.title || ''));
             });
     }
+
+    const getAllChatGPTTabs = getAllSupportedTabs;
 
     chrome.storage.local.get(['messages', 'sequences'], function (data) {
         if (Array.isArray(data.messages)) {
