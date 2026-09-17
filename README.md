@@ -18,6 +18,7 @@ The extension runs on:
 - `https://chatgpt.com/*`
 - `https://chat.openai.com/*`
 - `https://gemini.google.com/*` (queue support; optimizer unsupported)
+- `https://claude.ai/*` (queue support; optimizer unsupported)
 
 ## Install
 
@@ -69,7 +70,7 @@ A temporary Firefox add-on is removed when Firefox restarts. Use the installer f
 
 ## Quick start
 
-1. Open ChatGPT or Gemini in a supported tab.
+1. Open ChatGPT, Gemini, or Claude in a supported tab.
 2. Open the extension popup and stay on **Queue Tool**.
 3. Under **Run sequence on**, choose the supported tab you want to control. Use **Refresh** if a newly opened tab is missing.
 4. Expand **Make a sequence**, enter a message, press `+`, and repeat for each step.

@@ -41,7 +41,8 @@
       "matches": [
         "https://chatgpt.com/*",
         "https://chat.openai.com/*",
-        "https://gemini.google.com/*"
+        "https://gemini.google.com/*",
+        "https://claude.ai/*"
       ],
       "run_at": "document_start"
     }
@@ -50,7 +51,8 @@
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",
-    "https://gemini.google.com/*"
+    "https://gemini.google.com/*",
+    "https://claude.ai/*"
   ],
 
   "permissions": [

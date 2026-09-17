@@ -21,6 +21,7 @@ const EXPECTED_PERMISSIONS = [
 const EXPECTED_HOSTS = [
     'https://chat.openai.com/*',
     'https://chatgpt.com/*',
+    'https://claude.ai/*',
     'https://gemini.google.com/*'
 ];
 
