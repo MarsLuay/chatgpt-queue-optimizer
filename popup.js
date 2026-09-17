@@ -35,6 +35,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const clearQueueLogButton = document.getElementById('clear-queue-log');
     const queueDeepResearchAware = document.getElementById('queue-deep-research-aware');
     const queueUnlimitedRetryWait = document.getElementById('queue-unlimited-retry-wait');
+    const queueDeliveryTimeoutRefresh = document.getElementById('queue-delivery-timeout-refresh');
 
     const optimizerStatus = document.getElementById('optimizer-status');
     const optimizerWindowSize = document.getElementById('optimizer-window-size');
@@ -268,6 +269,10 @@ document.addEventListener('DOMContentLoaded', function () {
 
     if (queueUnlimitedRetryWait) {
         queueUnlimitedRetryWait.addEventListener('change', saveQueueSettings);
+    }
+
+    if (queueDeliveryTimeoutRefresh) {
+        queueDeliveryTimeoutRefresh.addEventListener('change', saveQueueSettings);
     }
 
     chrome.runtime.onMessage.addListener((request) => {
@@ -1553,30 +1558,33 @@ The sequence should do the following: `;
     }
 
     function loadQueueSettings() {
-        if (!queueDeepResearchAware || !queueUnlimitedRetryWait) {
+        if (!queueDeepResearchAware || !queueUnlimitedRetryWait || !queueDeliveryTimeoutRefresh) {
             return;
         }
 
         chrome.storage.sync.get(
             {
                 queueDeepResearchAware: true,
-                queueUnlimitedRetryWait: false
+                queueUnlimitedRetryWait: false,
+                queueDeliveryTimeoutRefresh: true
             },
             function (config) {
                 queueDeepResearchAware.checked = config.queueDeepResearchAware !== false;
                 queueUnlimitedRetryWait.checked = config.queueUnlimitedRetryWait === true;
+                queueDeliveryTimeoutRefresh.checked = config.queueDeliveryTimeoutRefresh !== false;
             }
         );
     }
 
     async function saveQueueSettings() {
-        if (!queueDeepResearchAware || !queueUnlimitedRetryWait) {
+        if (!queueDeepResearchAware || !queueUnlimitedRetryWait || !queueDeliveryTimeoutRefresh) {
             return;
         }
 
         await setSyncStorage({
             queueDeepResearchAware: queueDeepResearchAware.checked,
-            queueUnlimitedRetryWait: queueUnlimitedRetryWait.checked
+            queueUnlimitedRetryWait: queueUnlimitedRetryWait.checked,
+            queueDeliveryTimeoutRefresh: queueDeliveryTimeoutRefresh.checked
         });
 
         showTempStatus('Queue settings saved.');

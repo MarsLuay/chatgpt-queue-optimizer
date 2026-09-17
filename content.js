@@ -159,6 +159,37 @@
           break;
         }
 
+        case 'INSPECT_GENERATION_STATE': {
+          const state = this.getGenerationState();
+          const lastAssistant = this.provider && typeof this.provider.getLastAssistantTurn === 'function'
+            ? this.provider.getLastAssistantTurn(document)
+            : null;
+          sendResponse({ ok: true, state, lastAssistant });
+          break;
+        }
+
+        case 'CLICK_RETRY_BUTTON': {
+          const clicked = this.provider && typeof this.provider.clickRetryButton === 'function'
+            ? this.provider.clickRetryButton(document)
+            : false;
+          sendResponse({ ok: clicked });
+          break;
+        }
+
+        case 'RELOAD_PAGE': {
+          sendResponse({ ok: true });
+          setTimeout(() => {
+            try {
+              if (typeof window !== 'undefined' && window.location) {
+                window.location.reload();
+              }
+            } catch (err) {
+              console.warn('CPO: Failed to reload page', err);
+            }
+          }, 50);
+          break;
+        }
+
         case 'GET_ENTER_DIAGNOSTICS': {
           sendResponse({
             diagnostics: this.state.enterDiagnostics || []
@@ -470,6 +501,7 @@
         matchedResearchMarker: null,
         researchStatusPreview: null,
         hasError: false,
+        hasDeliveryTimedOut: false,
         hasTryAgainButton: false,
         errorSnippet: '',
         matchedError: '',

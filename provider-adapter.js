@@ -52,7 +52,9 @@
             '[role="alert"]',
             '[data-testid*="error"]',
             '.text-red-500',
-            '.border-red-500'
+            '.border-red-500',
+            '.text-token-text-error',
+            '[class*="error-message"]'
         ],
         messages: [
             '[data-testid^="conversation-turn"]',
@@ -129,12 +131,25 @@
                 matchedResearchMarker: null,
                 researchStatusPreview: null,
                 hasError: false,
+                hasDeliveryTimedOut: false,
                 hasTryAgainButton: false,
                 errorSnippet: '',
                 matchedError: '',
                 url: '',
                 title: ''
             };
+        }
+
+        getRetryButton(doc) {
+            return null;
+        }
+
+        clickRetryButton(doc) {
+            return false;
+        }
+
+        getLastAssistantTurn(doc) {
+            return null;
         }
 
         getMainRoot(doc) {
@@ -416,9 +431,19 @@
             const alertNodes = Array.from(doc.querySelectorAll(alertSelector));
             const alertText = alertNodes.map(node => node.innerText || node.textContent || '').join(' ').toLowerCase();
             const latestTurnText = latestTurn ? (latestTurn.innerText || latestTurn.textContent || '').toLowerCase() : '';
-            const errorSearchText = alertText || latestTurnText;
+            const errorSearchText = `${alertText} ${latestTurnText}`.trim();
 
-            const errorMarkers = [
+            const deliveryTimeoutMarkers = [
+                'message delivery timed out',
+                'delivery timed out',
+                'message delivery timeout',
+                'delivery timeout',
+                'timed out. please try again'
+            ];
+            const matchedDeliveryTimeout = deliveryTimeoutMarkers.find(marker => errorSearchText.includes(marker)) || '';
+            const hasDeliveryTimedOut = !!matchedDeliveryTimeout;
+
+            const generalErrorMarkers = [
                 'something went wrong',
                 'there was an error',
                 'error generating a response',
@@ -426,21 +451,24 @@
                 'failed to generate',
                 'try again later'
             ];
-            const matchedError = errorMarkers.find(marker => errorSearchText.includes(marker)) || '';
-            const errorSnippet = matchedError
+            const matchedGeneralError = generalErrorMarkers.find(marker => errorSearchText.includes(marker)) || '';
+
+            const matchedError = matchedDeliveryTimeout
+                ? 'Message delivery timed out. Please try again.'
+                : matchedGeneralError;
+
+            const errorSnippetTarget = matchedDeliveryTimeout || matchedGeneralError;
+            const errorSnippet = errorSnippetTarget
                 ? errorSearchText
-                    .slice(Math.max(0, errorSearchText.indexOf(matchedError) - 60), errorSearchText.indexOf(matchedError) + 160)
+                    .slice(Math.max(0, errorSearchText.indexOf(errorSnippetTarget) - 60), errorSearchText.indexOf(errorSnippetTarget) + 160)
                     .replace(/\s+/g, ' ')
                     .trim()
                 : '';
 
-            const hasTryAgainButton = buttons.some(btn => {
-                if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') return false;
-                const text = (btn.innerText || btn.getAttribute('aria-label') || '').toLowerCase().trim();
-                return text === 'retry' || text === 'try again';
-            });
+            const retryBtn = this.getRetryButton(doc);
+            const hasTryAgainButton = !!retryBtn;
 
-            const hasKnownError = !!matchedError;
+            const hasKnownError = !!matchedError || hasDeliveryTimedOut;
             const isWorking = hasActiveStopButton || hasResultStreaming || hasActiveToolOrResearch;
             const generating = !hasKnownError && isWorking;
             const deepResearchActive = !hasKnownError && isWorking && isDeepResearch;
@@ -457,11 +485,129 @@
                 matchedResearchMarker,
                 researchStatusPreview: statusText,
                 hasError: hasKnownError,
-                hasTryAgainButton: !!hasTryAgainButton,
+                hasDeliveryTimedOut,
+                hasTryAgainButton,
                 errorSnippet,
                 matchedError,
                 url,
                 title
+            };
+        }
+
+        getRetryButton(doc = (typeof document !== 'undefined' ? document : null)) {
+            if (!doc) return null;
+
+            const isRetryOrRegenerate = (btn) => {
+                if (!btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true') {
+                    return false;
+                }
+                const testId = (btn.getAttribute('data-testid') || '').toLowerCase();
+                if (testId === 'retry-button' || testId.includes('retry') || testId.includes('regenerate')) {
+                    return true;
+                }
+                const label = (btn.getAttribute('aria-label') || '').toLowerCase().trim();
+                if (label === 'retry' || label === 'try again' || label === 'regenerate' || label === 'regenerate response' ||
+                    label.includes('try again') || label.includes('regenerate') || label.includes('retry')) {
+                    return true;
+                }
+                const text = (btn.innerText || btn.textContent || '').toLowerCase().trim();
+                return text === 'retry' || text === 'try again' || text === 'regenerate' || text === 'regenerate response' ||
+                    text.includes('try again') || text.includes('regenerate') || text.includes('retry');
+            };
+
+            const turns = Array.from(doc.querySelectorAll('[data-testid^="conversation-turn"], article'));
+            const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
+
+            if (latestTurn) {
+                const turnButtons = Array.from(latestTurn.querySelectorAll('button'));
+                const foundInTurn = turnButtons.reverse().find(isRetryOrRegenerate);
+                if (foundInTurn) return foundInTurn;
+            }
+
+            const alertSelector = this.selectors.errorAlerts.join(',');
+            const alertNodes = Array.from(doc.querySelectorAll(alertSelector));
+            for (const alertNode of alertNodes) {
+                const alertButtons = Array.from(alertNode.querySelectorAll('button'));
+                const foundInAlert = alertButtons.reverse().find(isRetryOrRegenerate);
+                if (foundInAlert) return foundInAlert;
+            }
+
+            const allButtons = Array.from(doc.querySelectorAll('button'));
+            return allButtons.reverse().find(isRetryOrRegenerate) || null;
+        }
+
+        clickRetryButton(doc = (typeof document !== 'undefined' ? document : null)) {
+            const btn = this.getRetryButton(doc);
+            if (!btn) return false;
+            try {
+                btn.click();
+                return true;
+            } catch {
+                return false;
+            }
+        }
+
+        getLastAssistantTurn(doc = (typeof document !== 'undefined' ? document : null)) {
+            if (!doc) return null;
+
+            const turns = Array.from(doc.querySelectorAll('[data-testid^="conversation-turn"], article'));
+            if (turns.length === 0) return null;
+
+            const latestTurn = turns[turns.length - 1];
+            const isAssistant = !!(
+                latestTurn.querySelector('[data-message-author-role="assistant"]') ||
+                latestTurn.getAttribute('data-message-author-role') === 'assistant' ||
+                (
+                    !latestTurn.querySelector('[data-message-author-role="user"]') &&
+                    latestTurn.getAttribute('data-message-author-role') !== 'user' &&
+                    (latestTurn.querySelector('.markdown, [data-testid*="copy"], [aria-label*="Copy"]') || turns.length >= 2)
+                )
+            );
+
+            if (!isAssistant) {
+                return {
+                    isAssistant: false,
+                    text: '',
+                    hasError: false,
+                    hasDeliveryTimeout: false,
+                    hasRetry: false,
+                    hasCompletedText: false
+                };
+            }
+
+            const text = (latestTurn.innerText || latestTurn.textContent || '').trim();
+            const textLower = text.toLowerCase();
+
+            const deliveryTimeoutMarkers = [
+                'message delivery timed out',
+                'delivery timed out',
+                'message delivery timeout',
+                'delivery timeout',
+                'timed out. please try again'
+            ];
+            const hasDeliveryTimeout = deliveryTimeoutMarkers.some(marker => textLower.includes(marker));
+
+            const generalErrorMarkers = [
+                'something went wrong',
+                'there was an error',
+                'error generating a response',
+                'network error',
+                'failed to generate',
+                'try again later'
+            ];
+            const hasGeneralError = generalErrorMarkers.some(marker => textLower.includes(marker));
+            const hasError = hasDeliveryTimeout || hasGeneralError;
+
+            const retryBtn = this.getRetryButton(latestTurn);
+            const hasRetry = !!retryBtn;
+
+            return {
+                isAssistant: true,
+                text,
+                hasError,
+                hasDeliveryTimeout,
+                hasRetry,
+                hasCompletedText: isAssistant && !hasError && !hasRetry && text.length > 0
             };
         }
 
