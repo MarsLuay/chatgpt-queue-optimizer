@@ -11,7 +11,141 @@ const QUEUE_WAKE_ALARM_NAME = 'queue-wake';
 const QUEUE_WAKE_ALARM_PERIOD_MINUTES = 0.5;
 
 if (typeof importScripts === 'function') {
-    importScripts('utils.js');
+    importScripts('utils.js', 'provider-adapter.js');
+}
+
+let providerAdapterRegistry = typeof globalThis !== 'undefined' ? globalThis.ProviderAdapterRegistry : null;
+if (!providerAdapterRegistry && typeof require === 'function') {
+    try {
+        providerAdapterRegistry = require('./provider-adapter.js');
+    } catch {}
+}
+
+function getActiveProviderAdapter(urlOrId) {
+    if (typeof getProviderForUrl === 'function' && typeof urlOrId === 'string' && urlOrId.startsWith('http')) {
+        return getProviderForUrl(urlOrId);
+    }
+    if (providerAdapterRegistry && typeof providerAdapterRegistry.getProviderForUrl === 'function' && typeof urlOrId === 'string' && urlOrId.startsWith('http')) {
+        return providerAdapterRegistry.getProviderForUrl(urlOrId);
+    }
+    if (typeof getProvider === 'function') {
+        return getProvider(urlOrId || 'chatgpt');
+    }
+    if (providerAdapterRegistry && typeof providerAdapterRegistry.getProvider === 'function') {
+        return providerAdapterRegistry.getProvider(urlOrId || 'chatgpt');
+    }
+    return null;
+}
+
+async function resolveTabConversationIdentity(tabId) {
+    try {
+        const response = await sendTabMessage(tabId, { type: 'GET_CONVERSATION_IDENTITY' });
+        if (response && response.ok && response.identity) {
+            return response.identity;
+        }
+    } catch {
+        // Tab may not have content script ready
+    }
+
+    try {
+        const tab = await getTab(tabId);
+        const url = tab?.url || tab?.pendingUrl;
+        if (url) {
+            const provider = getActiveProviderAdapter(url) || getActiveProviderAdapter('chatgpt');
+            if (provider && typeof provider.getConversationIdentity === 'function') {
+                return provider.getConversationIdentity(url);
+            }
+        }
+    } catch {
+        // Tab query failed
+    }
+
+    return {
+        provider: 'chatgpt',
+        type: 'unknown',
+        conversationId: null,
+        key: 'chatgpt:unknown'
+    };
+}
+
+async function validateJobTargetConversation(tabId, job) {
+    const currentIdentity = await resolveTabConversationIdentity(tabId);
+
+    if (!job.provider) {
+        job.provider = currentIdentity.provider || 'chatgpt';
+    }
+
+    if (currentIdentity.provider && job.provider && currentIdentity.provider !== 'unknown' && currentIdentity.provider !== job.provider) {
+        return {
+            ok: false,
+            reason: `Provider mismatch: queue is bound to ${job.provider}, but tab is on ${currentIdentity.provider}.`,
+            currentIdentity
+        };
+    }
+
+    if (currentIdentity.type === 'unsupported') {
+        return {
+            ok: false,
+            reason: `Tab navigated away from conversation to unsupported page (${currentIdentity.key || 'unsupported'}). Queue paused to prevent sending into the wrong page.`,
+            currentIdentity
+        };
+    }
+
+    if (job.conversationType === 'new') {
+        if (currentIdentity.type === 'existing' && currentIdentity.conversationId) {
+            job.conversationId = currentIdentity.conversationId;
+            job.conversationType = 'existing';
+            job.targetKey = currentIdentity.key;
+            updateRunningJobsStorage();
+            return { ok: true, currentIdentity, updatedBinding: true };
+        }
+        if (currentIdentity.type === 'new') {
+            return { ok: true, currentIdentity };
+        }
+        return {
+            ok: false,
+            reason: `Conversation mismatch: expected new conversation, but tab is now on ${currentIdentity.type} (${currentIdentity.key}).`,
+            currentIdentity
+        };
+    }
+
+    if (job.conversationType === 'existing' && job.conversationId) {
+        if (currentIdentity.type === 'existing') {
+            if (currentIdentity.conversationId === job.conversationId) {
+                return { ok: true, currentIdentity };
+            }
+            return {
+                ok: false,
+                reason: `Conversation mismatch: tab was navigated from conversation "${job.conversationId}" to "${currentIdentity.conversationId}". Queue paused to prevent delivering prompts into the wrong conversation.`,
+                currentIdentity
+            };
+        }
+        if (currentIdentity.type === 'new') {
+            return {
+                ok: false,
+                reason: `Conversation mismatch: tab was navigated from conversation "${job.conversationId}" to a new conversation. Queue paused to prevent delivering prompts into the wrong conversation.`,
+                currentIdentity
+            };
+        }
+        return {
+            ok: false,
+            reason: `Conversation mismatch: tab was navigated away from conversation "${job.conversationId}".`,
+            currentIdentity
+        };
+    }
+
+    if (job.conversationType === 'unknown' || !job.conversationId) {
+        if (currentIdentity.type === 'existing' || currentIdentity.type === 'new') {
+            job.provider = currentIdentity.provider || 'chatgpt';
+            job.conversationId = currentIdentity.conversationId || null;
+            job.conversationType = currentIdentity.type;
+            job.targetKey = currentIdentity.key;
+            updateRunningJobsStorage();
+            return { ok: true, currentIdentity, boundFromUnknown: true };
+        }
+    }
+
+    return { ok: true, currentIdentity };
 }
 
 let queueLogWrite = Promise.resolve();
@@ -239,8 +373,17 @@ function restoreDurableJobs(durableJobs) {
 
         if (!currentMessage && queue.length === 0) continue;
 
+        const provider = rawJob.provider || 'chatgpt';
+        const conversationId = rawJob.conversationId || null;
+        const conversationType = rawJob.conversationType || (conversationId ? 'existing' : (rawJob.targetKey === 'chatgpt:new' ? 'new' : 'unknown'));
+        const targetKey = rawJob.targetKey || (conversationId ? `${provider}:c:${conversationId}` : `${provider}:${conversationType}`);
+
         const job = {
             tabId,
+            provider,
+            conversationId,
+            conversationType,
+            targetKey,
             queue,
             currentMessage,
             isRunning: rawJob.isRunning !== false && rawJob.isPaused !== true,
@@ -373,61 +516,75 @@ function handleLogAutomationEvent(request, sendResponse) {
 }
 
 function handleStartSequence(request, sendResponse) {
-    const tabId = request.tabId;
-    const messages = Array.isArray(request.messages)
-        ? request.messages.map(msg => String(msg || '').trim()).filter(Boolean)
-        : [];
+    (async () => {
+        const tabId = request.tabId;
+        const messages = Array.isArray(request.messages)
+            ? request.messages.map(msg => String(msg || '').trim()).filter(Boolean)
+            : [];
 
-    if (!tabId || messages.length === 0) {
-        logQueueEvent(tabId, 'warn', 'Could not start sequence: missing tab or messages.', {
-            messageCount: messages.length
+        if (!tabId || messages.length === 0) {
+            logQueueEvent(tabId, 'warn', 'Could not start sequence: missing tab or messages.', {
+                messageCount: messages.length
+            });
+            sendResponse({ ok: false, error: 'Missing tabId or messages.' });
+            return;
+        }
+
+        const existingJob = jobs.get(tabId);
+
+        if (existingJob && (existingJob.isRunning || existingJob.isPaused)) {
+            logQueueEvent(tabId, 'warn', 'Could not start sequence: queue already exists on tab.', {
+                status: getJobStatus(existingJob),
+                remaining: getRemainingCount(existingJob),
+                lastError: existingJob.lastError || ''
+            });
+            sendResponse({
+                ok: false,
+                error: 'A sequence is already running or paused on this tab. Use Send message next or stop/retry the existing queue.'
+            });
+            return;
+        }
+
+        const identity = request.conversationIdentity || await resolveTabConversationIdentity(tabId);
+        const provider = identity?.provider || 'chatgpt';
+        const conversationType = identity?.type || 'unknown';
+        const conversationId = identity?.conversationId || null;
+        const targetKey = identity?.key || (conversationId ? `${provider}:c:${conversationId}` : `${provider}:${conversationType}`);
+
+        jobs.set(tabId, {
+            tabId,
+            provider,
+            conversationId,
+            conversationType,
+            targetKey,
+            queue: [...messages],
+            currentMessage: null,
+            isRunning: true,
+            isPaused: false,
+            isStopped: false,
+            pausedReason: '',
+            lastError: '',
+            runId: createRunId(),
+            totalMessages: messages.length,
+            completedCount: 0,
+            currentCommandNumber: 0,
+            currentPhase: 'queued',
+            startedAt: Date.now(),
+            updatedAt: Date.now()
         });
-        sendResponse({ ok: false, error: 'Missing tabId or messages.' });
-        return;
-    }
 
-    const existingJob = jobs.get(tabId);
-
-    if (existingJob && (existingJob.isRunning || existingJob.isPaused)) {
-        logQueueEvent(tabId, 'warn', 'Could not start sequence: queue already exists on tab.', {
-            status: getJobStatus(existingJob),
-            remaining: getRemainingCount(existingJob),
-            lastError: existingJob.lastError || ''
+        logQueueEvent(tabId, 'info', `Started sequence with ${messages.length} command${messages.length === 1 ? '' : 's'}.`, {
+            totalMessages: messages.length,
+            firstMessagePreview: previewText(messages[0] || '', 160)
         });
-        sendResponse({
-            ok: false,
-            error: 'A sequence is already running or paused on this tab. Use Send message next or stop/retry the existing queue.'
-        });
-        return;
-    }
 
-    jobs.set(tabId, {
-        tabId,
-        queue: [...messages],
-        currentMessage: null,
-        isRunning: true,
-        isPaused: false,
-        isStopped: false,
-        pausedReason: '',
-        lastError: '',
-        runId: createRunId(),
-        totalMessages: messages.length,
-        completedCount: 0,
-        currentCommandNumber: 0,
-        currentPhase: 'queued',
-        startedAt: Date.now(),
-        updatedAt: Date.now()
+        updateRunningJobsStorage();
+        processQueue(tabId);
+
+        sendResponse({ ok: true, tabId });
+    })().catch((error) => {
+        sendResponse({ ok: false, error: error?.message || String(error) });
     });
-
-    logQueueEvent(tabId, 'info', `Started sequence with ${messages.length} command${messages.length === 1 ? '' : 's'}.`, {
-        totalMessages: messages.length,
-        firstMessagePreview: previewText(messages[0] || '', 160)
-    });
-
-    updateRunningJobsStorage();
-    processQueue(tabId);
-
-    sendResponse({ ok: true, tabId });
 }
 
 function enqueueToPausedJob(tabId, existingJob, message, addToEnd, source, sendResponse) {
@@ -489,9 +646,19 @@ function enqueueToRunningJob(tabId, existingJob, message, addToEnd, source, send
     });
 }
 
-function startNewJobFromEnqueue(tabId, message, waitForIdleBeforeStart, source, sendResponse) {
+async function startNewJobFromEnqueue(tabId, message, waitForIdleBeforeStart, source, sendResponse, conversationIdentity) {
+    const identity = conversationIdentity || await resolveTabConversationIdentity(tabId);
+    const provider = identity?.provider || 'chatgpt';
+    const conversationType = identity?.type || 'unknown';
+    const conversationId = identity?.conversationId || null;
+    const targetKey = identity?.key || (conversationId ? `${provider}:c:${conversationId}` : `${provider}:${conversationType}`);
+
     jobs.set(tabId, {
         tabId,
+        provider,
+        conversationId,
+        conversationType,
+        targetKey,
         queue: [message],
         currentMessage: null,
         isRunning: true,
@@ -538,31 +705,36 @@ function startNewJobFromEnqueue(tabId, message, waitForIdleBeforeStart, source, 
 }
 
 function handleEnqueueMessage(request, sender, sendResponse) {
-    const tabId = Number(request.tabId || sender?.tab?.id || 0);
-    const message = String(request.message || '').trim();
-    const addToEnd = request.position === 'end';
-    const waitForIdleBeforeStart = request.waitForIdleBeforeStart === true;
-    const source = request.source || 'popup';
+    (async () => {
+        const tabId = Number(request.tabId || sender?.tab?.id || 0);
+        const message = String(request.message || '').trim();
+        const addToEnd = request.position === 'end';
+        const waitForIdleBeforeStart = request.waitForIdleBeforeStart === true;
+        const source = request.source || 'popup';
+        const conversationIdentity = request.conversationIdentity || null;
 
-    if (!tabId || !message) {
-        logQueueEvent(tabId, 'warn', 'Could not enqueue command: missing tab or message.');
-        sendResponse({ ok: false, error: 'Missing tabId or message.' });
-        return;
-    }
+        if (!tabId || !message) {
+            logQueueEvent(tabId, 'warn', 'Could not enqueue command: missing tab or message.');
+            sendResponse({ ok: false, error: 'Missing tabId or message.' });
+            return;
+        }
 
-    const existingJob = jobs.get(tabId);
+        const existingJob = jobs.get(tabId);
 
-    if (existingJob && existingJob.isPaused) {
-        enqueueToPausedJob(tabId, existingJob, message, addToEnd, source, sendResponse);
-        return;
-    }
+        if (existingJob && existingJob.isPaused) {
+            enqueueToPausedJob(tabId, existingJob, message, addToEnd, source, sendResponse);
+            return;
+        }
 
-    if (existingJob && existingJob.isRunning) {
-        enqueueToRunningJob(tabId, existingJob, message, addToEnd, source, sendResponse);
-        return;
-    }
+        if (existingJob && existingJob.isRunning) {
+            enqueueToRunningJob(tabId, existingJob, message, addToEnd, source, sendResponse);
+            return;
+        }
 
-    startNewJobFromEnqueue(tabId, message, waitForIdleBeforeStart, source, sendResponse);
+        await startNewJobFromEnqueue(tabId, message, waitForIdleBeforeStart, source, sendResponse, conversationIdentity);
+    })().catch((error) => {
+        sendResponse({ ok: false, error: error?.message || String(error) });
+    });
 }
 
 function handleRetryPausedJob(request, sendResponse) {
@@ -687,9 +859,28 @@ async function processQueue(tabId) {
             }
 
             if (job.waitForIdleBeforeSend) {
+                const validation = await validateJobTargetConversation(tabId, job);
+                if (!validation.ok) {
+                    logQueueEvent(tabId, 'error', validation.reason, {
+                        phase: 'pre-send-validation',
+                        mismatch: true
+                    });
+                    pauseJob(tabId, validation.reason, { phase: 'pre-send-validation', mismatch: true });
+                    return;
+                }
                 const result = await handleProcessWaitForIdle(tabId, job);
                 if (result.action === 'return') return;
                 if (result.action === 'continue') continue;
+            }
+
+            const validation = await validateJobTargetConversation(tabId, job);
+            if (!validation.ok) {
+                logQueueEvent(tabId, 'error', validation.reason, {
+                    phase: 'pre-send-validation',
+                    mismatch: true
+                });
+                pauseJob(tabId, validation.reason, { phase: 'pre-send-validation', mismatch: true });
+                return;
             }
 
             const result = await handleProcessSending(tabId, job);
@@ -1043,9 +1234,20 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
 
 async function sendPromptToSpecificTab(tabId, text) {
     try {
+        const provider = getActiveProviderAdapter('chatgpt');
+        const composerSelectors = provider?.selectors?.composer || [
+            'div[contenteditable="true"]',
+            '[contenteditable="true"]'
+        ];
+        const sendButtonSelectors = provider?.selectors?.sendButton || [
+            'button[data-testid="send-button"]',
+            'button[aria-label="Send prompt"]',
+            'button[type="submit"]'
+        ];
+
         const results = await executeScript({
             target: { tabId },
-            func: async (msg) => {
+            func: async (msg, composerSelectors, sendButtonSelectors) => {
                 function sleepInPage(ms) {
                     return new Promise(resolve => setTimeout(resolve, ms));
                 }
@@ -1088,7 +1290,7 @@ async function sendPromptToSpecificTab(tabId, text) {
                     };
                 }
 
-                const inputMatch = findFirstSelector([
+                const inputMatch = findFirstSelector(composerSelectors || [
                     'div[contenteditable="true"]',
                     '[contenteditable="true"]'
                 ]);
@@ -1123,7 +1325,7 @@ async function sendPromptToSpecificTab(tabId, text) {
 
                 await sleepInPage(700);
 
-                const sendButtonMatch = findFirstSelector([
+                const sendButtonMatch = findFirstSelector(sendButtonSelectors || [
                     'button[data-testid="send-button"]',
                     'button[aria-label="Send prompt"]',
                     'button[type="submit"]'
@@ -1174,7 +1376,7 @@ async function sendPromptToSpecificTab(tabId, text) {
                     }
                 };
             },
-            args: [text]
+            args: [text, composerSelectors, sendButtonSelectors]
         });
 
         const result = results?.[0]?.result;
@@ -1467,8 +1669,17 @@ function getRunningJobsSnapshot() {
     const snapshot = {};
 
     for (const [tabId, job] of jobs.entries()) {
+        const provider = job.provider || 'chatgpt';
+        const conversationId = job.conversationId || null;
+        const conversationType = job.conversationType || (conversationId ? 'existing' : 'unknown');
+        const targetKey = job.targetKey || (conversationId ? `${provider}:c:${conversationId}` : `${provider}:${conversationType}`);
+
         snapshot[tabId] = {
             tabId: job.tabId,
+            provider,
+            conversationId,
+            conversationType,
+            targetKey,
             remaining: getRemainingCount(job),
             pending: job.queue.length,
             isRunning: job.isRunning,
@@ -1532,8 +1743,17 @@ function getDurableJobsState() {
     const state = {};
 
     for (const [tabId, job] of jobs.entries()) {
+        const provider = job.provider || 'chatgpt';
+        const conversationId = job.conversationId || null;
+        const conversationType = job.conversationType || (conversationId ? 'existing' : 'unknown');
+        const targetKey = job.targetKey || (conversationId ? `${provider}:c:${conversationId}` : `${provider}:${conversationType}`);
+
         state[tabId] = {
             tabId: job.tabId,
+            provider,
+            conversationId,
+            conversationType,
+            targetKey,
             queue: Array.isArray(job.queue) ? [...job.queue] : [],
             currentMessage: job.currentMessage || '',
             isRunning: !!job.isRunning,
@@ -1695,6 +1915,13 @@ function readSyncStorage(defaults) {
             resolve(data || {});
         });
     });
+}
+
+function getTab(tabId) {
+    return extensionApiPromise(
+        (done) => chrome.tabs.get(tabId, done),
+        () => chrome.tabs.get(tabId)
+    );
 }
 
 function queryTabs(queryInfo) {
@@ -1869,6 +2096,16 @@ if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
         sanitizeLogValue,
         serializeError,
-        previewText
+        previewText,
+        getActiveProviderAdapter,
+        resolveTabConversationIdentity,
+        validateJobTargetConversation,
+        restoreDurableJobs,
+        getDurableJobsState,
+        getRunningJobsSnapshot,
+        handleStartSequence,
+        handleEnqueueMessage,
+        pauseJob,
+        jobs
     };
 }
