@@ -141,16 +141,21 @@ test('URL classification in utils.js distinguishes supported and unsupported pro
     assert.equal(utils.isChatGPTUrl('https://chatgpt.com/c/123'), true);
     assert.equal(utils.isChatGPTUrl('https://chat.openai.com/'), true);
 
-    // Unsupported URLs: Claude, Gemini, arbitrary sites, extension pages
+    // Supported Gemini URLs
+    assert.equal(utils.isSupportedProviderUrl('https://gemini.google.com/app'), true);
+    assert.equal(utils.getUrlProvider('https://gemini.google.com/app/abc'), 'gemini');
+    assert.equal(utils.isChatGPTUrl('https://gemini.google.com/app'), false);
+
+    // Unsupported URLs: Claude, other Google hosts, arbitrary sites, extension pages
     assert.equal(utils.isSupportedProviderUrl('https://claude.ai/chats'), false);
-    assert.equal(utils.isSupportedProviderUrl('https://gemini.google.com/app'), false);
+    assert.equal(utils.isSupportedProviderUrl('https://mail.google.com/'), false);
+    assert.equal(utils.isSupportedProviderUrl('https://aistudio.google.com/'), false);
     assert.equal(utils.isSupportedProviderUrl('https://example.com/'), false);
     assert.equal(utils.isSupportedProviderUrl('chrome-extension://someid/popup.html'), false);
     assert.equal(utils.getUrlProvider('https://claude.ai/chats'), null);
-    assert.equal(utils.getUrlProvider('https://gemini.google.com/app'), null);
+    assert.equal(utils.getUrlProvider('https://mail.google.com/'), null);
     assert.equal(utils.getUrlProvider('https://example.com/'), null);
     assert.equal(utils.isChatGPTUrl('https://claude.ai/chats'), false);
-    assert.equal(utils.isChatGPTUrl('https://gemini.google.com/app'), false);
     assert.equal(utils.isChatGPTUrl('https://example.com/'), false);
 });
 
@@ -161,6 +166,9 @@ test('getProviderForUrl resolves ChatGPTAdapter for ChatGPT URLs and null for ot
 
     const adapter2 = getProviderForUrl('https://chat.openai.com/');
     assert.ok(adapter2 instanceof ChatGPTAdapter);
+
+    const adapterGemini = getProviderForUrl('https://gemini.google.com/app');
+    assert.equal(adapterGemini.id, 'gemini');
 
     const adapter3 = getProviderForUrl('https://claude.ai/');
     assert.equal(adapter3, null);

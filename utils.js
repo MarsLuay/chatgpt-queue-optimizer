@@ -1,7 +1,9 @@
 const CHATGPT_HOSTS = new Set(['chatgpt.com', 'chat.openai.com']);
+const GEMINI_HOSTS = new Set(['gemini.google.com']);
 
 const PROVIDER_HOSTS = {
-    chatgpt: CHATGPT_HOSTS
+    chatgpt: CHATGPT_HOSTS,
+    gemini: GEMINI_HOSTS
 };
 
 function getUrlProvider(url) {
@@ -91,22 +93,30 @@ function extensionApiPromise(callWithCallback, callWithoutCallback) {
     });
 }
 
+function isGeminiUrl(url) {
+    return getUrlProvider(url) === 'gemini';
+}
+
 if (typeof globalThis !== 'undefined') {
     globalThis.extensionApiPromise = extensionApiPromise;
     globalThis.CHATGPT_HOSTS = CHATGPT_HOSTS;
+    globalThis.GEMINI_HOSTS = GEMINI_HOSTS;
     globalThis.PROVIDER_HOSTS = PROVIDER_HOSTS;
     globalThis.getUrlProvider = getUrlProvider;
     globalThis.isSupportedProviderUrl = isSupportedProviderUrl;
     globalThis.isChatGPTUrl = isChatGPTUrl;
+    globalThis.isGeminiUrl = isGeminiUrl;
 }
 
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
         CHATGPT_HOSTS,
+        GEMINI_HOSTS,
         PROVIDER_HOSTS,
         getUrlProvider,
         isSupportedProviderUrl,
         isChatGPTUrl,
+        isGeminiUrl,
         extensionApiPromise
     };
 }

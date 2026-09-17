@@ -109,6 +109,10 @@
     handleMessage(message, sender, sendResponse) {
       switch (message.type) {
         case 'TOGGLE_OPTIMIZER':
+          if (!this.provider?.supportsOptimizer) {
+            sendResponse({ success: false, enabled: false, unsupported: true, provider: this.provider?.id || null });
+            break;
+          }
           this.toggle();
           sendResponse({ success: true, enabled: this.config.enabled });
           break;
@@ -197,6 +201,12 @@
 
     bootstrap() {
       this.setupComposerQueueShortcut();
+
+      if (!this.provider?.supportsOptimizer) {
+        this.state.isInitialized = true;
+        console.log(`CPO: Queue shortcut ready on ${this.provider?.name || 'unsupported provider'}; optimizer unsupported.`);
+        return;
+      }
 
       this.waitForMessages().then(() => {
         this.setupContainer();

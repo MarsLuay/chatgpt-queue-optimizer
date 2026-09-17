@@ -1,9 +1,10 @@
 # Known failures and limits
 
-- Prompt submission depends on ChatGPT’s current contenteditable and send-button selectors. If either is absent or disabled, the injected send operation returns an error and the queue pauses (`background.js`).
-- Response detection depends on ChatGPT’s generating, streaming, status, and error markers. An injected-script failure, a detected error/retry state, or a default ten-minute wait timeout pauses the queue (`background.js`).
+- Prompt submission depends on each provider’s current contenteditable and send-button selectors. If either is absent or disabled, the injected send operation returns an error and the queue pauses (`background.js`, `provider-adapter.js`).
+- Response detection depends on provider generating, streaming, status, and error markers. An injected-script failure, a detected error/retry state, or a default ten-minute wait timeout pauses the queue (`background.js`).
 - In the default wait mode, if no generating indicator appears for five seconds, the worker records that it assumed completion and advances. This is an intentional fallback but can misclassify a response when the page exposes no recognized indicator (`background.js`).
 - Deep-research-aware waiting only extends the default timeout after recognized research activity has been observed. Unrecognized page wording does not extend the wait (`background.js`).
 - If a worker restart finds only legacy running-job state and no recoverable durable queue, it records that the in-memory queue was lost and clears the stale state (`background.js`).
+- Gemini optimizer/message-window support is intentionally unsupported; queue Enter interception still runs on Gemini (`provider-adapter.js`, `content.js`).
 - Chrome packaging is skipped when a Chrome executable is unavailable. Firefox persistent installation can be rejected for unsigned release packages; the fallback requires a working Firefox, npm/web-ext, and profile setup (`Installers/install_chatgpt_queue_optimizer.py`, `Installers/README.md`).
-- Automated tests are run via Node's native runner (`npm test`), covering permissions, previewText, background serialization, and content script Enter shortcut interception/diagnostics. Full browser end-to-end testing against live ChatGPT endpoints remains manual or requires an external browser harness.
+- Automated tests are run via Node's native runner (`npm test`), covering permissions, previewText, background serialization, provider adapters, and content script Enter shortcut interception/diagnostics. Full browser end-to-end testing against live ChatGPT or Gemini endpoints remains manual or requires an external browser harness.
