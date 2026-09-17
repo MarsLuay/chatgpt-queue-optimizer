@@ -146,16 +146,18 @@ test('URL classification in utils.js distinguishes supported and unsupported pro
     assert.equal(utils.getUrlProvider('https://gemini.google.com/app/abc'), 'gemini');
     assert.equal(utils.isChatGPTUrl('https://gemini.google.com/app'), false);
 
-    // Unsupported URLs: Claude, other Google hosts, arbitrary sites, extension pages
-    assert.equal(utils.isSupportedProviderUrl('https://claude.ai/chats'), false);
+    // Supported Claude URLs
+    assert.equal(utils.isSupportedProviderUrl('https://claude.ai/new'), true);
+    assert.equal(utils.getUrlProvider('https://claude.ai/chat/abc-123'), 'claude');
+    assert.equal(utils.isChatGPTUrl('https://claude.ai/new'), false);
+
+    // Unsupported URLs: other Google hosts, arbitrary sites, extension pages
     assert.equal(utils.isSupportedProviderUrl('https://mail.google.com/'), false);
     assert.equal(utils.isSupportedProviderUrl('https://aistudio.google.com/'), false);
     assert.equal(utils.isSupportedProviderUrl('https://example.com/'), false);
     assert.equal(utils.isSupportedProviderUrl('chrome-extension://someid/popup.html'), false);
-    assert.equal(utils.getUrlProvider('https://claude.ai/chats'), null);
     assert.equal(utils.getUrlProvider('https://mail.google.com/'), null);
     assert.equal(utils.getUrlProvider('https://example.com/'), null);
-    assert.equal(utils.isChatGPTUrl('https://claude.ai/chats'), false);
     assert.equal(utils.isChatGPTUrl('https://example.com/'), false);
 });
 
@@ -170,8 +172,8 @@ test('getProviderForUrl resolves ChatGPTAdapter for ChatGPT URLs and null for ot
     const adapterGemini = getProviderForUrl('https://gemini.google.com/app');
     assert.equal(adapterGemini.id, 'gemini');
 
-    const adapter3 = getProviderForUrl('https://claude.ai/');
-    assert.equal(adapter3, null);
+    const adapterClaude = getProviderForUrl('https://claude.ai/');
+    assert.equal(adapterClaude.id, 'claude');
 
     const adapter4 = getProviderForUrl('https://google.com/');
     assert.equal(adapter4, null);

@@ -984,3 +984,155 @@ test('Gemini: enqueue failure retains composer text', async () => {
 
   assert.strictEqual(composer.textContent, 'Keep this draft');
 });
+function setupClaudeTestEnv() {
+  process.env.NODE_ENV = 'test';
+  const dom = createMockDOM();
+  dom.window.location.href = 'https://claude.ai/chat/test-conv';
+  dom.document.title = 'Claude';
+  global.window = dom.window;
+  global.document = dom.document;
+  global.location = dom.window.location;
+  global.Node = { ELEMENT_NODE: 1 };
+  global.InputEvent = class { constructor(type) { this.type = type; } };
+  global.MutationObserver = class {
+    constructor(cb) { this.cb = cb; }
+    observe() {}
+    disconnect() {}
+  };
+  global.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+
+  const sentMessages = [];
+  let enqueueResponseHandler = (msg) => ({ ok: true });
+
+  global.chrome = {
+    runtime: {
+      lastError: null,
+      sendMessage: (message, cb) => {
+        sentMessages.push(message);
+        if (message.action === 'enqueueMessage') {
+          const res = enqueueResponseHandler(message);
+          if (cb) setTimeout(() => cb(res), 0);
+        } else if (cb) {
+          setTimeout(() => cb({ ok: true }), 0);
+        }
+      },
+      onMessage: { addListener: () => {} }
+    },
+    storage: {
+      sync: {
+        get: (defs, cb) => cb ? cb(defs) : Promise.resolve(defs),
+        set: (items, cb) => cb ? cb() : Promise.resolve()
+      }
+    }
+  };
+
+  delete require.cache[require.resolve('../utils.js')];
+  delete require.cache[require.resolve('../provider-adapter.js')];
+  delete require.cache[require.resolve('../content.js')];
+  require('../utils.js');
+  require('../provider-adapter.js');
+  const { ChatGPTOptimizer } = require('../content.js');
+  delete dom.window.ChatGPTOptimizerInstance;
+  const optimizer = new ChatGPTOptimizer();
+
+  return {
+    dom,
+    optimizer,
+    sentMessages,
+    setEnqueueResponse: (fn) => { enqueueResponseHandler = fn; }
+  };
+}
+
+test('Claude: Enter during active generation queues and clears composer only after success', async () => {
+  const { dom, optimizer, sentMessages } = setupClaudeTestEnv();
+
+  assert.equal(optimizer.provider?.id, 'claude');
+  assert.equal(optimizer.provider?.supportsOptimizer, false);
+
+  const composer = dom.document.createElement('div');
+  composer.setAttribute('class', 'ProseMirror');
+  composer.setAttribute('contenteditable', 'true');
+  composer.setAttribute('data-testid', 'chat-input');
+  composer.innerText = 'Claude queued prompt';
+  composer.textContent = 'Claude queued prompt';
+  dom.document.body.appendChild(composer);
+
+  const stopButton = dom.document.createElement('button');
+  stopButton.setAttribute('aria-label', 'Stop generating');
+  dom.document.body.appendChild(stopButton);
+
+  const event = new dom.MockKeyboardEvent('keydown', { key: 'Enter' });
+  composer.dispatchEvent(event);
+
+  assert.strictEqual(event.defaultPrevented, true);
+  assert.strictEqual(event.propagationStopped, true);
+
+  await new Promise(r => setTimeout(r, 10));
+
+  const enqueueMsg = sentMessages.find(m => m.action === 'enqueueMessage');
+  assert.ok(enqueueMsg);
+  assert.strictEqual(enqueueMsg.message, 'Claude queued prompt');
+  assert.strictEqual(enqueueMsg.waitForIdleBeforeStart, true);
+  assert.equal(enqueueMsg.conversationIdentity?.provider, 'claude');
+  assert.equal(composer.textContent, '');
+});
+
+test('Claude: idle Enter, Shift+Enter, and IME remain native', () => {
+  const { dom, sentMessages } = setupClaudeTestEnv();
+
+  const composer = dom.document.createElement('div');
+  composer.setAttribute('class', 'ProseMirror');
+  composer.setAttribute('contenteditable', 'true');
+  composer.setAttribute('data-testid', 'chat-input');
+  composer.innerText = 'Idle claude text';
+  composer.textContent = 'Idle claude text';
+  dom.document.body.appendChild(composer);
+
+  const idleEvent = new dom.MockKeyboardEvent('keydown', { key: 'Enter' });
+  composer.dispatchEvent(idleEvent);
+  assert.strictEqual(idleEvent.defaultPrevented, false);
+
+  const stopButton = dom.document.createElement('button');
+  stopButton.setAttribute('aria-label', 'Stop generating');
+  dom.document.body.appendChild(stopButton);
+
+  const shiftEvent = new dom.MockKeyboardEvent('keydown', { key: 'Enter', shiftKey: true });
+  composer.dispatchEvent(shiftEvent);
+  assert.strictEqual(shiftEvent.defaultPrevented, false);
+
+  const imeEvent = new dom.MockKeyboardEvent('keydown', { key: 'Enter', isComposing: true });
+  composer.dispatchEvent(imeEvent);
+  assert.strictEqual(imeEvent.defaultPrevented, false);
+
+  const metaEvent = new dom.MockKeyboardEvent('keydown', { key: 'Enter', metaKey: true });
+  composer.dispatchEvent(metaEvent);
+  assert.strictEqual(metaEvent.defaultPrevented, false);
+
+  assert.strictEqual(sentMessages.filter(m => m.action === 'enqueueMessage').length, 0);
+});
+
+test('Claude: enqueue failure retains composer text', async () => {
+  const { dom, setEnqueueResponse } = setupClaudeTestEnv();
+
+  const composer = dom.document.createElement('div');
+  composer.setAttribute('class', 'ProseMirror');
+  composer.setAttribute('contenteditable', 'true');
+  composer.setAttribute('data-testid', 'chat-input');
+  composer.innerText = 'Keep this draft';
+  composer.textContent = 'Keep this draft';
+  dom.document.body.appendChild(composer);
+
+  const stopButton = dom.document.createElement('button');
+  stopButton.setAttribute('aria-label', 'Stop generating');
+  dom.document.body.appendChild(stopButton);
+
+  setEnqueueResponse(() => ({ ok: false, error: 'Claude tab disconnected' }));
+
+  const event = new dom.MockKeyboardEvent('keydown', { key: 'Enter' });
+  composer.dispatchEvent(event);
+  assert.strictEqual(event.defaultPrevented, true);
+
+  await new Promise(r => setTimeout(r, 10));
+
+  assert.strictEqual(composer.textContent, 'Keep this draft');
+});

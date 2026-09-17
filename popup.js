@@ -72,7 +72,8 @@ document.addEventListener('DOMContentLoaded', function () {
     const PROVIDER_URL_PATTERNS = [
         'https://chatgpt.com/*',
         'https://chat.openai.com/*',
-        'https://gemini.google.com/*'
+        'https://gemini.google.com/*',
+        'https://claude.ai/*'
     ];
     const CHATGPT_URL_PATTERNS = PROVIDER_URL_PATTERNS;
 
@@ -391,6 +392,8 @@ document.addEventListener('DOMContentLoaded', function () {
             .replace(/\s*[-–]\s*ChatGPT$/i, '')
             .replace(/^Gemini\s*[-–]\s*/i, '')
             .replace(/\s*[-–]\s*Gemini$/i, '')
+            .replace(/^Claude\s*[-–]\s*/i, '')
+            .replace(/\s*[-–]\s*Claude$/i, '')
             .trim() || 'Supported tab';
     }
 
@@ -425,7 +428,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 const chatgptTabs = await getAllChatGPTTabs();
 
                 if (chatgptTabs.length === 0) {
-                    alert('No supported tab is open. Open chatgpt.com or gemini.google.com, then try again.');
+                    alert('No supported tab is open. Open chatgpt.com, gemini.google.com, or claude.ai, then try again.');
                     return null;
                 }
 
@@ -444,7 +447,7 @@ document.addEventListener('DOMContentLoaded', function () {
         }
 
         if (!isSupportedProviderUrl(getTabUrl(tab))) {
-            alert('Select a ChatGPT or Gemini tab before starting or adding to the queue.');
+            alert('Select a ChatGPT, Gemini, or Claude tab before starting or adding to the queue.');
             return null;
         }
 
