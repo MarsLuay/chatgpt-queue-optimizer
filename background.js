@@ -217,7 +217,12 @@ chrome.commands.onCommand.addListener(async (command) => {
     try {
         const tab = await getActiveTab();
 
-        if (!tab || !tab.id || !isChatGPTUrl(tab.url)) {
+        if (!tab || !tab.id || !isSupportedProviderUrl(tab.url)) {
+            return;
+        }
+
+        const provider = getActiveProviderAdapter(tab.url);
+        if (!provider?.supportsOptimizer) {
             return;
         }
 
@@ -1544,7 +1549,19 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
 
 async function sendPromptToSpecificTab(tabId, text) {
     try {
-        const provider = getActiveProviderAdapter('chatgpt');
+        let tabUrl = '';
+        try {
+            const tab = await getTab(tabId);
+            tabUrl = tab?.url || tab?.pendingUrl || '';
+        } catch {
+            tabUrl = '';
+        }
+
+        const job = jobs.get(tabId);
+        const provider = getActiveProviderAdapter(tabUrl) ||
+            getActiveProviderAdapter(job?.provider) ||
+            getActiveProviderAdapter('chatgpt');
+        const providerName = provider?.name || 'Provider';
         const composerSelectors = provider?.selectors?.composer || [
             'div[contenteditable="true"]',
             '[contenteditable="true"]'
@@ -1552,12 +1569,13 @@ async function sendPromptToSpecificTab(tabId, text) {
         const sendButtonSelectors = provider?.selectors?.sendButton || [
             'button[data-testid="send-button"]',
             'button[aria-label="Send prompt"]',
+            'button[aria-label="Send message"]',
             'button[type="submit"]'
         ];
 
         const results = await executeScript({
             target: { tabId },
-            func: async (msg, composerSelectors, sendButtonSelectors) => {
+            func: async (msg, composerSelectors, sendButtonSelectors, providerName) => {
                 function sleepInPage(ms) {
                     return new Promise(resolve => setTimeout(resolve, ms));
                 }
@@ -1568,7 +1586,7 @@ async function sendPromptToSpecificTab(tabId, text) {
                     return {
                         tagName: element.tagName || '',
                         id: element.id || '',
-                        testId: element.getAttribute('data-testid') || '',
+                        testId: element.getAttribute('data-testid') || element.getAttribute('data-test-id') || '',
                         ariaLabel: element.getAttribute('aria-label') || '',
                         text: (element.innerText || element.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 160),
                         disabled: !!element.disabled,
@@ -1610,18 +1628,22 @@ async function sendPromptToSpecificTab(tabId, text) {
                 if (!input) {
                     return {
                         ok: false,
-                        error: 'ChatGPT input box was not found.',
+                        error: `${providerName || 'Provider'} input box was not found.`,
                         details: {
                             contentEditableCount: document.querySelectorAll('[contenteditable="true"]').length,
                             activeElement: describeElement(document.activeElement),
                             url: location.href,
-                            title: document.title
+                            title: document.title,
+                            provider: providerName || ''
                         }
                     };
                 }
 
                 input.focus();
                 input.textContent = '';
+                if (input.classList && typeof input.classList.remove === 'function') {
+                    input.classList.remove('ql-blank');
+                }
 
                 const paragraph = document.createElement('p');
                 paragraph.innerText = msg;
@@ -1638,6 +1660,7 @@ async function sendPromptToSpecificTab(tabId, text) {
                 const sendButtonMatch = findFirstSelector(sendButtonSelectors || [
                     'button[data-testid="send-button"]',
                     'button[aria-label="Send prompt"]',
+                    'button[aria-label="Send message"]',
                     'button[type="submit"]'
                 ]);
 
@@ -1646,14 +1669,15 @@ async function sendPromptToSpecificTab(tabId, text) {
                 if (!sendButton) {
                     return {
                         ok: false,
-                        error: 'Send button was not found.',
+                        error: `${providerName || 'Provider'} send button was not found.`,
                         details: {
                             inputSelector: inputMatch.selector,
                             inputTextLength: (input.innerText || input.textContent || '').length,
                             buttonCount: document.querySelectorAll('button').length,
                             activeElement: describeElement(document.activeElement),
                             url: location.href,
-                            title: document.title
+                            title: document.title,
+                            provider: providerName || ''
                         }
                     };
                 }
@@ -1661,14 +1685,15 @@ async function sendPromptToSpecificTab(tabId, text) {
                 if (sendButton.disabled || sendButton.getAttribute('aria-disabled') === 'true') {
                     return {
                         ok: false,
-                        error: 'Send button is disabled.',
+                        error: `${providerName || 'Provider'} send button is disabled.`,
                         details: {
                             inputSelector: inputMatch.selector,
                             sendButtonSelector: sendButtonMatch.selector,
                             inputTextLength: (input.innerText || input.textContent || '').length,
                             sendButton: describeElement(sendButton),
                             url: location.href,
-                            title: document.title
+                            title: document.title,
+                            provider: providerName || ''
                         }
                     };
                 }
@@ -1682,11 +1707,12 @@ async function sendPromptToSpecificTab(tabId, text) {
                         sendButtonSelector: sendButtonMatch.selector,
                         messageLength: String(msg || '').length,
                         url: location.href,
-                        title: document.title
+                        title: document.title,
+                        provider: providerName || ''
                     }
                 };
             },
-            args: [text, composerSelectors, sendButtonSelectors]
+            args: [text, composerSelectors, sendButtonSelectors, providerName]
         });
 
         const result = results?.[0]?.result;
@@ -1708,7 +1734,7 @@ async function sendPromptToSpecificTab(tabId, text) {
     } catch (error) {
         return {
             ok: false,
-            error: error?.message || 'Failed to inject prompt into ChatGPT tab.',
+            error: error?.message || 'Failed to inject prompt into provider tab.',
             details: {
                 error: serializeError(error)
             }

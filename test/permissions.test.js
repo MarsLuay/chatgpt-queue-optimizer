@@ -20,6 +20,15 @@ const EXPECTED_PERMISSIONS = [
 
 const EXPECTED_HOSTS = [
     'https://chat.openai.com/*',
+    'https://chatgpt.com/*',
+    'https://claude.ai/*',
+    'https://gemini.google.com/*'
+];
+
+const EXPECTED_CONTENT_MATCHES = EXPECTED_HOSTS;
+
+const EXPECTED_RESOURCE_MATCHES = [
+    'https://chat.openai.com/*',
     'https://chatgpt.com/*'
 ];
 
@@ -48,18 +57,18 @@ test('every remaining manifest permission has a concrete code path', () => {
     }
 });
 
-test('host access is limited to supported ChatGPT origins', () => {
+test('host access is limited to supported provider origins', () => {
     assert.deepEqual(sorted(manifest.host_permissions || []), EXPECTED_HOSTS);
 
     const contentMatches = new Set(
         (manifest.content_scripts || []).flatMap((entry) => entry.matches || [])
     );
-    assert.deepEqual(sorted(contentMatches), EXPECTED_HOSTS);
+    assert.deepEqual(sorted(contentMatches), EXPECTED_CONTENT_MATCHES);
 
     const resourceMatches = new Set(
         (manifest.web_accessible_resources || []).flatMap((entry) => entry.matches || [])
     );
-    assert.deepEqual(sorted(resourceMatches), EXPECTED_HOSTS);
+    assert.deepEqual(sorted(resourceMatches), EXPECTED_RESOURCE_MATCHES);
 
     const forbiddenBroadPatterns = new Set([
         '<all_urls>',

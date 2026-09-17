@@ -2,6 +2,8 @@
     'use strict';
 
     const CHATGPT_HOSTS = new Set(['chatgpt.com', 'chat.openai.com']);
+    const GEMINI_HOSTS = new Set(['gemini.google.com']);
+    const CLAUDE_HOSTS = new Set(['claude.ai']);
 
     const CHATGPT_SELECTORS = {
         composer: [
@@ -786,10 +788,733 @@
         }
     }
 
+    const GEMINI_SELECTORS = {
+        composer: [
+            '.ql-editor[contenteditable="true"]',
+            'rich-textarea .ql-editor',
+            '.ql-editor',
+            '[contenteditable="true"][role="textbox"]',
+            'div[contenteditable="true"]'
+        ],
+        sendButton: [
+            'button.send-button[aria-label="Send message"]',
+            'button.send-button',
+            'button[aria-label="Send message"]',
+            'button[aria-label*="Send"]'
+        ],
+        stopButton: [
+            'button[aria-label="Stop response"]',
+            'button[aria-label*="Stop"]',
+            'button.stop-button',
+            'button[data-test-id*="stop"]'
+        ],
+        streaming: [
+            '[class*="response-streaming"]',
+            '[data-is-streaming="true"]',
+            '.model-response-text[aria-busy="true"]'
+        ],
+        status: [
+            '[role="status"]',
+            '[aria-live]',
+            '[class*="thinking"]',
+            '[class*="loading"]',
+            '[data-test-id*="loading"]',
+            '[data-test-id*="progress"]'
+        ],
+        spinner: [
+            '[class*="loading"]',
+            '[class*="spinner"]',
+            'mat-progress-spinner',
+            'circular-progress'
+        ],
+        errorAlerts: [
+            '[role="alert"]',
+            '[matsnackbarlabel]',
+            '.mat-mdc-snack-bar-label',
+            '.mdc-snackbar__label',
+            '[class*="error"]'
+        ],
+        messages: [],
+        fallbackMessages: [],
+        mainRoot: [
+            'main',
+            '[role="main"]',
+            'chat-window',
+            'body'
+        ]
+    };
+
+    class GeminiAdapter extends ProviderAdapter {
+        constructor() {
+            super('gemini', 'Gemini', {
+                supportsOptimizer: false,
+                selectors: GEMINI_SELECTORS
+            });
+        }
+
+        isSupportedUrl(url) {
+            if (typeof url !== 'string') {
+                return false;
+            }
+
+            try {
+                const parsed = new URL(url);
+                return parsed.protocol === 'https:' && GEMINI_HOSTS.has(parsed.hostname.toLowerCase());
+            } catch {
+                return false;
+            }
+        }
+
+        getConversationIdentity(locationOrUrl) {
+            const urlStr = typeof locationOrUrl === 'string'
+                ? locationOrUrl
+                : (locationOrUrl?.href || String(locationOrUrl || ''));
+
+            if (!this.isSupportedUrl(urlStr)) {
+                return {
+                    provider: this.id,
+                    type: 'unsupported',
+                    conversationId: null,
+                    key: `${this.id}:unsupported`
+                };
+            }
+
+            try {
+                const parsed = new URL(urlStr);
+                const pathname = parsed.pathname || '/';
+
+                // /app/:id or /u/:n/app/:id
+                const existingMatch = pathname.match(/(?:^|\/)(?:u\/\d+\/)?app\/([a-zA-Z0-9_-]+)\/?$/);
+                if (existingMatch && existingMatch[1] && existingMatch[1].toLowerCase() !== 'app') {
+                    const conversationId = existingMatch[1];
+                    return {
+                        provider: this.id,
+                        type: 'existing',
+                        conversationId,
+                        key: `${this.id}:c:${conversationId}`
+                    };
+                }
+
+                // New chat: /, /app, /u/:n/app
+                if (
+                    pathname === '/' ||
+                    pathname === '' ||
+                    /^\/(?:u\/\d+\/)?app\/?$/.test(pathname)
+                ) {
+                    return {
+                        provider: this.id,
+                        type: 'new',
+                        conversationId: null,
+                        key: `${this.id}:new`
+                    };
+                }
+
+                return {
+                    provider: this.id,
+                    type: 'unsupported',
+                    conversationId: null,
+                    key: `${this.id}:unsupported`
+                };
+            } catch {
+                return {
+                    provider: this.id,
+                    type: 'unsupported',
+                    conversationId: null,
+                    key: `${this.id}:unsupported`
+                };
+            }
+        }
+
+        getComposerFromEventTarget(target, excludeSelector = '#cpo-root') {
+            const element = target && target.nodeType === 1
+                ? target
+                : target?.parentElement;
+
+            if (!element) return null;
+            if (excludeSelector && element.closest(excludeSelector)) return null;
+
+            const composerSelector = this.selectors.composer.join(',');
+            const composer = element.closest(composerSelector);
+
+            if (!composer) return null;
+
+            const tagName = (composer.tagName || '').toLowerCase();
+            const isTextArea = tagName === 'textarea';
+            const isEditable = composer.getAttribute('contenteditable') === 'true' ||
+                composer.classList?.contains?.('ql-editor');
+
+            if (!isTextArea && !isEditable) return null;
+
+            // Avoid treating response message editors as the composer
+            if (composer.closest('model-response, .model-response, .response-container, message-content')) {
+                return null;
+            }
+
+            return composer;
+        }
+
+        getComposerText(composer) {
+            if (!composer) return '';
+
+            if (composer.tagName && composer.tagName.toLowerCase() === 'textarea') {
+                return composer.value || '';
+            }
+
+            return composer.innerText || composer.textContent || '';
+        }
+
+        clearComposer(composer) {
+            if (!composer) return;
+
+            if (typeof composer.focus === 'function') {
+                composer.focus();
+            }
+
+            if (composer.tagName && composer.tagName.toLowerCase() === 'textarea') {
+                composer.value = '';
+            } else {
+                composer.textContent = '';
+                if (composer.classList) {
+                    if (typeof composer.classList.add === 'function') {
+                        composer.classList.add('ql-blank');
+                    }
+                }
+            }
+
+            if (typeof InputEvent !== 'undefined') {
+                composer.dispatchEvent(new InputEvent('input', {
+                    bubbles: true,
+                    inputType: 'deleteContentBackward',
+                    data: null
+                }));
+            }
+        }
+
+        getGenerationState(doc = (typeof document !== 'undefined' ? document : null)) {
+            if (!doc) {
+                return {
+                    generating: false,
+                    hasActiveStopButton: false,
+                    hasResultStreaming: false,
+                    hasActiveToolOrResearch: false,
+                    deepResearchActive: false,
+                    matchedResearchMarker: null,
+                    researchStatusPreview: null,
+                    hasError: false,
+                    hasTryAgainButton: false,
+                    errorSnippet: '',
+                    matchedError: '',
+                    url: '',
+                    title: ''
+                };
+            }
+
+            const buttons = Array.from(doc.querySelectorAll('button') || []);
+            const stopButton = buttons.find(button => {
+                if (button.disabled || button.getAttribute('aria-disabled') === 'true') {
+                    return false;
+                }
+                const testId = (
+                    button.getAttribute('data-testid') ||
+                    button.getAttribute('data-test-id') ||
+                    ''
+                ).toLowerCase();
+                if (testId.includes('stop')) {
+                    return true;
+                }
+                const label = (
+                    button.getAttribute('aria-label') ||
+                    button.innerText ||
+                    button.textContent ||
+                    ''
+                ).toLowerCase().trim();
+                const className = typeof button.className === 'string'
+                    ? button.className.toLowerCase()
+                    : '';
+
+                return (
+                    label === 'stop' ||
+                    label === 'stop response' ||
+                    label.includes('stop response') ||
+                    label.includes('stop generating') ||
+                    label.includes('stop streaming') ||
+                    className.includes('stop-button')
+                );
+            });
+            const hasActiveStopButton = !!stopButton;
+
+            const streamingSelector = this.selectors.streaming.join(',');
+            let hasResultStreaming = false;
+            try {
+                hasResultStreaming = !!doc.querySelector(streamingSelector);
+            } catch {
+                hasResultStreaming = false;
+            }
+
+            const statusSelector = this.selectors.status.join(',');
+            let statusNodes = [];
+            try {
+                statusNodes = Array.from(doc.querySelectorAll(statusSelector))
+                    .filter(node => node.getAttribute?.('aria-live') !== 'off');
+            } catch {
+                statusNodes = [];
+            }
+
+            const visibleActiveNodes = statusNodes.filter(node => !node.hidden && node.getAttribute?.('aria-hidden') !== 'true');
+            const statusText = visibleActiveNodes
+                .map(node => node.innerText || node.textContent || '')
+                .join(' ')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .slice(0, 1200);
+            const activeTextLower = statusText.toLowerCase();
+
+            const progressMarkers = [
+                'thinking',
+                'working',
+                'generating',
+                'searching',
+                'researching',
+                'loading'
+            ];
+            const matchedResearchMarker = progressMarkers.find(marker => activeTextLower.includes(marker)) || '';
+            const hasActiveToolOrResearch = !!matchedResearchMarker;
+
+            const alertSelector = this.selectors.errorAlerts.join(',');
+            let alertNodes = [];
+            try {
+                alertNodes = Array.from(doc.querySelectorAll(alertSelector));
+            } catch {
+                alertNodes = [];
+            }
+            const alertText = alertNodes.map(node => node.innerText || node.textContent || '').join(' ').toLowerCase();
+            const errorMarkers = [
+                'something went wrong',
+                'there was an error',
+                'failed to generate',
+                'try again later',
+                'unable to'
+            ];
+            const matchedError = errorMarkers.find(marker => alertText.includes(marker)) || '';
+            const errorSnippet = matchedError
+                ? alertText
+                    .slice(Math.max(0, alertText.indexOf(matchedError) - 60), alertText.indexOf(matchedError) + 160)
+                    .replace(/\s+/g, ' ')
+                    .trim()
+                : '';
+
+            const hasTryAgainButton = buttons.some(btn => {
+                if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') return false;
+                const text = (btn.innerText || btn.getAttribute('aria-label') || '').toLowerCase().trim();
+                return text === 'retry' || text === 'try again';
+            });
+
+            const hasKnownError = !!matchedError;
+            const isWorking = hasActiveStopButton || hasResultStreaming || hasActiveToolOrResearch;
+            const generating = !hasKnownError && isWorking;
+
+            const url = typeof location !== 'undefined' ? location.href : (doc.defaultView?.location?.href || '');
+            const title = typeof document !== 'undefined' ? document.title : (doc.title || '');
+
+            return {
+                generating,
+                hasActiveStopButton,
+                hasResultStreaming,
+                hasActiveToolOrResearch,
+                deepResearchActive: false,
+                matchedResearchMarker,
+                researchStatusPreview: statusText,
+                hasError: hasKnownError,
+                hasTryAgainButton: !!hasTryAgainButton,
+                errorSnippet,
+                matchedError,
+                url,
+                title
+            };
+        }
+
+        getMainRoot() {
+            // Optimizer is unsupported on Gemini; fail closed.
+            return null;
+        }
+
+        getMessageNodes() {
+            return [];
+        }
+
+        getFallbackMessages() {
+            return [];
+        }
+    }
+
+    const CLAUDE_SELECTORS = {
+        composer: [
+            '[data-testid="chat-input"]',
+            'div.ProseMirror[contenteditable="true"]',
+            'div.ProseMirror',
+            '[contenteditable="true"][role="textbox"]',
+            'div[contenteditable="true"]',
+            'fieldset textarea',
+            'textarea'
+        ],
+        sendButton: [
+            'button[aria-label="Send Message"]',
+            'button[aria-label="Send message"]',
+            'button[data-testid="send-button"]',
+            'button[aria-label*="Send"]',
+            'button[type="submit"]'
+        ],
+        stopButton: [
+            'button[aria-label="Stop generating"]',
+            'button[aria-label*="Stop"]',
+            'button[aria-label*="stop"]',
+            'button[data-testid*="stop"]'
+        ],
+        streaming: [
+            '[data-is-streaming="true"]',
+            '[data-is-streaming]',
+            '.font-claude-response[data-is-streaming]'
+        ],
+        status: [
+            '[role="status"]',
+            '[aria-live]',
+            '[class*="thinking"]',
+            '[class*="loading"]',
+            '[data-testid*="thinking"]',
+            '[data-testid*="progress"]',
+            '[data-testid*="status"]'
+        ],
+        spinner: [
+            '[class*="loading"]',
+            '[class*="spinner"]',
+            '[class*="animate-spin"]',
+            'svg.animate-spin'
+        ],
+        errorAlerts: [
+            '[role="alert"]',
+            '[data-testid*="error"]',
+            '[class*="error"]'
+        ],
+        messages: [],
+        fallbackMessages: [],
+        mainRoot: [
+            'main',
+            '[role="main"]',
+            'body'
+        ]
+    };
+
+    class ClaudeAdapter extends ProviderAdapter {
+        constructor() {
+            super('claude', 'Claude', {
+                supportsOptimizer: false,
+                selectors: CLAUDE_SELECTORS
+            });
+        }
+
+        isSupportedUrl(url) {
+            if (typeof url !== 'string') {
+                return false;
+            }
+
+            try {
+                const parsed = new URL(url);
+                return parsed.protocol === 'https:' && CLAUDE_HOSTS.has(parsed.hostname.toLowerCase());
+            } catch {
+                return false;
+            }
+        }
+
+        getConversationIdentity(locationOrUrl) {
+            const urlStr = typeof locationOrUrl === 'string'
+                ? locationOrUrl
+                : (locationOrUrl?.href || String(locationOrUrl || ''));
+
+            if (!this.isSupportedUrl(urlStr)) {
+                return {
+                    provider: this.id,
+                    type: 'unsupported',
+                    conversationId: null,
+                    key: `${this.id}:unsupported`
+                };
+            }
+
+            try {
+                const parsed = new URL(urlStr);
+                const pathname = parsed.pathname || '/';
+
+                // Existing chat: /chat/:id
+                const existingMatch = pathname.match(/^\/chat\/([a-zA-Z0-9_-]+)\/?$/);
+                if (existingMatch && existingMatch[1]) {
+                    const conversationId = existingMatch[1];
+                    return {
+                        provider: this.id,
+                        type: 'existing',
+                        conversationId,
+                        key: `${this.id}:c:${conversationId}`
+                    };
+                }
+
+                // New chat: /, /new, /chat
+                if (
+                    pathname === '/' ||
+                    pathname === '' ||
+                    pathname === '/new' ||
+                    pathname === '/new/' ||
+                    pathname === '/chat' ||
+                    pathname === '/chat/'
+                ) {
+                    return {
+                        provider: this.id,
+                        type: 'new',
+                        conversationId: null,
+                        key: `${this.id}:new`
+                    };
+                }
+
+                return {
+                    provider: this.id,
+                    type: 'unsupported',
+                    conversationId: null,
+                    key: `${this.id}:unsupported`
+                };
+            } catch {
+                return {
+                    provider: this.id,
+                    type: 'unsupported',
+                    conversationId: null,
+                    key: `${this.id}:unsupported`
+                };
+            }
+        }
+
+        getComposerFromEventTarget(target, excludeSelector = '#cpo-root') {
+            const element = target && target.nodeType === 1
+                ? target
+                : target?.parentElement;
+
+            if (!element) return null;
+            if (excludeSelector && element.closest(excludeSelector)) return null;
+
+            const composerSelector = this.selectors.composer.join(',');
+            const composer = element.closest(composerSelector);
+
+            if (!composer) return null;
+
+            const tagName = (composer.tagName || '').toLowerCase();
+            const isTextArea = tagName === 'textarea';
+            const isEditable = composer.getAttribute('contenteditable') === 'true' ||
+                composer.classList?.contains?.('ProseMirror') ||
+                composer.getAttribute('data-testid') === 'chat-input';
+
+            if (!isTextArea && !isEditable) return null;
+
+            // Avoid treating response/message bodies as the composer
+            if (composer.closest('[data-testid="user-message"], .font-claude-response, .font-user-message')) {
+                return null;
+            }
+
+            return composer;
+        }
+
+        getComposerText(composer) {
+            if (!composer) return '';
+
+            if (composer.tagName && composer.tagName.toLowerCase() === 'textarea') {
+                return composer.value || '';
+            }
+
+            return composer.innerText || composer.textContent || '';
+        }
+
+        clearComposer(composer) {
+            if (!composer) return;
+
+            if (typeof composer.focus === 'function') {
+                composer.focus();
+            }
+
+            if (composer.tagName && composer.tagName.toLowerCase() === 'textarea') {
+                composer.value = '';
+            } else {
+                composer.textContent = '';
+            }
+
+            if (typeof InputEvent !== 'undefined') {
+                composer.dispatchEvent(new InputEvent('input', {
+                    bubbles: true,
+                    inputType: 'deleteContentBackward',
+                    data: null
+                }));
+            }
+        }
+
+        getGenerationState(doc = (typeof document !== 'undefined' ? document : null)) {
+            if (!doc) {
+                return {
+                    generating: false,
+                    hasActiveStopButton: false,
+                    hasResultStreaming: false,
+                    hasActiveToolOrResearch: false,
+                    deepResearchActive: false,
+                    matchedResearchMarker: null,
+                    researchStatusPreview: null,
+                    hasError: false,
+                    hasTryAgainButton: false,
+                    errorSnippet: '',
+                    matchedError: '',
+                    url: '',
+                    title: ''
+                };
+            }
+
+            const buttons = Array.from(doc.querySelectorAll('button') || []);
+            const stopButton = buttons.find(button => {
+                if (button.disabled || button.getAttribute('aria-disabled') === 'true') {
+                    return false;
+                }
+                const testId = (
+                    button.getAttribute('data-testid') ||
+                    button.getAttribute('data-test-id') ||
+                    ''
+                ).toLowerCase();
+                if (testId.includes('stop')) {
+                    return true;
+                }
+                const label = (
+                    button.getAttribute('aria-label') ||
+                    button.innerText ||
+                    button.textContent ||
+                    ''
+                ).toLowerCase().trim();
+                const className = typeof button.className === 'string'
+                    ? button.className.toLowerCase()
+                    : '';
+
+                return (
+                    label === 'stop' ||
+                    label === 'stop response' ||
+                    label === 'stop generating' ||
+                    label.includes('stop response') ||
+                    label.includes('stop generating') ||
+                    label.includes('stop streaming') ||
+                    className.includes('stop-button')
+                );
+            });
+            const hasActiveStopButton = !!stopButton;
+
+            const streamingSelector = this.selectors.streaming.join(',');
+            let hasResultStreaming = false;
+            try {
+                hasResultStreaming = !!doc.querySelector(streamingSelector);
+            } catch {
+                hasResultStreaming = false;
+            }
+
+            const statusSelector = this.selectors.status.join(',');
+            let statusNodes = [];
+            try {
+                statusNodes = Array.from(doc.querySelectorAll(statusSelector))
+                    .filter(node => node.getAttribute?.('aria-live') !== 'off');
+            } catch {
+                statusNodes = [];
+            }
+
+            const visibleActiveNodes = statusNodes.filter(node => !node.hidden && node.getAttribute?.('aria-hidden') !== 'true');
+            const statusText = visibleActiveNodes
+                .map(node => node.innerText || node.textContent || '')
+                .join(' ')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .slice(0, 1200);
+            const activeTextLower = statusText.toLowerCase();
+
+            const progressMarkers = [
+                'thinking',
+                'working',
+                'generating',
+                'searching',
+                'researching',
+                'loading'
+            ];
+            const matchedResearchMarker = progressMarkers.find(marker => activeTextLower.includes(marker)) || '';
+            const hasActiveToolOrResearch = !!matchedResearchMarker;
+
+            const alertSelector = this.selectors.errorAlerts.join(',');
+            let alertNodes = [];
+            try {
+                alertNodes = Array.from(doc.querySelectorAll(alertSelector));
+            } catch {
+                alertNodes = [];
+            }
+            const alertText = alertNodes.map(node => node.innerText || node.textContent || '').join(' ').toLowerCase();
+            const errorMarkers = [
+                'something went wrong',
+                'there was an error',
+                'failed to generate',
+                'try again later',
+                'unable to'
+            ];
+            const matchedError = errorMarkers.find(marker => alertText.includes(marker)) || '';
+            const errorSnippet = matchedError
+                ? alertText
+                    .slice(Math.max(0, alertText.indexOf(matchedError) - 60), alertText.indexOf(matchedError) + 160)
+                    .replace(/\s+/g, ' ')
+                    .trim()
+                : '';
+
+            const hasTryAgainButton = buttons.some(btn => {
+                if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') return false;
+                const text = (btn.innerText || btn.getAttribute('aria-label') || '').toLowerCase().trim();
+                return text === 'retry' || text === 'try again';
+            });
+
+            const hasKnownError = !!matchedError;
+            const isWorking = hasActiveStopButton || hasResultStreaming || hasActiveToolOrResearch;
+            const generating = !hasKnownError && isWorking;
+
+            const url = typeof location !== 'undefined' ? location.href : (doc.defaultView?.location?.href || '');
+            const title = typeof document !== 'undefined' ? document.title : (doc.title || '');
+
+            return {
+                generating,
+                hasActiveStopButton,
+                hasResultStreaming,
+                hasActiveToolOrResearch,
+                deepResearchActive: false,
+                matchedResearchMarker,
+                researchStatusPreview: statusText,
+                hasError: hasKnownError,
+                hasTryAgainButton: !!hasTryAgainButton,
+                errorSnippet,
+                matchedError,
+                url,
+                title
+            };
+        }
+
+        getMainRoot() {
+            // Optimizer is unsupported on Claude; fail closed.
+            return null;
+        }
+
+        getMessageNodes() {
+            return [];
+        }
+
+        getFallbackMessages() {
+            return [];
+        }
+    }
+
     const chatGPTAdapterInstance = new ChatGPTAdapter();
+    const geminiAdapterInstance = new GeminiAdapter();
+    const claudeAdapterInstance = new ClaudeAdapter();
 
     const PROVIDERS = {
-        chatgpt: chatGPTAdapterInstance
+        chatgpt: chatGPTAdapterInstance,
+        gemini: geminiAdapterInstance,
+        claude: claudeAdapterInstance
     };
 
     function getProvider(id) {
@@ -825,7 +1550,11 @@
     const ProviderAdapterRegistry = {
         ProviderAdapter,
         ChatGPTAdapter,
+        GeminiAdapter,
+        ClaudeAdapter,
         CHATGPT_SELECTORS,
+        GEMINI_SELECTORS,
+        CLAUDE_SELECTORS,
         PROVIDERS,
         getProvider,
         getProviderForUrl,
@@ -835,7 +1564,11 @@
     if (typeof globalThis !== 'undefined') {
         globalThis.ProviderAdapter = ProviderAdapter;
         globalThis.ChatGPTAdapter = ChatGPTAdapter;
+        globalThis.GeminiAdapter = GeminiAdapter;
+        globalThis.ClaudeAdapter = ClaudeAdapter;
         globalThis.CHATGPT_SELECTORS = CHATGPT_SELECTORS;
+        globalThis.GEMINI_SELECTORS = GEMINI_SELECTORS;
+        globalThis.CLAUDE_SELECTORS = CLAUDE_SELECTORS;
         globalThis.ProviderAdapters = PROVIDERS;
         globalThis.ProviderAdapterRegistry = ProviderAdapterRegistry;
         globalThis.getProvider = getProvider;

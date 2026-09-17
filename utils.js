@@ -1,7 +1,11 @@
 const CHATGPT_HOSTS = new Set(['chatgpt.com', 'chat.openai.com']);
+const GEMINI_HOSTS = new Set(['gemini.google.com']);
+const CLAUDE_HOSTS = new Set(['claude.ai']);
 
 const PROVIDER_HOSTS = {
-    chatgpt: CHATGPT_HOSTS
+    chatgpt: CHATGPT_HOSTS,
+    gemini: GEMINI_HOSTS,
+    claude: CLAUDE_HOSTS
 };
 
 function getUrlProvider(url) {
@@ -91,22 +95,38 @@ function extensionApiPromise(callWithCallback, callWithoutCallback) {
     });
 }
 
+function isGeminiUrl(url) {
+    return getUrlProvider(url) === 'gemini';
+}
+
+function isClaudeUrl(url) {
+    return getUrlProvider(url) === 'claude';
+}
+
 if (typeof globalThis !== 'undefined') {
     globalThis.extensionApiPromise = extensionApiPromise;
     globalThis.CHATGPT_HOSTS = CHATGPT_HOSTS;
+    globalThis.GEMINI_HOSTS = GEMINI_HOSTS;
+    globalThis.CLAUDE_HOSTS = CLAUDE_HOSTS;
     globalThis.PROVIDER_HOSTS = PROVIDER_HOSTS;
     globalThis.getUrlProvider = getUrlProvider;
     globalThis.isSupportedProviderUrl = isSupportedProviderUrl;
     globalThis.isChatGPTUrl = isChatGPTUrl;
+    globalThis.isGeminiUrl = isGeminiUrl;
+    globalThis.isClaudeUrl = isClaudeUrl;
 }
 
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
         CHATGPT_HOSTS,
+        GEMINI_HOSTS,
+        CLAUDE_HOSTS,
         PROVIDER_HOSTS,
         getUrlProvider,
         isSupportedProviderUrl,
         isChatGPTUrl,
+        isGeminiUrl,
+        isClaudeUrl,
         extensionApiPromise
     };
 }
