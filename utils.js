@@ -66,3 +66,16 @@ function extensionApiPromise(callWithCallback, callWithoutCallback) {
         }
     });
 }
+
+if (typeof globalThis !== 'undefined') {
+    globalThis.extensionApiPromise = extensionApiPromise;
+    globalThis.isChatGPTUrl = isChatGPTUrl;
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+        CHATGPT_HOSTS,
+        isChatGPTUrl,
+        extensionApiPromise
+    };
+}

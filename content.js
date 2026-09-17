@@ -23,9 +23,11 @@
         _autoWasIntersecting: false,
         _autoLoadInProgress: false,
         enterQueueListenerAttached: false,
+        submissionObserverAttached: false,
         inlineQueueInFlight: false,
         lastQueuedAt: 0,
-        lastQueuedText: ''
+        lastQueuedText: '',
+        enterDiagnostics: []
       };
 
       this._cachedMessages = null;
@@ -39,18 +41,21 @@
     }
 
     async init() {
+      this.setupComposerQueueShortcut();
       await this.loadConfig();
 
-      if (document.readyState === 'loading') {
+      if (typeof document !== 'undefined' && document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', () => this.bootstrap());
       } else {
         this.bootstrap();
       }
 
-      chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-        this.handleMessage(message, sender, sendResponse);
-        return true;
-      });
+      if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
+        chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+          this.handleMessage(message, sender, sendResponse);
+          return true;
+        });
+      }
     }
 
     async loadConfig() {
@@ -100,7 +105,8 @@
               containerFound: !!this.state.container,
               bannerExists: !!this.state.moreBanner,
               initialized: this.state.isInitialized,
-              selector: this._loggedSelector || 'none'
+              selector: this._loggedSelector || 'none',
+              enterDiagnostics: this.state.enterDiagnostics || []
             }
           });
 
@@ -110,6 +116,13 @@
         case 'CHECK_GENERATION_STATE': {
           const state = this.getGenerationState();
           sendResponse({ state });
+          break;
+        }
+
+        case 'GET_ENTER_DIAGNOSTICS': {
+          sendResponse({
+            diagnostics: this.state.enterDiagnostics || []
+          });
           break;
         }
 
@@ -164,22 +177,82 @@
     setupComposerQueueShortcut() {
       if (this.state.enterQueueListenerAttached) return;
 
-      document.addEventListener('keydown', (event) => {
+      const target = typeof window !== 'undefined' ? window : (typeof document !== 'undefined' ? document : null);
+      if (!target) return;
+
+      target.addEventListener('keydown', (event) => {
         this.handleComposerKeydown(event);
       }, true);
+
+      this.setupNativeSubmissionObserver(target);
 
       this.state.enterQueueListenerAttached = true;
     }
 
+    setupNativeSubmissionObserver(target) {
+      if (this.state.submissionObserverAttached) return;
+
+      const markSubmission = () => {
+        const diags = this.state.enterDiagnostics;
+        if (diags && diags.length > 0) {
+          const lastDiag = diags[diags.length - 1];
+          if (Date.now() - lastDiag.timestamp < 1000) {
+            lastDiag.nativeSubmissionObserved = true;
+          }
+        }
+      };
+
+      target.addEventListener('submit', markSubmission, true);
+      target.addEventListener('click', (event) => {
+        const button = event.target?.closest?.('button[data-testid="send-button"], button[data-testid="fruitjuice-send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"]');
+        if (button) {
+          markSubmission();
+        }
+      }, true);
+
+      this.state.submissionObserverAttached = true;
+    }
+
+    recordEnterDiagnostic(diagnostic) {
+      if (!this.state.enterDiagnostics) {
+        this.state.enterDiagnostics = [];
+      }
+      this.state.enterDiagnostics.push(diagnostic);
+      if (this.state.enterDiagnostics.length > 50) {
+        this.state.enterDiagnostics.shift();
+      }
+
+      if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+        try {
+          chrome.runtime.sendMessage({
+            action: 'logAutomationEvent',
+            source: 'composer-enter',
+            level: diagnostic.interception ? 'info' : 'debug',
+            message: diagnostic.interception
+              ? 'Composer Enter intercepted for queue'
+              : 'Composer Enter not intercepted',
+            details: { ...diagnostic }
+          }, () => {
+            if (chrome.runtime?.lastError) {}
+          });
+        } catch {
+          // ignore error if sendMessage throws
+        }
+      }
+    }
+
     handleComposerKeydown(event) {
+      if (event.key !== 'Enter') {
+        return;
+      }
+
       if (
-        event.key !== 'Enter' ||
         event.shiftKey ||
         event.altKey ||
         event.ctrlKey ||
         event.metaKey ||
         event.isComposing ||
-        event.defaultPrevented
+        event.keyCode === 229
       ) {
         return;
       }
@@ -189,7 +262,53 @@
 
       const text = this.getComposerText(composer).trim();
       if (!text) return;
-      if (!this.isChatGPTGenerating()) return;
+
+      const genState = this.getGenerationState();
+      const isGenerating = !!genState.generating;
+
+      const eventPhase = event.eventPhase || 0;
+      const defaultPrevented = !!event.defaultPrevented;
+      const diagnostic = {
+        timestamp: Date.now(),
+        key: 'Enter',
+        composerMatch: {
+          matched: true,
+          tagName: (composer.tagName || '').toLowerCase(),
+          id: composer.id || '',
+          testId: composer.getAttribute?.('data-testid') || '',
+          isContentEditable: composer.getAttribute?.('contenteditable') === 'true'
+        },
+        eventPhase,
+        defaultPrevented,
+        modifiers: {
+          shift: !!event.shiftKey,
+          alt: !!event.altKey,
+          ctrl: !!event.ctrlKey,
+          meta: !!event.metaKey
+        },
+        isComposing: false,
+        textLength: text.length,
+        hasText: true,
+        matchedGenerationSignals: {
+          generating: isGenerating,
+          hasActiveStopButton: !!genState.hasActiveStopButton,
+          hasResultStreaming: !!genState.hasResultStreaming,
+          hasActiveToolOrResearch: !!genState.hasActiveToolOrResearch,
+          deepResearchActive: !!genState.deepResearchActive,
+          matchedResearchMarker: genState.matchedResearchMarker || null,
+          researchStatusPreview: genState.researchStatusPreview || null,
+          hasError: !!genState.hasError,
+          hasTryAgainButton: !!genState.hasTryAgainButton
+        },
+        interception: false,
+        enqueueResult: 'none',
+        nativeSubmissionObserved: false
+      };
+
+      if (!isGenerating) {
+        this.recordEnterDiagnostic(diagnostic);
+        return;
+      }
 
       event.preventDefault();
       event.stopPropagation();
@@ -198,16 +317,25 @@
         event.stopImmediatePropagation();
       }
 
+      diagnostic.interception = true;
+
       const now = Date.now();
 
-      if (
-        this.state.inlineQueueInFlight ||
-        (this.state.lastQueuedText === text && now - this.state.lastQueuedAt < 1200)
-      ) {
+      if (this.state.inlineQueueInFlight) {
+        diagnostic.enqueueResult = 'suppressed-inflight';
+        this.recordEnterDiagnostic(diagnostic);
         return;
       }
 
-      this.queueComposerMessage(text, composer);
+      if (this.state.lastQueuedText === text && (now - this.state.lastQueuedAt < 1200)) {
+        diagnostic.enqueueResult = 'suppressed-duplicate';
+        this.recordEnterDiagnostic(diagnostic);
+        return;
+      }
+
+      diagnostic.enqueueResult = 'pending';
+      this.recordEnterDiagnostic(diagnostic);
+      this.queueComposerMessage(text, composer, diagnostic);
     }
 
     getComposerFromEventTarget(target) {
@@ -270,66 +398,72 @@
 
     getGenerationState() {
         const buttons = Array.from(document.querySelectorAll('button'));
-        const stopButton =
-            document.querySelector('button[data-testid="stop-button"]') ||
-            document.querySelector('[aria-label="Stop generating"]') ||
-            document.querySelector('button[aria-label="Stop streaming"]') ||
-            buttons.find(button => {
-                const label = (
-                    button.getAttribute('aria-label') ||
-                    button.innerText ||
-                    button.textContent ||
-                    ''
-                ).toLowerCase();
+        const stopButton = buttons.find(button => {
+            if (button.disabled || button.getAttribute('aria-disabled') === 'true') {
+                return false;
+            }
+            const testId = (button.getAttribute('data-testid') || '').toLowerCase();
+            if (testId === 'stop-button' || testId.includes('stop')) {
+                return true;
+            }
+            const label = (
+                button.getAttribute('aria-label') ||
+                button.innerText ||
+                button.textContent ||
+                ''
+            ).toLowerCase().trim();
 
-                return (
-                    label.includes('stop generating') ||
-                    label.includes('stop streaming') ||
-                    label.includes('stop response') ||
-                    label.includes('interrupt')
-                );
-            });
+            return (
+                label === 'stop generating' ||
+                label === 'stop streaming' ||
+                label === 'stop response' ||
+                label.includes('stop generating') ||
+                label.includes('stop streaming') ||
+                label.includes('stop response') ||
+                label.includes('interrupt') ||
+                (label === 'stop' && (button.closest?.('form, [data-testid*="composer"], [data-testid*="action"]') || testId.includes('stop')))
+            );
+        });
+        const hasActiveStopButton = !!stopButton;
 
         const resultStreaming =
             document.querySelector('.result-streaming') ||
             document.querySelector('[data-testid*="conversation-turn"] .result-streaming') ||
             document.querySelector('[data-message-streaming="true"]') ||
+            document.querySelector('[data-is-streaming="true"]') ||
             document.querySelector('[data-testid*="streaming"]');
+        const hasResultStreaming = !!resultStreaming;
 
-        const bodyText = document.body ? document.body.innerText : '';
-        const pageText = bodyText.toLowerCase();
-        const errorMarkers = [
-            'something went wrong',
-            'there was an error',
-            'error generating a response',
-            'network error',
-            'failed to generate',
-            'try again later'
-        ];
-        const matchedError = errorMarkers.find(marker => pageText.includes(marker)) || '';
-        const matchedErrorIndex = matchedError ? pageText.indexOf(matchedError) : -1;
-        const errorSnippet = matchedErrorIndex >= 0
-            ? bodyText
-                .slice(Math.max(0, matchedErrorIndex - 120), matchedErrorIndex + 260)
-                .replace(/\s+/g, ' ')
-                .trim()
-            : '';
+        // Active status/tool/reasoning/research detection in active status elements or latest turn
+        const statusNodes = Array.from(document.querySelectorAll(
+            '[role="status"], [aria-live], [data-testid*="status"], [data-testid*="progress"], [data-testid*="research"], [data-testid*="thinking"], [data-testid*="reasoning"], [data-testid*="thought"], [data-testid*="tool-progress"], .result-thinking'
+        )).filter(node => node.getAttribute('aria-live') !== 'off');
 
-        const hasKnownError = !!matchedError;
-        const hasTryAgainButton = buttons.some(btn => {
-            const text = (btn.innerText || btn.getAttribute('aria-label') || '').toLowerCase().trim();
-            return text === 'retry' || text === 'try again';
-        });
+        const turns = Array.from(document.querySelectorAll('[data-testid^="conversation-turn"], article'));
+        const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
+        const latestTurnActiveElement = latestTurn
+            ? latestTurn.querySelector(
+                '[role="status"], [aria-live], [data-testid*="status"], [data-testid*="progress"], [data-testid*="research"], [data-testid*="thinking"], [data-testid*="reasoning"], [data-testid*="thought"], [data-testid*="tool-progress"], .result-thinking, svg.animate-spin, [class*="animate-spin"], [data-testid*="loading-spinner"]'
+            )
+            : null;
 
-        const statusText = Array.from(document.querySelectorAll(
-            '[role="status"], [aria-live], [data-testid*="status"], [data-testid*="progress"], [data-testid*="research"]'
-        ))
+        const activeNodes = [...statusNodes];
+        if (latestTurnActiveElement && !activeNodes.includes(latestTurnActiveElement)) {
+            activeNodes.push(latestTurnActiveElement);
+        }
+
+        const visibleActiveNodes = activeNodes.filter(node => !node.hidden && node.getAttribute('aria-hidden') !== 'true');
+        const hasActiveSpinner = visibleActiveNodes.some(node => node.querySelector?.('svg.animate-spin, [class*="animate-spin"]') || node.classList?.contains('animate-spin')) ||
+            !!latestTurn?.querySelector?.('svg.animate-spin, [class*="animate-spin"], [data-testid*="loading-spinner"]');
+
+        const statusText = visibleActiveNodes
             .map(node => node.innerText || node.textContent || '')
             .join(' ')
             .replace(/\s+/g, ' ')
             .trim()
             .slice(0, 1200);
-        const researchText = `${statusText} ${buttons.map(btn => btn.innerText || btn.getAttribute('aria-label') || '').join(' ')}`.toLowerCase();
+        const activeTextLower = statusText.toLowerCase();
+
         const researchProgressMarkers = [
             'deep research',
             'researching',
@@ -341,54 +475,114 @@
             'checking sources',
             'synthesizing',
             'creating report',
-            'writing report'
+            'writing report',
+            'thinking',
+            'working'
         ];
-        const matchedResearchMarker =
-            researchProgressMarkers.find(marker => researchText.includes(marker)) ||
-            researchProgressMarkers.find(marker => pageText.includes(marker)) ||
-            '';
-        const deepResearchActive = !!matchedResearchMarker && !!(stopButton || resultStreaming);
+
+        const matchedResearchMarker = researchProgressMarkers.find(marker => activeTextLower.includes(marker)) || '';
+        const hasActiveToolOrResearch = !!matchedResearchMarker || hasActiveSpinner;
+        const isDeepResearch = matchedResearchMarker === 'deep research' ||
+            activeTextLower.includes('deep research') ||
+            activeTextLower.includes('researching');
+
+        // Error detection in active alerts or latest turn
+        const alertNodes = Array.from(document.querySelectorAll(
+            '[role="alert"], [data-testid*="error"], .text-red-500, .border-red-500'
+        ));
+        const alertText = alertNodes.map(node => node.innerText || node.textContent || '').join(' ').toLowerCase();
+        const latestTurnText = latestTurn ? (latestTurn.innerText || latestTurn.textContent || '').toLowerCase() : '';
+        const errorSearchText = alertText || latestTurnText;
+
+        const errorMarkers = [
+            'something went wrong',
+            'there was an error',
+            'error generating a response',
+            'network error',
+            'failed to generate',
+            'try again later'
+        ];
+        const matchedError = errorMarkers.find(marker => errorSearchText.includes(marker)) || '';
+        const errorSnippet = matchedError
+            ? errorSearchText
+                .slice(Math.max(0, errorSearchText.indexOf(matchedError) - 60), errorSearchText.indexOf(matchedError) + 160)
+                .replace(/\s+/g, ' ')
+                .trim()
+            : '';
+
+        const hasTryAgainButton = buttons.some(btn => {
+            if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') return false;
+            const text = (btn.innerText || btn.getAttribute('aria-label') || '').toLowerCase().trim();
+            return text === 'retry' || text === 'try again';
+        });
+
+        const hasKnownError = !!matchedError;
+        const isWorking = hasActiveStopButton || hasResultStreaming || hasActiveToolOrResearch;
+        const generating = !hasKnownError && isWorking;
+        const deepResearchActive = !hasKnownError && isWorking && isDeepResearch;
 
         return {
-            generating: !!(stopButton || resultStreaming),
+            generating,
+            hasActiveStopButton,
+            hasResultStreaming,
+            hasActiveToolOrResearch,
             deepResearchActive,
             matchedResearchMarker,
             researchStatusPreview: statusText,
-            hasError: !!hasKnownError,
+            hasError: hasKnownError,
             hasTryAgainButton: !!hasTryAgainButton,
             errorSnippet,
             matchedError,
-            url: location.href,
-            title: document.title
+            url: typeof location !== 'undefined' ? location.href : '',
+            title: typeof document !== 'undefined' ? document.title : ''
         };
     }
 
-    queueComposerMessage(text, composer) {
+    queueComposerMessage(text, composer, diagnostic = null) {
       this.state.inlineQueueInFlight = true;
       this.state.lastQueuedAt = Date.now();
       this.state.lastQueuedText = text;
 
-      chrome.runtime.sendMessage({
-        action: 'enqueueMessage',
-        message: text,
-        source: 'composer-enter',
-        position: 'end',
-        waitForIdleBeforeStart: true
-      }, (response) => {
-        const error = chrome.runtime.lastError;
-        this.state.inlineQueueInFlight = false;
+      if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+        try {
+          chrome.runtime.sendMessage({
+            action: 'enqueueMessage',
+            message: text,
+            source: 'composer-enter',
+            position: 'end',
+            waitForIdleBeforeStart: true
+          }, (response) => {
+            const error = chrome.runtime?.lastError;
+            this.state.inlineQueueInFlight = false;
 
-        if (error || !response || !response.ok) {
-          this.showInlineQueueToast(
-            error?.message || response?.error || 'Could not add message to queue.',
-            'error'
-          );
-          return;
+            if (error || !response || !response.ok) {
+              const errMsg = error?.message || response?.error || 'Could not add message to queue.';
+              if (diagnostic) {
+                diagnostic.enqueueResult = `error: ${errMsg}`;
+              }
+              this.showInlineQueueToast(errMsg, 'error');
+              return;
+            }
+
+            if (diagnostic) {
+              diagnostic.enqueueResult = 'success';
+            }
+            this.clearComposer(composer);
+            this.showInlineQueueToast('Queued to send after the current response.');
+          });
+        } catch (err) {
+          this.state.inlineQueueInFlight = false;
+          if (diagnostic) {
+            diagnostic.enqueueResult = `error: ${err.message || 'runtime sendMessage failed'}`;
+          }
+          this.showInlineQueueToast(err.message || 'Could not add message to queue.', 'error');
         }
-
-        this.clearComposer(composer);
-        this.showInlineQueueToast('Queued to send after the current response.');
-      });
+      } else {
+        this.state.inlineQueueInFlight = false;
+        if (diagnostic) {
+          diagnostic.enqueueResult = 'error: chrome.runtime unavailable';
+        }
+      }
     }
 
     showInlineQueueToast(message, type = 'success') {
@@ -402,9 +596,13 @@
       toast.textContent = message;
       document.body.appendChild(toast);
 
-      requestAnimationFrame(() => {
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => {
+          toast.classList.add('cpo-inline-queue-toast-visible');
+        });
+      } else {
         toast.classList.add('cpo-inline-queue-toast-visible');
-      });
+      }
 
       setTimeout(() => {
         toast.classList.remove('cpo-inline-queue-toast-visible');
@@ -419,7 +617,8 @@
     async waitForMessages() {
       return new Promise((resolve) => {
         let attempts = 0;
-        const maxAttempts = 120;
+        const isTestEnv = typeof process !== 'undefined' && process.env && process.env.NODE_ENV === 'test';
+        const maxAttempts = isTestEnv ? 1 : 120;
 
         const check = () => {
           const messages = this.getMessageNodes();
@@ -430,7 +629,7 @@
           }
 
           attempts++;
-          setTimeout(check, 250);
+          setTimeout(check, isTestEnv ? 10 : 250);
         };
 
         check();
@@ -1073,8 +1272,10 @@
     }
   }
 
-  if (!window.ChatGPTOptimizerInstance) {
-    window.ChatGPTOptimizerInstance = new ChatGPTOptimizer();
+  if (typeof window !== 'undefined') {
+    if (!window.ChatGPTOptimizerInstance && typeof window.document !== 'undefined') {
+      window.ChatGPTOptimizerInstance = new ChatGPTOptimizer();
+    }
   }
 
   function storageSyncGet(defaults) {
@@ -1089,5 +1290,11 @@
       (done) => chrome.storage.sync.set(items, done),
       () => chrome.storage.sync.set(items)
     );
+  }
+
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+      ChatGPTOptimizer
+    };
   }
 })();
