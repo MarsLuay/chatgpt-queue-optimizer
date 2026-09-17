@@ -69,7 +69,11 @@ document.addEventListener('DOMContentLoaded', function () {
     const EDIT_SEQUENCE_VALUE = '__edit_selected_sequence__';
     let selectedSequenceName = '';
     let editingSequenceName = '';
-    const PROVIDER_URL_PATTERNS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
+    const PROVIDER_URL_PATTERNS = [
+        'https://chatgpt.com/*',
+        'https://chat.openai.com/*',
+        'https://gemini.google.com/*'
+    ];
     const CHATGPT_URL_PATTERNS = PROVIDER_URL_PATTERNS;
 
     function tabsQuery(queryInfo) {
@@ -346,7 +350,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
         const currentOption = document.createElement('option');
         currentOption.value = 'current';
-        currentOption.textContent = 'Current ChatGPT tab';
+        currentOption.textContent = 'Current supported tab';
         targetTabSelect.appendChild(currentOption);
 
         const activeTab = await getActiveTab();
@@ -357,7 +361,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
             const option = document.createElement('option');
             option.value = String(tab.id);
-            option.textContent = cleanTabTitle(tab.title || 'ChatGPT');
+            option.textContent = cleanTabTitle(tab.title || 'Supported tab');
             targetTabSelect.appendChild(option);
         });
 
@@ -368,7 +372,7 @@ document.addEventListener('DOMContentLoaded', function () {
             return;
         }
 
-        if (activeTab && isChatGPTUrl(getTabUrl(activeTab))) {
+        if (activeTab && isSupportedProviderUrl(getTabUrl(activeTab))) {
             targetTabSelect.value = 'current';
             return;
         }
@@ -382,10 +386,12 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     function cleanTabTitle(title) {
-        return String(title || 'ChatGPT')
+        return String(title || 'Supported tab')
             .replace(/^ChatGPT\s*[-–]\s*/i, '')
             .replace(/\s*[-–]\s*ChatGPT$/i, '')
-            .trim() || 'ChatGPT';
+            .replace(/^Gemini\s*[-–]\s*/i, '')
+            .replace(/\s*[-–]\s*Gemini$/i, '')
+            .trim() || 'Supported tab';
     }
 
     if (refreshTargetTabsButton) {
@@ -408,18 +414,18 @@ document.addEventListener('DOMContentLoaded', function () {
             try {
                 tab = await tabsGet(selectedTabId);
             } catch {
-                alert('Selected ChatGPT tab no longer exists. Refresh the tab list.');
+                alert('Selected tab no longer exists. Refresh the tab list.');
                 await refreshTargetTabs();
                 return null;
             }
         } else {
             tab = await getActiveTab();
 
-            if (!tab || !isChatGPTUrl(getTabUrl(tab))) {
+            if (!tab || !isSupportedProviderUrl(getTabUrl(tab))) {
                 const chatgptTabs = await getAllChatGPTTabs();
 
                 if (chatgptTabs.length === 0) {
-                    alert('No ChatGPT tab is open. Open chatgpt.com, then try again.');
+                    alert('No supported tab is open. Open chatgpt.com or gemini.google.com, then try again.');
                     return null;
                 }
 
@@ -437,12 +443,24 @@ document.addEventListener('DOMContentLoaded', function () {
             return null;
         }
 
-        if (!isChatGPTUrl(getTabUrl(tab))) {
-            alert('Select a ChatGPT tab before starting or adding to the queue.');
+        if (!isSupportedProviderUrl(getTabUrl(tab))) {
+            alert('Select a ChatGPT or Gemini tab before starting or adding to the queue.');
             return null;
         }
 
         return tab;
+    }
+
+    function tabSupportsOptimizer(tab) {
+        const url = getTabUrl(tab);
+        if (!isSupportedProviderUrl(url)) {
+            return false;
+        }
+        if (typeof getProviderForUrl === 'function') {
+            const provider = getProviderForUrl(url);
+            return !!(provider && provider.supportsOptimizer);
+        }
+        return isChatGPTUrl(url);
     }
 
     async function getOptimizerTargetTab() {
@@ -457,13 +475,13 @@ document.addEventListener('DOMContentLoaded', function () {
         } else {
             tab = await getActiveTab();
 
-            if (!tab || !isChatGPTUrl(getTabUrl(tab))) {
+            if (!tab || !tabSupportsOptimizer(tab)) {
                 const chatgptTabs = await getAllChatGPTTabs();
-                tab = chatgptTabs[0] || null;
+                tab = chatgptTabs.find(candidate => tabSupportsOptimizer(candidate)) || null;
             }
         }
 
-        if (!tab || !tab.id || !isChatGPTUrl(getTabUrl(tab))) {
+        if (!tab || !tab.id || !tabSupportsOptimizer(tab)) {
             return null;
         }
 
