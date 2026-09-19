@@ -10,6 +10,8 @@ const QUEUE_SETTINGS_DEFAULTS = {
 const UNLIMITED_RETRY_DELAY_MS = 15000;
 const QUEUE_WAKE_ALARM_NAME = 'queue-wake';
 const QUEUE_WAKE_ALARM_PERIOD_MINUTES = 0.5;
+const QUEUE_STATE_COALESCE_DELAY_MS = 50;
+const QUEUE_LOG_COALESCE_DELAY_MS = 50;
 
 if (typeof importScripts === 'function') {
     importScripts('utils.js', 'provider-adapter.js');
@@ -97,7 +99,7 @@ async function validateJobTargetConversation(tabId, job) {
             job.conversationId = currentIdentity.conversationId;
             job.conversationType = 'existing';
             job.targetKey = currentIdentity.key;
-            updateRunningJobsStorage();
+            await updateRunningJobsStorage({ force: true });
             return { ok: true, currentIdentity, updatedBinding: true };
         }
         if (currentIdentity.type === 'new') {
@@ -141,7 +143,7 @@ async function validateJobTargetConversation(tabId, job) {
             job.conversationId = currentIdentity.conversationId || null;
             job.conversationType = currentIdentity.type;
             job.targetKey = currentIdentity.key;
-            updateRunningJobsStorage();
+            await updateRunningJobsStorage({ force: true });
             return { ok: true, currentIdentity, boundFromUnknown: true };
         }
     }
@@ -149,7 +151,15 @@ async function validateJobTargetConversation(tabId, job) {
     return { ok: true, currentIdentity };
 }
 
+let queueStateWrite = Promise.resolve();
+let pendingQueueState = null;
+let queueStateFlushTimer = null;
+let queueStateInFlightSerialized = null;
+let lastPersistedQueueState = null;
 let queueLogWrite = Promise.resolve();
+let pendingQueueLogEntries = [];
+let queueLogFlushTimer = null;
+let queueLogGeneration = 0;
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'startSequence') {
@@ -293,7 +303,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
             remaining: getRemainingCount(job)
         });
         jobs.delete(tabId);
-        updateRunningJobsStorage();
+        updateRunningJobsStorage({ force: true });
     }
 });
 
@@ -359,7 +369,7 @@ async function resumeDurableQueues(source = 'manual') {
         }))
     });
 
-    updateRunningJobsStorage();
+    await updateRunningJobsStorage({ force: true });
 
     for (const job of restoredJobs) {
         if (job.isRunning && !job.isPaused && !job.isStopped) {
@@ -478,25 +488,48 @@ function logLegacyStaleRunningJobs() {
 }
 
 function handleGetQueueDebugLogs(sendResponse) {
-    readLocalStorage([QUEUE_DEBUG_LOG_KEY])
-        .then((data) => {
-            sendResponse({
-                ok: true,
-                logs: Array.isArray(data[QUEUE_DEBUG_LOG_KEY]) ? data[QUEUE_DEBUG_LOG_KEY] : []
-            });
-        })
-        .catch((error) => {
-            sendResponse({
-                ok: false,
-                error: error?.message || 'Could not read queue log.'
-            });
+    (async () => {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+            await flushQueueDebugLogs();
+            await queueLogWrite;
+        }
+        const data = await readLocalStorage([QUEUE_DEBUG_LOG_KEY]);
+
+        sendResponse({
+            ok: true,
+            logs: Array.isArray(data[QUEUE_DEBUG_LOG_KEY]) ? data[QUEUE_DEBUG_LOG_KEY] : []
         });
+    })().catch((error) => {
+        sendResponse({
+            ok: false,
+            error: error?.message || 'Could not read queue log.'
+        });
+    });
 }
 
 function handleClearQueueDebugLogs(sendResponse) {
+    queueLogGeneration += 1;
+    pendingQueueLogEntries = [];
+
+    if (queueLogFlushTimer !== null) {
+        clearTimeout(queueLogFlushTimer);
+        queueLogFlushTimer = null;
+    }
+
+    const clearGeneration = queueLogGeneration;
     queueLogWrite = queueLogWrite
         .catch(() => {})
-        .then(() => writeLocalStorage({ [QUEUE_DEBUG_LOG_KEY]: [] }));
+        .then(async () => {
+            if (clearGeneration !== queueLogGeneration) {
+                return;
+            }
+
+            await writeLocalStorage({ [QUEUE_DEBUG_LOG_KEY]: [] });
+        })
+        .catch((error) => {
+            console.warn('Could not clear queue debug log:', error);
+            throw error;
+        });
 
     queueLogWrite
         .then(() => {
@@ -591,7 +624,7 @@ function handleStartSequence(request, sendResponse) {
             firstMessagePreview: previewText(messages[0] || '', 160)
         });
 
-        updateRunningJobsStorage();
+        await updateRunningJobsStorage({ force: true });
         processQueue(tabId);
 
         sendResponse({ ok: true, tabId });
@@ -617,7 +650,7 @@ function enqueueToPausedJob(tabId, existingJob, message, addToEnd, source, sendR
         remaining: getRemainingCount(existingJob),
         messagePreview: previewText(message, 160)
     });
-    updateRunningJobsStorage();
+    updateRunningJobsStorage({ force: true });
 
     sendResponse({
         ok: true,
@@ -646,7 +679,7 @@ function enqueueToRunningJob(tabId, existingJob, message, addToEnd, source, send
         messagePreview: previewText(message, 160)
     });
 
-    updateRunningJobsStorage();
+    updateRunningJobsStorage({ force: true });
 
     sendResponse({
         ok: true,
@@ -703,7 +736,7 @@ async function startNewJobFromEnqueue(tabId, message, waitForIdleBeforeStart, so
         }
     );
 
-    updateRunningJobsStorage();
+    await updateRunningJobsStorage({ force: true });
     processQueue(tabId);
 
     sendResponse({
@@ -776,7 +809,7 @@ function handleRetryPausedJob(request, sendResponse) {
             totalMessages: getTotalMessages(job)
         });
         jobs.delete(tabId);
-        updateRunningJobsStorage();
+        updateRunningJobsStorage({ force: true });
         sendResponse({ ok: false, error: 'Paused queue has no messages left.' });
         return;
     }
@@ -796,7 +829,7 @@ function handleRetryPausedJob(request, sendResponse) {
         nextMessagePreview: previewText(job.queue[0] || '', 160)
     });
 
-    updateRunningJobsStorage();
+    updateRunningJobsStorage({ force: true });
     processQueue(tabId);
 
     sendResponse({ ok: true, tabId });
@@ -819,7 +852,7 @@ function handleStopSequence(request, sendResponse) {
         });
 
         jobs.delete(tabId);
-        updateRunningJobsStorage();
+        updateRunningJobsStorage({ force: true });
 
         sendResponse({ ok: true, stopped: 'selected', tabId });
         return;
@@ -842,7 +875,7 @@ function handleStopAllSequences(sendResponse) {
         jobs.delete(tabId);
     }
 
-    updateRunningJobsStorage();
+    updateRunningJobsStorage({ force: true });
     sendResponse({ ok: true, stopped: 'all' });
 }
 
@@ -904,7 +937,7 @@ async function processQueue(tabId) {
 
         if (job.isStopped) {
             jobs.delete(tabId);
-            updateRunningJobsStorage();
+            updateRunningJobsStorage({ force: true });
             return;
         }
 
@@ -914,7 +947,7 @@ async function processQueue(tabId) {
                 totalMessages: getTotalMessages(job)
             });
             jobs.delete(tabId);
-            updateRunningJobsStorage();
+            updateRunningJobsStorage({ force: true });
             recordCompletedRun(tabId);
         }
     } catch (error) {
@@ -1012,7 +1045,7 @@ function handleProcessRecovered(tabId, job) {
     job.currentCommandNumber = 0;
     job.currentPhase = 'queued';
     job.updatedAt = Date.now();
-    updateRunningJobsStorage();
+    updateRunningJobsStorage({ force: true });
     return { action: 'continue' };
 }
 
@@ -1082,7 +1115,7 @@ async function handleProcessSending(tabId, job) {
         settings: queueSettings
     });
 
-    updateRunningJobsStorage();
+    await updateRunningJobsStorage({ force: true });
 
     const sendResult = await sendPromptToSpecificTab(tabId, job.currentMessage);
 
@@ -1111,7 +1144,7 @@ async function handleProcessSending(tabId, job) {
 
     job.currentPhase = 'waiting';
     job.updatedAt = Date.now();
-    updateRunningJobsStorage();
+    await updateRunningJobsStorage({ force: true });
 
     logQueueEvent(tabId, 'success', `Submitted command ${job.currentCommandNumber}/${totalMessages}.`, {
         commandNumber: job.currentCommandNumber,
@@ -1187,7 +1220,7 @@ function completeCurrentCommand(tabId, job, totalMessages, diagnostics = {}) {
     job.currentPhase = 'queued';
     job.deliveryTimeoutAttempts = 0;
     job.updatedAt = Date.now();
-    updateRunningJobsStorage();
+    updateRunningJobsStorage({ force: true });
 }
 
 function pauseJob(tabId, reason, details = {}) {
@@ -1221,7 +1254,7 @@ function pauseJob(tabId, reason, details = {}) {
 
     job.currentCommandNumber = 0;
 
-    updateRunningJobsStorage();
+    updateRunningJobsStorage({ force: true });
 
     notifyRuntime({
         action: 'automationPaused',
@@ -1248,7 +1281,7 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
     job.lastError = reason || 'Queue command failed.';
     job.currentPhase = 'retry-wait';
     job.updatedAt = Date.now();
-    updateRunningJobsStorage();
+    updateRunningJobsStorage({ force: true });
 
     logQueueEvent(tabId, 'warn', `Unlimited retry mode will retry command ${job.currentCommandNumber || '?'}/${getTotalMessages(job)}.`, {
         phase,
@@ -1272,7 +1305,7 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
     job.currentCommandNumber = 0;
     job.currentPhase = 'queued';
     job.updatedAt = Date.now();
-    updateRunningJobsStorage();
+    updateRunningJobsStorage({ force: true });
 
     return true;
 }
@@ -1350,7 +1383,7 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
 
     job.currentPhase = 'recovering';
     job.updatedAt = Date.now();
-    updateRunningJobsStorage();
+    await updateRunningJobsStorage({ force: true });
 
     // Stage 1: In-page retry if a retry/regenerate button is currently present
     const hasTryAgain = !!waitResult?.details?.state?.hasTryAgainButton;
@@ -1379,7 +1412,7 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
 
                     job.currentPhase = 'waiting';
                     job.updatedAt = Date.now();
-                    updateRunningJobsStorage();
+                    await updateRunningJobsStorage({ force: true });
 
                     const retryWait = await waitForTabResponse(tabId, {
                         commandNumber: job.currentCommandNumber,
@@ -1451,7 +1484,7 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
 
         job.currentPhase = 'waiting';
         job.updatedAt = Date.now();
-        updateRunningJobsStorage();
+        await updateRunningJobsStorage({ force: true });
 
         const postReloadWait = await waitForTabResponse(tabId, {
             commandNumber: job.currentCommandNumber,
@@ -1504,7 +1537,7 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
 
                 job.currentPhase = 'waiting';
                 job.updatedAt = Date.now();
-                updateRunningJobsStorage();
+                await updateRunningJobsStorage({ force: true });
 
                 const retryWait = await waitForTabResponse(tabId, {
                     commandNumber: job.currentCommandNumber,
@@ -1539,7 +1572,7 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
         job.currentCommandNumber = 0;
         job.currentPhase = 'queued';
         job.updatedAt = Date.now();
-        updateRunningJobsStorage();
+        await updateRunningJobsStorage({ force: true });
 
         return { action: 'retry' };
     }
@@ -2084,18 +2117,90 @@ function getJobStatus(job) {
     return 'idle';
 }
 
-function updateRunningJobsStorage() {
+function updateRunningJobsStorage(options = {}) {
     const snapshot = getRunningJobsSnapshot();
     const durableJobs = getDurableJobsState();
     const hasJobs = Object.keys(snapshot).length > 0;
-
-    chrome.storage.local.set({
+    const items = {
         runningJobs: snapshot,
         queueDurableJobs: durableJobs,
         isRunning: hasJobs
-    });
+    };
+    const serialized = JSON.stringify(items);
 
     updateQueueWakeAlarm(hasJobs);
+
+    if (pendingQueueState?.serialized === serialized) {
+        return queueStateWrite;
+    }
+
+    if (serialized === queueStateInFlightSerialized) {
+        pendingQueueState = null;
+        if (queueStateFlushTimer !== null) {
+            clearTimeout(queueStateFlushTimer);
+            queueStateFlushTimer = null;
+        }
+        return queueStateWrite;
+    }
+
+    if (serialized === lastPersistedQueueState && queueStateInFlightSerialized === null) {
+        pendingQueueState = null;
+        if (queueStateFlushTimer !== null) {
+            clearTimeout(queueStateFlushTimer);
+            queueStateFlushTimer = null;
+        }
+        return queueStateWrite;
+    }
+
+    pendingQueueState = { items, serialized };
+
+    if (options.force === true) {
+        return flushQueueState();
+    }
+
+    if (queueStateFlushTimer === null) {
+        queueStateFlushTimer = setTimeout(() => {
+            queueStateFlushTimer = null;
+            flushQueueState();
+        }, QUEUE_STATE_COALESCE_DELAY_MS);
+    }
+
+    return queueStateWrite;
+}
+
+function flushQueueState() {
+    if (queueStateFlushTimer !== null) {
+        clearTimeout(queueStateFlushTimer);
+        queueStateFlushTimer = null;
+    }
+
+    if (!pendingQueueState) {
+        return queueStateWrite;
+    }
+
+    const nextState = pendingQueueState;
+    pendingQueueState = null;
+    queueStateInFlightSerialized = nextState.serialized;
+    queueStateWrite = queueStateWrite
+        .catch(() => {})
+        .then(async () => {
+            if (nextState.serialized === lastPersistedQueueState) {
+                return;
+            }
+
+            await writeLocalStorage(nextState.items);
+            lastPersistedQueueState = nextState.serialized;
+        })
+        .catch((error) => {
+            console.warn('Could not persist queue state:', error);
+        })
+        .finally(() => {
+            if (queueStateInFlightSerialized === nextState.serialized) {
+                queueStateInFlightSerialized = null;
+            }
+        });
+
+    return queueStateWrite;
 }
 
 function getDurableJobsState() {
@@ -2197,25 +2302,61 @@ function logQueueEvent(tabId, level, message, details = {}) {
         console.log(consoleMessage, entry.details);
     }
 
+    pendingQueueLogEntries.push(entry);
+
+    if (queueLogFlushTimer === null) {
+        queueLogFlushTimer = setTimeout(() => {
+            queueLogFlushTimer = null;
+            flushQueueDebugLogs();
+        }, QUEUE_LOG_COALESCE_DELAY_MS);
+    }
+
+    return entry;
+}
+
+function flushQueueDebugLogs() {
+    if (queueLogFlushTimer !== null) {
+        clearTimeout(queueLogFlushTimer);
+        queueLogFlushTimer = null;
+    }
+
+    if (pendingQueueLogEntries.length === 0) {
+        return queueLogWrite;
+    }
+
+    const entries = pendingQueueLogEntries;
+    pendingQueueLogEntries = [];
+    const generation = queueLogGeneration;
+
     queueLogWrite = queueLogWrite
         .catch(() => {})
         .then(async () => {
+            if (generation !== queueLogGeneration) {
+                return;
+            }
+
             const data = await readLocalStorage([QUEUE_DEBUG_LOG_KEY]);
+            if (generation !== queueLogGeneration) {
+                return;
+            }
+
             const logs = Array.isArray(data[QUEUE_DEBUG_LOG_KEY]) ? data[QUEUE_DEBUG_LOG_KEY] : [];
-            const nextLogs = [...logs, entry].slice(-MAX_QUEUE_DEBUG_LOG_ENTRIES);
+            const nextLogs = [...logs, ...entries].slice(-MAX_QUEUE_DEBUG_LOG_ENTRIES);
 
             await writeLocalStorage({ [QUEUE_DEBUG_LOG_KEY]: nextLogs });
 
-            notifyRuntime({
-                action: 'queueDebugLogUpdated',
-                entry
-            });
+            for (const entry of entries) {
+                notifyRuntime({
+                    action: 'queueDebugLogUpdated',
+                    entry
+                });
+            }
         })
         .catch((error) => {
             console.warn('Could not write queue debug log:', error);
         });
 
-    return entry;
+    return queueLogWrite;
 }
 
 function readLocalStorage(keys) {
@@ -2464,6 +2605,13 @@ if (typeof module !== 'undefined' && module.exports) {
         restoreDurableJobs,
         getDurableJobsState,
         getRunningJobsSnapshot,
+        updateRunningJobsStorage,
+        flushQueueState,
+        flushQueueDebugLogs,
+        logQueueEvent,
+        handleGetQueueDebugLogs,
+        handleClearQueueDebugLogs,
+        resumeDurableQueues,
         handleStartSequence,
         handleEnqueueMessage,
         pauseJob,
@@ -2472,6 +2620,7 @@ if (typeof module !== 'undefined' && module.exports) {
         waitForTabToRecover,
         waitForTabResponse,
         QUEUE_SETTINGS_DEFAULTS,
+        MAX_QUEUE_DEBUG_LOG_ENTRIES,
         jobs
     };
 }
