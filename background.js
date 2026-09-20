@@ -2773,24 +2773,29 @@ function buildScheduledConversationIdentity(item) {
 function identitiesMatchForSchedule(stored, current) {
     if (!stored || !current) return false;
 
+    const storedType = stored.conversationType || stored.type || 'unknown';
+    const currentType = current.conversationType || current.type || 'unknown';
+    const storedKey = stored.targetKey || stored.key || '';
+    const currentKey = current.targetKey || current.key || '';
+
     if (stored.provider && current.provider && current.provider !== 'unknown' && stored.provider !== current.provider) {
         return false;
     }
 
-    if (current.type === 'unsupported') {
+    if (currentType === 'unsupported') {
         return false;
     }
 
-    if (stored.conversationType === 'existing' && stored.conversationId) {
-        return current.type === 'existing' && current.conversationId === stored.conversationId;
+    if (storedType === 'existing' && stored.conversationId) {
+        return currentType === 'existing' && current.conversationId === stored.conversationId;
     }
 
-    if (stored.conversationType === 'new') {
-        return current.type === 'new' || current.type === 'existing';
+    if (storedType === 'new') {
+        return currentType === 'new' || currentType === 'existing';
     }
 
-    if (stored.targetKey && current.key && stored.targetKey !== 'chatgpt:unknown' && stored.targetKey !== `${stored.provider}:unknown`) {
-        return stored.targetKey === current.key;
+    if (storedKey && currentKey && storedKey !== 'chatgpt:unknown' && storedKey !== `${stored.provider}:unknown`) {
+        return storedKey === currentKey;
     }
 
     return true;
