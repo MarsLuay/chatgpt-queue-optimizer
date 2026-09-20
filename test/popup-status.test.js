@@ -31,6 +31,17 @@ test('popup queue status labels cover exposed queue phases', () => {
     assert.equal(getPopupQueueStatusLabel({ status: 'complete' }), 'Complete');
 });
 
+test('popup-started queue entry points request the canonical wait-for-idle contract', () => {
+    assert.match(
+        popupSource,
+        /action:\s*'startSequence',[\s\S]{0,180}waitForIdleBeforeStart:\s*true/
+    );
+    assert.match(
+        popupSource,
+        /action:\s*'enqueueMessage',[\s\S]{0,180}waitForIdleBeforeStart:\s*true/
+    );
+});
+
 test('running instance text keeps queue progress and failure details inspectable', () => {
     const text = formatPopupRunningInstanceText('Research tab', {
         status: 'running',

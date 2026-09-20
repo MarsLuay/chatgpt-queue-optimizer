@@ -1125,7 +1125,8 @@ document.addEventListener('DOMContentLoaded', function () {
         chrome.runtime.sendMessage({
             action: 'startSequence',
             messages: resolvedMessages,
-            tabId: tab.id
+            tabId: tab.id,
+            waitForIdleBeforeStart: true
         }, function (response) {
             if (chrome.runtime.lastError) {
                 showErrorStatus(chrome.runtime.lastError.message || 'Could not start sequence.', 'start-sequence-error');
@@ -1160,7 +1161,8 @@ document.addEventListener('DOMContentLoaded', function () {
         chrome.runtime.sendMessage({
             action: 'enqueueMessage',
             tabId: tab.id,
-            message: resolvedMessage
+            message: resolvedMessage,
+            waitForIdleBeforeStart: true
         }, function (response) {
             if (chrome.runtime.lastError) {
                 showErrorStatus(chrome.runtime.lastError.message || 'Could not add message to queue.', 'enqueue-message-error');
