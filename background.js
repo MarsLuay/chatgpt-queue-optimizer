@@ -632,7 +632,10 @@ function handleGetQueueDebugLogs(sendResponse) {
 
         sendResponse({
             ok: true,
-            logs: Array.isArray(data[QUEUE_DEBUG_LOG_KEY]) ? data[QUEUE_DEBUG_LOG_KEY] : []
+            logs: (Array.isArray(data[QUEUE_DEBUG_LOG_KEY]) ? data[QUEUE_DEBUG_LOG_KEY] : []).map((entry) => ({
+                ...entry,
+                details: sanitizeLogValue(entry?.details)
+            }))
         });
     })().catch((error) => {
         sendResponse({
@@ -2943,7 +2946,7 @@ async function waitForTabResponse(tabId, context = {}) {
                         totalMessages: context.totalMessages || 0,
                         elapsedMs: Date.now() - startedAt,
                         matchedResearchMarker: state.matchedResearchMarker || '',
-                        researchStatusPreview: researchPreview
+                        researchPreviewLength: researchPreview.length
                     });
                     lastResearchPreview = researchPreview;
                     job.lastResearchProgressAt = Date.now();
@@ -3180,9 +3183,9 @@ function getRunningJobsSnapshot() {
             status: getJobStatus(job),
             pausedReason: job.pausedReason || '',
             lastError: job.lastError || '',
-            currentMessage: job.currentMessage || '',
-            currentMessagePreview: previewText(job.currentMessage || ''),
-            nextMessagePreview: previewText((Array.isArray(job.queue) ? job.queue[0] : '') || ''),
+            hasCurrentMessage: !!job.currentMessage,
+            currentMessageLength: String(job.currentMessage || '').length,
+            nextMessageLength: String((Array.isArray(job.queue) ? job.queue[0] : '') || '').length,
             runId: job.runId || '',
             totalMessages: getTotalMessages(job),
             completedCount: job.completedCount || 0,
@@ -3482,7 +3485,12 @@ function flushQueueDebugLogs() {
             }
 
             const logs = Array.isArray(data[QUEUE_DEBUG_LOG_KEY]) ? data[QUEUE_DEBUG_LOG_KEY] : [];
-            const nextLogs = [...logs, ...entries].slice(-MAX_QUEUE_DEBUG_LOG_ENTRIES);
+            const nextLogs = [...logs, ...entries]
+                .map((entry) => ({
+                    ...entry,
+                    details: sanitizeLogValue(entry?.details)
+                }))
+                .slice(-MAX_QUEUE_DEBUG_LOG_ENTRIES);
 
             await writeLocalStorage({ [QUEUE_DEBUG_LOG_KEY]: nextLogs });
 
@@ -3663,9 +3671,62 @@ function executeScript(details, callback) {
     return promise;
 }
 
-function sanitizeLogValue(value, depth = 0) {
+function isSensitiveLogKey(key) {
+    const normalized = String(key || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!normalized) {
+        return false;
+    }
+    if (
+        normalized === 'currentmessage' ||
+        normalized === 'text' ||
+        normalized === 'prompt' ||
+        normalized === 'composertext' ||
+        normalized === 'lastqueuedtext' ||
+        normalized === 'errorsnippet' ||
+        normalized === 'researchstatuspreview' ||
+        normalized === 'recoveredturnpreview' ||
+        normalized === 'assistantpreview'
+    ) {
+        return true;
+    }
+    return normalized.includes('preview') || normalized.includes('snippet');
+}
+
+function redactSensitiveLogValue(value) {
+    if (typeof value === 'string') {
+        return {
+            redacted: true,
+            length: value.length
+        };
+    }
+    if (Array.isArray(value)) {
+        return {
+            redacted: true,
+            length: value.length
+        };
+    }
+    return {
+        redacted: true
+    };
+}
+
+function describeLoggedMessage(text) {
+    return {
+        redacted: true,
+        messageLength: String(text || '').length
+    };
+}
+
+function sanitizeLogValue(value, depth = 0, key = '') {
     if (value === null || value === undefined) {
         return value;
+    }
+
+    if (key && isSensitiveLogKey(key)) {
+        if (value && typeof value === 'object' && value.redacted === true) {
+            return value;
+        }
+        return redactSensitiveLogValue(value);
     }
 
     if (value instanceof Error) {
@@ -3696,9 +3757,9 @@ function sanitizeLogValue(value, depth = 0) {
         const clean = {};
         const entries = Object.entries(value).slice(0, 30);
 
-        for (const [key, item] of entries) {
+        for (const [entryKey, item] of entries) {
             if (typeof item === 'function' || item === undefined) continue;
-            clean[key] = sanitizeLogValue(item, depth + 1);
+            clean[entryKey] = sanitizeLogValue(item, depth + 1, entryKey);
         }
 
         return clean;
@@ -4261,6 +4322,8 @@ function handleRetryScheduledMessage(request, sendResponse) {
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
         sanitizeLogValue,
+        isSensitiveLogKey,
+        describeLoggedMessage,
         serializeError,
         previewText,
         getActiveProviderAdapter,

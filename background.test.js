@@ -92,6 +92,7 @@ const {
   resumeDurableQueues,
   restoreDurableJobs,
   getDurableJobsState,
+  getRunningJobsSnapshot,
   MAX_QUEUE_DEBUG_LOG_ENTRIES
 } = require('./background.js');
 
@@ -206,6 +207,66 @@ test('sanitizeLogValue - Object with depth limiting and cleanup', (t) => {
 test('sanitizeLogValue - fallback', (t) => {
   const symbol = Symbol('test');
   assert.strictEqual(sanitizeLogValue(symbol), 'Symbol(test)');
+});
+
+test('sanitizeLogValue redacts nested conversation fields and keeps structural metadata', () => {
+  const secret = 'CQO-ISSUE-46-SECRET-PROMPT-MARKER';
+  const sanitized = sanitizeLogValue({
+    runId: 'run-46',
+    commandNumber: 2,
+    phase: 'sending',
+    matchedError: 'something went wrong',
+    messagePreview: secret,
+    firstMessagePreview: secret,
+    nextMessagePreview: secret,
+    failedMessagePreview: secret,
+    errorSnippet: `page said ${secret}`,
+    researchStatusPreview: `researching ${secret}`,
+    nested: {
+      currentMessage: secret,
+      recoveredTurnPreview: secret
+    }
+  });
+
+  const serialized = JSON.stringify(sanitized);
+  assert.equal(serialized.includes(secret), false);
+  assert.equal(sanitized.runId, 'run-46');
+  assert.equal(sanitized.commandNumber, 2);
+  assert.equal(sanitized.phase, 'sending');
+  assert.equal(sanitized.matchedError, 'something went wrong');
+  assert.deepEqual(sanitized.messagePreview, { redacted: true, length: secret.length });
+  assert.deepEqual(sanitized.nested.currentMessage, { redacted: true, length: secret.length });
+});
+
+test('queue debug logs and running snapshots omit raw prompt text', async () => {
+  await resetQueueFixture();
+  const secret = 'CQO-ISSUE-46-LOG-SECRET-MARKER';
+  const job = createFixtureJob();
+  job.currentMessage = secret;
+  job.queue = [secret];
+  jobs.set(job.tabId, job);
+
+  logQueueEvent(job.tabId, 'info', 'Queued command metadata only.', {
+    messagePreview: secret,
+    errorSnippet: secret,
+    researchStatusPreview: secret,
+    commandNumber: 1,
+    totalMessages: 2
+  });
+  await flushQueueDebugLogs();
+
+  const result = await invokeHandler(handleGetQueueDebugLogs);
+  const serializedLogs = JSON.stringify(result.logs || []);
+  assert.equal(serializedLogs.includes(secret), false);
+  assert.equal(result.logs.at(-1).details.commandNumber, 1);
+  assert.deepEqual(result.logs.at(-1).details.messagePreview, { redacted: true, length: secret.length });
+
+  const snapshot = getRunningJobsSnapshot();
+  const serializedSnapshot = JSON.stringify(snapshot);
+  assert.equal(serializedSnapshot.includes(secret), false);
+  assert.equal(snapshot[job.tabId].hasCurrentMessage, true);
+  assert.equal(snapshot[job.tabId].currentMessageLength, secret.length);
+  assert.equal(snapshot[job.tabId].currentMessage, undefined);
 });
 
 test('queue snapshots coalesce and skip unchanged state', async () => {

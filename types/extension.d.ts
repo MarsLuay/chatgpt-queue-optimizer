@@ -177,9 +177,10 @@ interface RunningJobSnapshot {
     status: QueueJobStatus;
     pausedReason: string;
     lastError: string;
-    currentMessage: string;
-    currentMessagePreview: string;
-    nextMessagePreview: string;
+    currentMessage?: string;
+    hasCurrentMessage?: boolean;
+    currentMessageLength?: number;
+    nextMessageLength?: number;
     runId: string;
     totalMessages: number;
     completedCount: number;
