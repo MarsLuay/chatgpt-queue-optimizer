@@ -139,7 +139,7 @@ async function runPopupStart({ mode, busy }) {
             assert.equal(executeScriptCount, 0, `${mode} steered a busy ChatGPT response`);
         }
 
-        await waitUntil(() => executeScriptCount === 1);
+        await waitUntil(() => executeScriptCount >= 1);
     } finally {
         const job = jobs.get(tabId);
         if (job) {

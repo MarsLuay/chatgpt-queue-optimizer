@@ -78,6 +78,19 @@
             'network error',
             'failed to generate',
             'try again later'
+        ],
+        waitingForUserMarkers: [
+            'waiting for you',
+            'waiting for your response',
+            'waiting for your reply',
+            'need more information from you',
+            'reply when you are ready'
+        ],
+        interruptedMarkers: [
+            'stopped generating',
+            'response interrupted',
+            'generation stopped',
+            'you stopped this response'
         ]
     };
 
@@ -166,6 +179,57 @@
         return value;
     }
 
+    function normalizeCommandText(text) {
+        return String(text || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function fingerprintCommandText(text) {
+        const normalized = normalizeCommandText(text);
+        let hash = 2166136261;
+        for (let i = 0; i < normalized.length; i += 1) {
+            hash ^= normalized.charCodeAt(i);
+            hash = Math.imul(hash, 16777619);
+        }
+        return `fnv1a:${(hash >>> 0).toString(16)}:len:${normalized.length}`;
+    }
+
+    function emptyCommandTurnSnapshot(adapter) {
+        return {
+            conversationId: null,
+            conversationKey: '',
+            userTurns: [],
+            assistantTurns: [],
+            latestUserTurnId: null,
+            latestAssistantTurnId: null,
+            matchedUserTurnId: null,
+            supportsCommandTurnAck: adapter?.supportsCommandTurnAck === true
+        };
+    }
+
+    function getNodeRole(node) {
+        const attr = String(node?.getAttribute?.('data-message-author-role') || '').toLowerCase();
+        if (attr === 'user' || attr === 'assistant') {
+            return attr;
+        }
+        if (node?.querySelector?.('[data-message-author-role="user"]')) {
+            return 'user';
+        }
+        if (node?.querySelector?.('[data-message-author-role="assistant"]')) {
+            return 'assistant';
+        }
+        return '';
+    }
+
+    function getNodeText(node) {
+        return normalizeCommandText(node?.innerText || node?.textContent || '');
+    }
+
+    function getTurnId(node, index, role, fingerprint) {
+        return node?.getAttribute?.('data-message-id') ||
+            node?.getAttribute?.('data-testid') ||
+            `turn:${index}:${role || 'unknown'}:${fingerprint || '0'}`;
+    }
+
     function summarizeSelectorMatch(match) {
         return {
             matched: !!match?.element,
@@ -180,13 +244,23 @@
                 this.id = idOrOptions.id;
                 this.name = idOrOptions.name;
                 this.supportsOptimizer = !!idOrOptions.supportsOptimizer;
+                this.supportsCommandTurnAck = !!idOrOptions.supportsCommandTurnAck;
                 this.selectors = idOrOptions.selectors || {};
             } else {
                 this.id = idOrOptions;
                 this.name = maybeName;
                 this.supportsOptimizer = !!options.supportsOptimizer;
+                this.supportsCommandTurnAck = !!options.supportsCommandTurnAck;
                 this.selectors = options.selectors || {};
             }
+        }
+
+        normalizeCommandText(text) {
+            return normalizeCommandText(text);
+        }
+
+        fingerprintCommandText(text) {
+            return fingerprintCommandText(text);
         }
 
         getCompatibilityContract() {
@@ -383,6 +457,68 @@
             return null;
         }
 
+        getCommandTurnSnapshot(doc, options = {}) {
+            return emptyCommandTurnSnapshot(this);
+        }
+
+        /**
+         * @param {any} doc
+         * @param {{ userTurnId?: string|null, assistantTurnId?: string|null, commandFingerprint?: string, conversationId?: string|null }} [binding]
+         * @returns {{ phase: string, userTurnId: string|null, assistantTurnId: string|null, conversationId: string|null, generating: boolean, deepResearchActive: boolean, hasCompletedAssistant: boolean, source: string }}
+         */
+        getCommandResponseState(doc, binding = {}) {
+            const generation = this.getGenerationState(doc);
+            if (generation.hasError || generation.hasTryAgainButton || generation.hasDeliveryTimedOut) {
+                return {
+                    phase: 'error',
+                    userTurnId: binding.userTurnId || null,
+                    assistantTurnId: null,
+                    conversationId: binding.conversationId || null,
+                    generating: false,
+                    deepResearchActive: !!generation.deepResearchActive,
+                    hasCompletedAssistant: false,
+                    source: generation.hasDeliveryTimedOut ? 'delivery-timeout' : (generation.hasTryAgainButton ? 'retry-visible' : 'generation-error')
+                };
+            }
+            if (generation.generating || generation.deepResearchActive) {
+                return {
+                    phase: 'active',
+                    userTurnId: binding.userTurnId || null,
+                    assistantTurnId: null,
+                    conversationId: binding.conversationId || null,
+                    generating: !!generation.generating,
+                    deepResearchActive: !!generation.deepResearchActive,
+                    hasCompletedAssistant: false,
+                    source: generation.deepResearchActive ? 'deep-research' : 'generating'
+                };
+            }
+            const lastAssistant = typeof this.getLastAssistantTurn === 'function'
+                ? this.getLastAssistantTurn(doc)
+                : null;
+            if (lastAssistant && lastAssistant.isAssistant && lastAssistant.hasCompletedText) {
+                return {
+                    phase: 'terminal',
+                    userTurnId: binding.userTurnId || null,
+                    assistantTurnId: binding.assistantTurnId || null,
+                    conversationId: binding.conversationId || null,
+                    generating: false,
+                    deepResearchActive: false,
+                    hasCompletedAssistant: true,
+                    source: 'assistant-turn-completed'
+                };
+            }
+            return {
+                phase: 'transient-idle',
+                userTurnId: binding.userTurnId || null,
+                assistantTurnId: null,
+                conversationId: binding.conversationId || null,
+                generating: false,
+                deepResearchActive: false,
+                hasCompletedAssistant: false,
+                source: 'unknown-idle'
+            };
+        }
+
         getMainRoot(doc) {
             return null;
         }
@@ -412,6 +548,7 @@
         constructor() {
             super('chatgpt', 'ChatGPT', {
                 supportsOptimizer: true,
+                supportsCommandTurnAck: true,
                 selectors: CHATGPT_SELECTORS
             });
             this.compatibilitySignals = CHATGPT_COMPATIBILITY_SIGNALS;
@@ -532,6 +669,165 @@
             }
 
             return matches;
+        }
+
+        getCommandTurnSnapshot(doc = (typeof document !== 'undefined' ? document : null), options = {}) {
+            const snapshot = emptyCommandTurnSnapshot(this);
+            if (!doc) {
+                return snapshot;
+            }
+
+            const identity = typeof this.getConversationIdentity === 'function'
+                ? this.getConversationIdentity(doc.defaultView?.location || (typeof location !== 'undefined' ? location : ''))
+                : null;
+            snapshot.conversationId = identity?.conversationId || null;
+            snapshot.conversationKey = identity?.key || '';
+
+            const expectedText = normalizeCommandText(options.expectedText || '');
+            const expectedFingerprint = options.expectedFingerprint || (expectedText ? fingerprintCommandText(expectedText) : '');
+            const turns = this.getConversationTurns(doc);
+            const userTurns = [];
+            const assistantTurns = [];
+
+            turns.forEach((node, index) => {
+                const role = getNodeRole(node);
+                const text = getNodeText(node);
+                const fingerprint = fingerprintCommandText(text);
+                const turnId = getTurnId(node, index, role, fingerprint);
+                const matchedExpected = !!expectedText && text === expectedText;
+
+                if (role === 'user' || (!role && matchedExpected)) {
+                    userTurns.push({
+                        turnId,
+                        index,
+                        fingerprint,
+                        matchedExpected
+                    });
+                    if (matchedExpected) {
+                        snapshot.matchedUserTurnId = turnId;
+                    }
+                }
+
+                if (role === 'assistant') {
+                    const streaming = !!(node.querySelector?.('[data-message-streaming="true"], [data-is-streaming="true"], .result-streaming'));
+                    assistantTurns.push({
+                        turnId,
+                        index,
+                        followingUserTurnId: userTurns.length > 0 ? userTurns[userTurns.length - 1].turnId : null,
+                        fingerprint,
+                        streaming,
+                        hasCompletedText: !streaming && text.length > 0
+                    });
+                }
+            });
+
+            snapshot.userTurns = userTurns;
+            snapshot.assistantTurns = assistantTurns;
+            snapshot.latestUserTurnId = userTurns.length > 0 ? userTurns[userTurns.length - 1].turnId : null;
+            snapshot.latestAssistantTurnId = assistantTurns.length > 0 ? assistantTurns[assistantTurns.length - 1].turnId : null;
+            if (!snapshot.matchedUserTurnId && expectedFingerprint) {
+                const fingerprintMatch = userTurns.find(turn => turn.fingerprint === expectedFingerprint);
+                if (fingerprintMatch) {
+                    snapshot.matchedUserTurnId = fingerprintMatch.turnId;
+                    fingerprintMatch.matchedExpected = true;
+                }
+            }
+            return snapshot;
+        }
+
+        getCommandResponseState(doc = (typeof document !== 'undefined' ? document : null), binding = {}) {
+            const generation = this.getGenerationState(doc);
+            const snapshot = this.getCommandTurnSnapshot(doc, {
+                expectedFingerprint: binding.commandFingerprint || ''
+            });
+            const userTurnId = binding.userTurnId || snapshot.matchedUserTurnId || snapshot.latestUserTurnId || null;
+            const boundUser = snapshot.userTurns.find(turn => turn.turnId === userTurnId) || null;
+            const followingAssistant = snapshot.assistantTurns.find(turn => turn.followingUserTurnId === userTurnId) ||
+                (boundUser
+                    ? snapshot.assistantTurns.find(turn => turn.index > boundUser.index)
+                    : null) ||
+                null;
+            const conversationId = binding.conversationId || snapshot.conversationId || null;
+            const statusText = String(generation.researchStatusPreview || '').toLowerCase();
+            const waitingForUser = (this.compatibilitySignals.waitingForUserMarkers || []).some(marker => statusText.includes(marker));
+            const interrupted = (this.compatibilitySignals.interruptedMarkers || []).some(marker => statusText.includes(marker));
+
+            if (generation.hasError || generation.hasTryAgainButton || generation.hasDeliveryTimedOut) {
+                return {
+                    phase: 'error',
+                    userTurnId,
+                    assistantTurnId: followingAssistant?.turnId || null,
+                    conversationId,
+                    generating: false,
+                    deepResearchActive: !!generation.deepResearchActive,
+                    hasCompletedAssistant: false,
+                    source: generation.hasDeliveryTimedOut ? 'delivery-timeout' : (generation.hasTryAgainButton ? 'retry-visible' : 'generation-error')
+                };
+            }
+
+            if (waitingForUser) {
+                return {
+                    phase: 'waiting-for-user',
+                    userTurnId,
+                    assistantTurnId: followingAssistant?.turnId || null,
+                    conversationId,
+                    generating: false,
+                    deepResearchActive: false,
+                    hasCompletedAssistant: false,
+                    source: 'waiting-for-user'
+                };
+            }
+
+            if (interrupted && !(followingAssistant?.hasCompletedText)) {
+                return {
+                    phase: 'interrupted',
+                    userTurnId,
+                    assistantTurnId: followingAssistant?.turnId || null,
+                    conversationId,
+                    generating: false,
+                    deepResearchActive: false,
+                    hasCompletedAssistant: false,
+                    source: 'interrupted'
+                };
+            }
+
+            const boundActivity = !!(generation.generating || generation.deepResearchActive || followingAssistant?.streaming);
+            if (boundActivity) {
+                return {
+                    phase: 'active',
+                    userTurnId,
+                    assistantTurnId: followingAssistant?.turnId || null,
+                    conversationId,
+                    generating: !!generation.generating,
+                    deepResearchActive: !!generation.deepResearchActive,
+                    hasCompletedAssistant: false,
+                    source: generation.deepResearchActive ? 'deep-research' : (followingAssistant?.streaming ? 'streaming' : 'generating')
+                };
+            }
+
+            if (followingAssistant && followingAssistant.hasCompletedText && !followingAssistant.streaming) {
+                return {
+                    phase: 'terminal',
+                    userTurnId,
+                    assistantTurnId: followingAssistant.turnId,
+                    conversationId,
+                    generating: false,
+                    deepResearchActive: false,
+                    hasCompletedAssistant: true,
+                    source: 'bound-assistant-turn'
+                };
+            }
+
+            return {
+                phase: 'transient-idle',
+                userTurnId,
+                assistantTurnId: followingAssistant?.turnId || null,
+                conversationId,
+                generating: false,
+                deepResearchActive: false,
+                hasCompletedAssistant: false,
+                source: 'transient-idle'
+            };
         }
 
         findMatchingSelector(node, selectorKey) {
@@ -1873,7 +2169,9 @@
         PROVIDERS,
         getProvider,
         getProviderForUrl,
-        getConversationIdentity
+        getConversationIdentity,
+        normalizeCommandText,
+        fingerprintCommandText
     };
 
     if (typeof globalThis !== 'undefined') {
@@ -1889,6 +2187,8 @@
         globalThis.getProvider = getProvider;
         globalThis.getProviderForUrl = getProviderForUrl;
         globalThis.getConversationIdentity = getConversationIdentity;
+        globalThis.normalizeCommandText = normalizeCommandText;
+        globalThis.fingerprintCommandText = fingerprintCommandText;
     }
 
     if (typeof module !== 'undefined' && module.exports) {

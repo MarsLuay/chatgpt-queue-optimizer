@@ -165,7 +165,34 @@
 
         case 'CHECK_GENERATION_STATE': {
           const state = this.getGenerationState();
-          sendResponse({ state });
+          let responseState = null;
+          if (this.provider && typeof this.provider.getCommandResponseState === 'function') {
+            responseState = this.provider.getCommandResponseState(document, message.commandBinding || {});
+          }
+          sendResponse({ state, responseState });
+          break;
+        }
+
+        case 'GET_COMMAND_TURN_SNAPSHOT': {
+          if (this.provider && typeof this.provider.getCommandTurnSnapshot === 'function') {
+            const snapshot = this.provider.getCommandTurnSnapshot(document, {
+              expectedText: message.expectedText,
+              expectedFingerprint: message.expectedFingerprint
+            });
+            sendResponse({ ok: true, snapshot });
+            break;
+          }
+          sendResponse({ ok: false, error: 'Turn snapshot is unavailable.' });
+          break;
+        }
+
+        case 'GET_COMMAND_RESPONSE_STATE': {
+          if (this.provider && typeof this.provider.getCommandResponseState === 'function') {
+            const responseState = this.provider.getCommandResponseState(document, message.commandBinding || {});
+            sendResponse({ ok: true, responseState });
+            break;
+          }
+          sendResponse({ ok: false, error: 'Command response state is unavailable.' });
           break;
         }
 
