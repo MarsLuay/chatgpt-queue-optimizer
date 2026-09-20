@@ -811,9 +811,13 @@ test('ChatGPT message and generation diagnostics report matched canonical signal
     const state = chatgpt.getGenerationState(doc);
     assert.equal(state.generating, true);
     assert.equal(state.deepResearchActive, true);
+    assert.equal(state.compatibilityState, 'active');
+    assert.equal(state.statusUnknown, false);
     assert.equal(state.matchedSignals.stopButton, 'button[data-testid="stop-button"]');
     assert.equal(state.matchedSignals.status, '[role="status"]');
     assert.equal(state.matchedSignals.research, 'researchMarkers:deep research');
+    assert.equal(state.matchedSignals.scope, 'active-response');
+    assert.equal(state.matchedSignals.compatibility, 'active');
 });
 
 test('Queued ChatGPT send uses the canonical composer and reports compatibility failures without mutation', async () => {
@@ -1140,11 +1144,11 @@ test('ChatGPTAdapter detects delivery timeout distinct from generic errors', () 
     assert.equal(timeoutClass.class, 'timeout');
     assert.equal(timeoutClass.retryable, true);
 
-    // 2. Delivery timeout inside the latest turn
+    // 2. Delivery timeout inside an alert on the latest turn
+    const timeoutTurn = new MockElement('article', { 'data-testid': 'conversation-turn-3' }, 'Completed answer');
+    timeoutTurn.appendChild(new MockElement('div', { role: 'alert' }, 'Message delivery timed out. Please try again.'));
     const { doc: doc2 } = createTestDoc({
-        turns: [
-            new MockElement('article', { 'data-testid': 'conversation-turn-3' }, 'Message delivery timed out. Please try again.')
-        ]
+        turns: [timeoutTurn]
     });
 
     const state2 = chatgpt.getGenerationState(doc2);
@@ -1163,6 +1167,86 @@ test('ChatGPTAdapter detects delivery timeout distinct from generic errors', () 
     assert.equal(state3.hasDeliveryTimedOut, false);
     assert.equal(state3.hasError, true);
     assert.equal(state3.matchedError, 'something went wrong');
+    assert.equal(state3.errorSnippet, 'something went wrong');
+    assert.equal(state3.matchedSignals.scope, 'active-response');
+});
+
+test('ChatGPT generation state ignores historical turn phrases and reports unknown status', () => {
+    const chatgpt = getProvider('chatgpt');
+
+    const staleUser = new MockElement('article', {
+        'data-testid': 'conversation-turn-1',
+        'data-message-author-role': 'user'
+    }, 'Please retry if you see a network error or something went wrong. Try again later.');
+    const staleAssistant = new MockElement('article', {
+        'data-testid': 'conversation-turn-2',
+        'data-message-author-role': 'assistant'
+    }, 'Deep research was searching the web before the network error. Try again later.');
+    staleAssistant.appendChild(new MockElement('div', { role: 'status' }, 'searching the web'));
+    staleAssistant.appendChild(new MockElement('button', { 'data-testid': 'stop-button' }, 'Stop'));
+    staleAssistant.appendChild(new MockElement('button', {}, 'Try again'));
+    staleAssistant.appendChild(new MockElement('div', { role: 'alert' }, 'Something went wrong'));
+
+    const idleLatest = new MockElement('article', {
+        'data-testid': 'conversation-turn-3',
+        'data-message-author-role': 'assistant'
+    }, 'Here is the successful answer. Mentioning deep research does not mean it is running.');
+
+    const { doc: staleDoc } = createTestDoc({
+        turns: [staleUser, staleAssistant, idleLatest]
+    });
+    const staleState = chatgpt.getGenerationState(staleDoc);
+    assert.equal(staleState.hasError, false);
+    assert.equal(staleState.hasDeliveryTimedOut, false);
+    assert.equal(staleState.hasTryAgainButton, false);
+    assert.equal(staleState.deepResearchActive, false);
+    assert.equal(staleState.generating, false);
+    assert.equal(staleState.hasActiveStopButton, false);
+    assert.equal(staleState.statusUnknown, true);
+    assert.equal(staleState.compatibilityState, 'unknown');
+    assert.equal(staleState.matchedError, '');
+    assert.equal(staleState.matchedResearchMarker, null);
+    assert.equal(staleState.matchedSignals.compatibility, 'unknown');
+    assert.equal(staleState.matchedSignals.scope, 'active-response');
+    assert.equal(JSON.stringify(staleState).includes('Please retry'), false);
+
+    const liveStatus = new MockElement('div', { role: 'status' }, 'Deep research is searching the web');
+    const liveStop = new MockElement('button', { 'data-testid': 'stop-button' }, 'Stop');
+    const { doc: liveResearchDoc } = createTestDoc({
+        turns: [staleUser, staleAssistant, idleLatest],
+        extraNodes: [liveStatus, liveStop]
+    });
+    const liveResearch = chatgpt.getGenerationState(liveResearchDoc);
+    assert.equal(liveResearch.deepResearchActive, true);
+    assert.equal(liveResearch.generating, true);
+    assert.equal(liveResearch.hasError, false);
+    assert.equal(liveResearch.statusUnknown, false);
+    assert.equal(liveResearch.compatibilityState, 'active');
+    assert.equal(liveResearch.matchedSignals.status, '[role="status"]');
+    assert.equal(liveResearch.matchedSignals.research, 'researchMarkers:deep research');
+    assert.equal(liveResearch.matchedSignals.stopButton, 'button[data-testid="stop-button"]');
+
+    const currentErrorTurn = new MockElement('article', {
+        'data-testid': 'conversation-turn-3',
+        'data-message-author-role': 'assistant'
+    }, 'Historical mention of searching the web stays in the answer body.');
+    const currentAlert = new MockElement('div', { role: 'alert' }, 'Something went wrong');
+    const currentRetry = new MockElement('button', { 'aria-label': 'Try again' }, 'Try again');
+    currentErrorTurn.appendChild(currentAlert);
+    currentErrorTurn.appendChild(currentRetry);
+    const { doc: currentErrorDoc } = createTestDoc({
+        turns: [staleUser, currentErrorTurn]
+    });
+    const currentError = chatgpt.getGenerationState(currentErrorDoc);
+    assert.equal(currentError.hasError, true);
+    assert.equal(currentError.hasTryAgainButton, true);
+    assert.equal(currentError.matchedError, 'something went wrong');
+    assert.equal(currentError.errorSnippet, 'something went wrong');
+    assert.equal(currentError.deepResearchActive, false);
+    assert.equal(currentError.statusUnknown, false);
+    assert.equal(currentError.compatibilityState, 'error');
+    assert.equal(currentError.matchedSignals.error, '[role="alert"]');
+    assert.equal(currentError.matchedSignals.retry, 'retryButton.latestTurn');
 });
 
 test('ChatGPTAdapter detects and clicks retry / regenerate button', () => {
@@ -1208,11 +1292,12 @@ test('ChatGPTAdapter getLastAssistantTurn verifies completed vs error states', (
     assert.equal(res1.hasError, false);
     assert.equal(res1.hasRetry, false);
 
-    // 2. Assistant turn with delivery timeout
+    // 2. Assistant turn with delivery timeout in the current error surface
     const turnTimeout = new MockElement('article', {
         'data-testid': 'conversation-turn-2',
         'data-message-author-role': 'assistant'
-    }, 'Message delivery timed out. Please try again.');
+    }, 'A partial assistant reply.');
+    turnTimeout.appendChild(new MockElement('div', { role: 'alert' }, 'Message delivery timed out. Please try again.'));
 
     const { doc: docTimeout } = createTestDoc({ turns: [turnTimeout] });
     const res2 = chatgpt.getLastAssistantTurn(docTimeout);
