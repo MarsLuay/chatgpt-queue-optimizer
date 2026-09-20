@@ -162,6 +162,12 @@ Outputs:
 
 The Firefox package declares a minimum Firefox version of 140.0.
 
+### Local signing keys
+
+`package_for_stores.py` creates store archives and does not require a private signing key. The installer’s local Chrome CRX path may reuse `build/chrome-key.pem`, which is generated or supplied only in the ignored build directory. Keep the reusable source key in a secure location outside the checkout, copy it into that local build path only when needed, and never restore a key file to the repository root.
+
+Repository metadata confirms that a signing key was previously tracked and that a CRX artifact exists, but it cannot establish whether that key was used for a distributed build or update channel. Verify any historical distribution use with the relevant store or release records before changing a signing identity.
+
 ## Development
 
 The repository currently has no declared npm dependencies. Tests use Node's built-in test runner.
@@ -170,6 +176,12 @@ Run the test suite with:
 
 ```bash
 npm test
+```
+
+Run the deterministic tracked-file secret check before committing packaging changes:
+
+```bash
+python scripts/check_tracked_secrets.py
 ```
 
 Main files:
