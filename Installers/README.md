@@ -107,6 +107,12 @@ This script does not launch or modify a browser. It produces:
 
 Use `package_for_stores.py` when you need store/upload artifacts or a generated Firefox source tree without performing the installer flow.
 
+### Local Chrome signing keys
+
+The installer’s Chrome CRX path may reuse `build/chrome-key.pem`; when no local key is supplied, Chrome can generate one in the ignored build directory. Keep any reusable source key in a secure location outside the checkout, copy it into `build/chrome-key.pem` only for local packaging, and never commit or force-add it. `package_for_stores.py` creates unsigned store archives and does not need this key.
+
+The repository can confirm the former tracked key and the presence of a CRX artifact from local metadata, but local metadata cannot prove whether that key signed a distributed build or update. Check the relevant store or release records before changing a signing identity. This repository does not rotate credentials or modify external distribution state as part of cleanup.
+
 ## Which path should I use?
 
 Use the Windows `.bat` or macOS `.app` when you want the repository to attempt local browser installation automatically.
