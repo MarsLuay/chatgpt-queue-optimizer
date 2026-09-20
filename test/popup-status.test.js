@@ -51,12 +51,13 @@ test('running instance text keeps queue progress and failure details inspectable
         currentCommandNumber: 2,
         remaining: 3,
         nextMessagePreview: 'next prompt',
+        nextMessageLength: 11,
         pausedReason: 'Waiting for the current response'
     });
 
     assert.equal(
         text,
-        'Research tab | Waiting for idle | Done: 1/4 | Command: 2/4 | Remaining: 3 | Next: next prompt | Error: Waiting for the current response'
+        'Research tab | Waiting for idle | Done: 1/4 | Command: 2/4 | Remaining: 3 | Next length: 11 | Error: Waiting for the current response'
     );
 });
 

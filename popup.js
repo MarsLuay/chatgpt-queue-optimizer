@@ -57,7 +57,9 @@ function formatPopupRunningInstanceText(tabTitle, job = {}) {
     const commandProgress = commandNumber > 0 && totalMessages > 0
         ? ` | Command: ${commandNumber}/${totalMessages}`
         : '';
-    const nextPreview = job.nextMessagePreview ? ` | Next: ${job.nextMessagePreview}` : '';
+    const nextPreview = Number(job.nextMessageLength || 0) > 0
+        ? ` | Next length: ${Number(job.nextMessageLength)}`
+        : '';
     const errorMessage = job.lastError || job.pausedReason || '';
     const errorPreview = errorMessage ? ` | Error: ${errorMessage}` : '';
     const remaining = job.remaining ?? 0;
