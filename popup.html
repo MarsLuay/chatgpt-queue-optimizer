@@ -180,6 +180,7 @@
 
         textarea,
         input[type="number"],
+        input[type="datetime-local"],
         select {
             width: 100%;
             padding: 9px;
@@ -215,6 +216,7 @@
 
         textarea:focus,
         input[type="number"]:focus,
+        input[type="datetime-local"]:focus,
         select:focus {
             border-color: var(--accent);
             box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
@@ -770,6 +772,123 @@
             line-height: 1.45;
             white-space: pre-wrap;
         }
+
+        #scheduled-status-indicator {
+            display: none;
+            background: var(--status-bg);
+            color: var(--status-text);
+            padding: 7px;
+            border-radius: 10px;
+            font-size: 11px;
+            border: 1px solid var(--status-border);
+            text-align: center;
+            margin-bottom: 10px;
+        }
+
+        #scheduled-status-indicator.error {
+            background: var(--disabled-bg);
+            color: var(--disabled-text);
+            border-color: var(--disabled-border);
+        }
+
+        #scheduled-message {
+            height: 72px;
+        }
+
+        #schedule-message-btn {
+            background: var(--accent-2);
+            color: var(--accent-2-text);
+            border-radius: 12px;
+        }
+
+        #schedule-message-btn:hover {
+            background: var(--accent-2-hover);
+            color: var(--accent-2-text);
+        }
+
+        .scheduled-list {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+            max-height: 220px;
+            overflow-y: auto;
+        }
+
+        .scheduled-row {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            padding: 7px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+        }
+
+        .scheduled-row-main {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 6px;
+        }
+
+        .scheduled-info {
+            flex: 1;
+            line-height: 1.35;
+            color: var(--muted);
+            overflow-wrap: anywhere;
+            font-size: 11px;
+        }
+
+        .scheduled-info strong {
+            color: var(--text);
+            font-weight: 700;
+        }
+
+        .scheduled-actions {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .scheduled-actions button {
+            width: auto;
+            padding: 5px 7px;
+            font-size: 10px;
+            background: var(--panel-2);
+            color: var(--text);
+            border: 1px solid var(--border);
+        }
+
+        .scheduled-actions button:hover {
+            background: color-mix(in srgb, var(--panel-2) 85%, var(--text) 15%);
+            color: var(--text);
+        }
+
+        .scheduled-actions .scheduled-delete-btn {
+            background: var(--danger);
+            color: #ffffff;
+            border-color: var(--danger);
+        }
+
+        .scheduled-actions .scheduled-delete-btn:hover {
+            background: var(--danger-hover);
+            color: #ffffff;
+        }
+
+        .scheduled-status-badge {
+            display: inline-block;
+            margin-top: 3px;
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.02em;
+        }
+
+        .scheduled-status-badge.pending { color: var(--status-text); }
+        .scheduled-status-badge.completed { color: var(--enabled-text); }
+        .scheduled-status-badge.failed,
+        .scheduled-status-badge.cancelled { color: var(--disabled-text); }
+        .scheduled-status-badge.firing { color: #d97706; }
     </style>
 </head>
 <body>
@@ -778,6 +897,7 @@
 
         <div class="tool-tabs">
             <button type="button" id="queue-tool-tab" class="tool-tab active">Queue Tool</button>
+            <button type="button" id="scheduled-tool-tab" class="tool-tab">Scheduled</button>
             <button type="button" id="optimizer-tool-tab" class="tool-tab">Optimizer Tool</button>
             <button type="button" id="settings-tool-tab" class="tool-tab settings-tool-tab" title="Settings" aria-label="Settings">
                 <span class="settings-glyph" aria-hidden="true">&#9881;</span>
@@ -874,6 +994,50 @@
             </div>
 
             <div id="messages-to-go-footer">0 messages to go...</div>
+        </div>
+
+        <div id="scheduled-tool-panel" class="tool-panel">
+            <div id="scheduled-status-indicator" role="status" aria-live="polite"></div>
+
+            <div class="form-group">
+                <div class="queue-control-panel">
+                    <div class="queue-control-header">Schedule a message</div>
+
+                    <div class="queue-control-section">
+                        <label for="scheduled-target-tab-select">Send to:</label>
+                        <div class="target-tab-row">
+                            <select id="scheduled-target-tab-select">
+                                <option value="current">Current supported tab</option>
+                            </select>
+                            <button type="button" id="refresh-scheduled-target-tabs">Refresh</button>
+                        </div>
+                    </div>
+
+                    <div class="queue-control-section">
+                        <label for="scheduled-due-at">Local date and time:</label>
+                        <input type="datetime-local" id="scheduled-due-at">
+                    </div>
+
+                    <div class="queue-control-section">
+                        <label for="scheduled-message">Message:</label>
+                        <textarea id="scheduled-message" placeholder="Message to send at the scheduled time"></textarea>
+                    </div>
+
+                    <button type="button" id="schedule-message-btn">Schedule message</button>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <div class="queue-control-panel">
+                    <div class="instances-header">
+                        <span>Scheduled items</span>
+                        <button type="button" id="refresh-scheduled-items">Refresh</button>
+                    </div>
+                    <div id="scheduled-items-list" class="scheduled-list">
+                        <div class="instance-empty">No scheduled messages</div>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <div id="settings-tool-panel" class="tool-panel">

@@ -1,8 +1,10 @@
 document.addEventListener('DOMContentLoaded', function () {
     const queueToolTab = document.getElementById('queue-tool-tab');
+    const scheduledToolTab = document.getElementById('scheduled-tool-tab');
     const optimizerToolTab = document.getElementById('optimizer-tool-tab');
     const settingsToolTab = document.getElementById('settings-tool-tab');
     const queueToolPanel = document.getElementById('queue-tool-panel');
+    const scheduledToolPanel = document.getElementById('scheduled-tool-panel');
     const optimizerToolPanel = document.getElementById('optimizer-tool-panel');
     const settingsToolPanel = document.getElementById('settings-tool-panel');
 
@@ -25,6 +27,14 @@ document.addEventListener('DOMContentLoaded', function () {
 
     const targetTabSelect = document.getElementById('target-tab-select');
     const refreshTargetTabsButton = document.getElementById('refresh-target-tabs');
+    const scheduledTargetTabSelect = document.getElementById('scheduled-target-tab-select');
+    const refreshScheduledTargetTabsButton = document.getElementById('refresh-scheduled-target-tabs');
+    const scheduledDueAtInput = document.getElementById('scheduled-due-at');
+    const scheduledMessageInput = document.getElementById('scheduled-message');
+    const scheduleMessageButton = document.getElementById('schedule-message-btn');
+    const scheduledItemsList = document.getElementById('scheduled-items-list');
+    const refreshScheduledItemsButton = document.getElementById('refresh-scheduled-items');
+    const scheduledStatusIndicator = document.getElementById('scheduled-status-indicator');
 
     const runningInstancesList = document.getElementById('running-instances-list');
     const refreshInstancesButton = document.getElementById('refresh-instances');
@@ -66,6 +76,7 @@ document.addEventListener('DOMContentLoaded', function () {
     let optimizerAutoSaveTimer = null;
     let lastOptimizerLogSignature = '';
     let lastOptimizerLogAt = 0;
+    let scheduledStatusTimer = null;
 
     const EDIT_SEQUENCE_VALUE = '__edit_selected_sequence__';
     let selectedSequenceName = '';
@@ -247,8 +258,11 @@ document.addEventListener('DOMContentLoaded', function () {
         updateSequenceDropdown(false);
         updateMessagesList();
         refreshTargetTabs();
+        refreshScheduledTargetTabs();
         refreshRunningJobsStatus();
         refreshQueueLog();
+        refreshScheduledItems();
+        initializeScheduledDueDefault();
     });
 
     loadOptimizerSettings();
@@ -296,6 +310,10 @@ document.addEventListener('DOMContentLoaded', function () {
         if (request.action === 'queueDebugLogUpdated') {
             refreshQueueLog();
         }
+
+        if (request.action === 'scheduledMessagesUpdated') {
+            refreshScheduledItems();
+        }
     });
 
     chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -308,18 +326,30 @@ document.addEventListener('DOMContentLoaded', function () {
         if (changes.queueDebugLogs) {
             renderQueueLog(Array.isArray(changes.queueDebugLogs.newValue) ? changes.queueDebugLogs.newValue : []);
         }
+
+        if (changes.scheduledMessages) {
+            refreshScheduledItems();
+        }
     });
 
     if (
         queueToolTab &&
+        scheduledToolTab &&
         optimizerToolTab &&
         settingsToolTab &&
         queueToolPanel &&
+        scheduledToolPanel &&
         optimizerToolPanel &&
         settingsToolPanel
     ) {
         queueToolTab.addEventListener('click', function () {
             activateToolPanel(queueToolTab, queueToolPanel);
+        });
+
+        scheduledToolTab.addEventListener('click', function () {
+            activateToolPanel(scheduledToolTab, scheduledToolPanel);
+            refreshScheduledTargetTabs();
+            refreshScheduledItems();
         });
 
         optimizerToolTab.addEventListener('click', async function () {
@@ -334,13 +364,13 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     function activateToolPanel(activeTab, activePanel) {
-        [queueToolTab, optimizerToolTab, settingsToolTab].forEach((tab) => {
+        [queueToolTab, scheduledToolTab, optimizerToolTab, settingsToolTab].forEach((tab) => {
             if (tab) {
                 tab.classList.toggle('active', tab === activeTab);
             }
         });
 
-        [queueToolPanel, optimizerToolPanel, settingsToolPanel].forEach((panel) => {
+        [queueToolPanel, scheduledToolPanel, optimizerToolPanel, settingsToolPanel].forEach((panel) => {
             if (panel) {
                 panel.classList.toggle('active', panel === activePanel);
             }
@@ -389,6 +419,58 @@ document.addEventListener('DOMContentLoaded', function () {
         }
 
         targetTabSelect.value = 'current';
+    }
+
+    async function populateTargetTabSelect(selectEl) {
+        if (!selectEl) return;
+
+        const previousValue = selectEl.value || 'current';
+
+        selectEl.textContent = '';
+
+        const currentOption = document.createElement('option');
+        currentOption.value = 'current';
+        currentOption.textContent = 'Current supported tab';
+        selectEl.appendChild(currentOption);
+
+        const activeTab = await getActiveTab();
+        const chatgptTabs = await getAllChatGPTTabs();
+
+        chatgptTabs.forEach(tab => {
+            if (!tab.id) return;
+
+            const option = document.createElement('option');
+            option.value = String(tab.id);
+            option.textContent = cleanTabTitle(tab.title || 'Supported tab');
+            selectEl.appendChild(option);
+        });
+
+        const optionValues = Array.from(selectEl.options).map(opt => opt.value);
+
+        if (previousValue !== 'current' && optionValues.includes(previousValue)) {
+            selectEl.value = previousValue;
+            return;
+        }
+
+        if (activeTab && isSupportedProviderUrl(getTabUrl(activeTab))) {
+            selectEl.value = 'current';
+            return;
+        }
+
+        if (chatgptTabs.length > 0 && chatgptTabs[0].id) {
+            selectEl.value = String(chatgptTabs[0].id);
+            return;
+        }
+
+        selectEl.value = 'current';
+    }
+
+    async function refreshTargetTabs() {
+        await populateTargetTabSelect(targetTabSelect);
+    }
+
+    async function refreshScheduledTargetTabs() {
+        await populateTargetTabSelect(scheduledTargetTabSelect);
     }
 
     function cleanTabTitle(title) {
