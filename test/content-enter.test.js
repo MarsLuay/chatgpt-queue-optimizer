@@ -756,7 +756,9 @@ test('Successful enqueue keeps a composer draft that changed before the queue AC
   composer.innerText = 'Newer user draft';
   composer.textContent = 'Newer user draft';
 
-  await new Promise(r => setTimeout(r, 10));
+  await new Promise(r => {
+    setTimeout(r, 10);
+  });
 
   const enqueueMsg = sentMessages.find(m => m.action === 'enqueueMessage');
   assert.ok(enqueueMsg);

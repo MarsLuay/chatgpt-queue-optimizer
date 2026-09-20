@@ -943,10 +943,15 @@ async function withQueuedSendScript(run) {
     const originalDocument = global.document;
     const originalLocation = global.location;
     const originalInputEvent = global.InputEvent;
+    let submittedText = '';
     try {
-        chrome.scripting.executeScript = async (details) => [{
-            result: await details.func(...details.args)
-        }];
+        chrome.scripting.executeScript = async (details) => {
+            const result = await details.func(...details.args);
+            if (result?.ok) {
+                submittedText = String(details.args?.[0] || '');
+            }
+            return [{ result }];
+        };
         global.InputEvent = class {
             constructor(type, init) {
                 this.type = type;
@@ -954,7 +959,39 @@ async function withQueuedSendScript(run) {
             }
         };
         global.location = { href: 'https://chatgpt.com/c/issue-42-composer' };
-        mockTabs.set(902, { id: 902, url: global.location.href });
+        mockTabs.set(902, {
+            id: 902,
+            url: global.location.href,
+            onMessage: (message) => {
+                if (message?.type !== 'GET_COMMAND_TURN_SNAPSHOT') {
+                    return { ok: true };
+                }
+                if (!submittedText) {
+                    return {
+                        ok: true,
+                        snapshot: {
+                            userTurns: [],
+                            latestUserTurnId: null,
+                            matchedUserTurnId: null
+                        }
+                    };
+                }
+                const expected = String(message.expectedText || submittedText).replace(/\s+/g, ' ').trim();
+                return {
+                    ok: true,
+                    snapshot: {
+                        userTurns: [{
+                            turnId: 'user-queued-42',
+                            index: 0,
+                            fingerprint: `len:${expected.length}`,
+                            matchedExpected: true
+                        }],
+                        latestUserTurnId: 'user-queued-42',
+                        matchedUserTurnId: 'user-queued-42'
+                    }
+                };
+            }
+        });
         return await run();
     } finally {
         chrome.scripting.executeScript = originalExecuteScript;
@@ -1070,7 +1107,9 @@ test('Queued send defers on conflicting pending composer state', async () => {
         const liveEdit = createCanonicalComposerDoc();
         global.document = liveEdit.doc;
         const pending = sendPromptToSpecificTab(902, 'queued prompt');
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await new Promise(resolve => {
+            setTimeout(resolve, 50);
+        });
         liveEdit.composer.value = 'user typed during queued send';
         const changed = await pending;
         assert.equal(changed.ok, false);
