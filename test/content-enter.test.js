@@ -736,6 +736,39 @@ test('Enqueue failure keeps typed composer text recoverable and stops keypress l
   assert.ok(lastDiag.enqueueResult.startsWith('error:'));
 });
 
+test('Successful enqueue keeps a composer draft that changed before the queue ACK', async () => {
+  const { dom, optimizer, sentMessages } = setupTestEnv();
+
+  const composer = dom.document.createElement('div');
+  composer.id = 'prompt-textarea';
+  composer.setAttribute('contenteditable', 'true');
+  composer.innerText = 'Original queued prompt';
+  composer.textContent = 'Original queued prompt';
+  dom.document.body.appendChild(composer);
+
+  const stopButton = dom.document.createElement('button');
+  stopButton.setAttribute('data-testid', 'stop-button');
+  dom.document.body.appendChild(stopButton);
+
+  const event = new dom.MockKeyboardEvent('keydown', { key: 'Enter' });
+  composer.dispatchEvent(event);
+
+  composer.innerText = 'Newer user draft';
+  composer.textContent = 'Newer user draft';
+
+  await new Promise(r => setTimeout(r, 10));
+
+  const enqueueMsg = sentMessages.find(m => m.action === 'enqueueMessage');
+  assert.ok(enqueueMsg);
+  assert.strictEqual(enqueueMsg.message, 'Original queued prompt');
+  assert.strictEqual(composer.innerText, 'Newer user draft');
+  assert.strictEqual(composer.textContent, 'Newer user draft');
+
+  const lastDiag = optimizer.state.enterDiagnostics[optimizer.state.enterDiagnostics.length - 1];
+  assert.strictEqual(lastDiag.enqueueResult, 'success');
+  assert.strictEqual(lastDiag.composerDraftPreserved, true);
+});
+
 test('Rapid duplicate Enter is protected by in-flight and debounce rules', async () => {
   const { dom, optimizer, sentMessages } = setupTestEnv();
 

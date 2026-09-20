@@ -877,6 +877,182 @@ test('Queued ChatGPT send uses the canonical composer and reports compatibility 
     }
 });
 
+function createCanonicalComposerDoc({
+    composerTag = 'textarea',
+    composerAttrs = { id: 'prompt-textarea' },
+    composerText = '',
+    includeSendButton = true,
+    sendButtonDisabled = false
+} = {}) {
+    const doc = new MockTestElement('body');
+    doc.title = 'ChatGPT';
+    doc.createElement = (tag) => new MockTestElement(tag);
+    doc.activeElement = null;
+    const composer = new MockTestElement(composerTag, composerAttrs);
+    if ((composerTag || '').toLowerCase() === 'textarea') {
+        composer.value = composerText;
+    } else {
+        composer.innerText = composerText;
+        composer.textContent = composerText;
+    }
+    doc.appendChild(composer);
+    let sendButton = null;
+    if (includeSendButton) {
+        sendButton = new MockTestElement('button', { 'data-testid': 'send-button' });
+        sendButton.disabled = sendButtonDisabled;
+        if (sendButtonDisabled) {
+            sendButton.setAttribute('aria-disabled', 'true');
+        }
+        doc.appendChild(sendButton);
+    }
+    return { doc, composer, sendButton };
+}
+
+async function withQueuedSendScript(run) {
+    const originalExecuteScript = chrome.scripting.executeScript;
+    const originalDocument = global.document;
+    const originalLocation = global.location;
+    const originalInputEvent = global.InputEvent;
+    try {
+        chrome.scripting.executeScript = async (details) => [{
+            result: await details.func(...details.args)
+        }];
+        global.InputEvent = class {
+            constructor(type, init) {
+                this.type = type;
+                this.init = init;
+            }
+        };
+        global.location = { href: 'https://chatgpt.com/c/issue-42-composer' };
+        mockTabs.set(902, { id: 902, url: global.location.href });
+        return await run();
+    } finally {
+        chrome.scripting.executeScript = originalExecuteScript;
+        if (originalDocument === undefined) delete global.document;
+        else global.document = originalDocument;
+        if (originalLocation === undefined) delete global.location;
+        else global.location = originalLocation;
+        if (originalInputEvent === undefined) delete global.InputEvent;
+        else global.InputEvent = originalInputEvent;
+        mockTabs.delete(902);
+    }
+}
+
+test('ChatGPTAdapter inspects canonical composer drafts without mutating them', () => {
+    const chatgpt = getProvider('chatgpt');
+    const composer = new MockTestElement('textarea', { id: 'prompt-textarea' });
+    composer.value = 'pending user draft';
+    const nestedComposer = new MockTestElement('div', {
+        'data-testid': 'prompt-textarea',
+        contenteditable: 'true'
+    });
+    const nestedDraft = new MockTestElement('p', {}, 'nested pending draft');
+    nestedComposer.appendChild(nestedDraft);
+    const sendButton = new MockTestElement('button', { 'data-testid': 'send-button' });
+    const { doc } = createTestDoc({ extraNodes: [composer, sendButton] });
+
+    const match = chatgpt.getComposerMatch(doc);
+    assert.equal(match.element, composer);
+    assert.equal(chatgpt.getComposerText(match.element), 'pending user draft');
+    assert.equal(composer.value, 'pending user draft');
+    assert.equal(chatgpt.getComposerText(nestedComposer), 'nested pending draft');
+    assert.equal(nestedDraft.innerText, 'nested pending draft');
+});
+
+test('Queued send accepts a clean empty canonical composer', async () => {
+    await withQueuedSendScript(async () => {
+        const { doc, composer, sendButton } = createCanonicalComposerDoc({
+            composerText: '\u200b'
+        });
+        global.document = doc;
+
+        const sent = await sendPromptToSpecificTab(902, 'queued prompt');
+        assert.equal(sent.ok, true);
+        assert.equal(composer.value, 'queued prompt');
+        assert.equal(sendButton.clicked, true);
+        assert.equal(sent.details.composerSelector, '#prompt-textarea');
+    });
+});
+
+test('Queued send never overwrites a non-empty canonical composer draft', async () => {
+    await withQueuedSendScript(async () => {
+        const { doc, composer, sendButton } = createCanonicalComposerDoc({
+            composerText: 'keep my unsent draft'
+        });
+        global.document = doc;
+
+        const failed = await sendPromptToSpecificTab(902, 'queued prompt');
+        assert.equal(failed.ok, false);
+        assert.match(failed.error, /pending user content/);
+        assert.equal(failed.details.compatibilityFailure, 'composer');
+        assert.equal(failed.details.composerConflict, true);
+        assert.equal(failed.details.deferred, true);
+        assert.equal(composer.value, 'keep my unsent draft');
+        assert.equal(sendButton.clicked, false);
+    });
+});
+
+test('Queued send restores the preflight composer after send-button failure', async () => {
+    await withQueuedSendScript(async () => {
+        const missingSend = createCanonicalComposerDoc({ includeSendButton: false });
+        global.document = missingSend.doc;
+
+        const missing = await sendPromptToSpecificTab(902, 'queued prompt');
+        assert.equal(missing.ok, false);
+        assert.match(missing.error, /send action signal was not found/);
+        assert.equal(missing.details.compatibilityFailure, 'sendButton');
+        assert.equal(missing.details.restored, true);
+        assert.equal(missingSend.composer.value, '');
+
+        const disabledSend = createCanonicalComposerDoc({ sendButtonDisabled: true });
+        global.document = disabledSend.doc;
+
+        const disabled = await sendPromptToSpecificTab(902, 'queued prompt');
+        assert.equal(disabled.ok, false);
+        assert.match(disabled.error, /send action signal is disabled/);
+        assert.equal(disabled.details.compatibilityFailure, 'sendButton');
+        assert.equal(disabled.details.restored, true);
+        assert.equal(disabledSend.composer.value, '');
+        assert.equal(disabledSend.sendButton.clicked, false);
+    });
+});
+
+test('Queued send defers on conflicting pending composer state', async () => {
+    await withQueuedSendScript(async () => {
+        const pendingChild = createCanonicalComposerDoc({
+            composerTag: 'div',
+            composerAttrs: {
+                id: 'prompt-textarea',
+                contenteditable: 'true'
+            }
+        });
+        pendingChild.composer.appendChild(new MockTestElement('p', {}, 'hidden child draft'));
+        global.document = pendingChild.doc;
+
+        const childConflict = await sendPromptToSpecificTab(902, 'queued prompt');
+        assert.equal(childConflict.ok, false);
+        assert.match(childConflict.error, /pending user content/);
+        assert.equal(childConflict.details.composerConflict, true);
+        assert.equal(childConflict.details.deferred, true);
+        assert.equal(pendingChild.composer.children[0].innerText, 'hidden child draft');
+        assert.equal(pendingChild.sendButton.clicked, false);
+
+        const liveEdit = createCanonicalComposerDoc();
+        global.document = liveEdit.doc;
+        const pending = sendPromptToSpecificTab(902, 'queued prompt');
+        await new Promise(resolve => setTimeout(resolve, 50));
+        liveEdit.composer.value = 'user typed during queued send';
+        const changed = await pending;
+        assert.equal(changed.ok, false);
+        assert.match(changed.error, /changed while the queued message was pending/);
+        assert.equal(changed.details.composerConflict, true);
+        assert.equal(changed.details.deferred, true);
+        assert.equal(changed.details.draftPreserved, true);
+        assert.equal(liveEdit.composer.value, 'user typed during queued send');
+        assert.equal(liveEdit.sendButton.clicked, false);
+    });
+});
+
 test('ChatGPTAdapter detects delivery timeout distinct from generic errors', () => {
     const chatgpt = getProvider('chatgpt');
 

@@ -668,7 +668,12 @@
                 return composer.value || '';
             }
 
-            return composer.innerText || composer.textContent || '';
+            const directText = composer.innerText || composer.textContent || '';
+            if (directText) return String(directText);
+
+            return Array.from(composer.children || [])
+                .map(child => child.innerText || child.textContent || '')
+                .join('');
         }
 
         clearComposer(composer) {
@@ -681,6 +686,12 @@
             if (composer.tagName && composer.tagName.toLowerCase() === 'textarea') {
                 composer.value = '';
             } else {
+                if (typeof composer.replaceChildren === 'function') {
+                    composer.replaceChildren();
+                } else if (Array.isArray(composer.children)) {
+                    composer.children.length = 0;
+                }
+                composer.innerText = '';
                 composer.textContent = '';
             }
 
