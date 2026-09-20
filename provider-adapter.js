@@ -632,6 +632,15 @@
                 };
             }
 
+            if (typeof this.shouldDiscoverConversationMessages === 'function' && !this.shouldDiscoverConversationMessages(doc)) {
+                return {
+                    nodes: [],
+                    selector: null,
+                    signalKey: 'messages',
+                    fallback: false
+                };
+            }
+
             mainRoot = mainRoot || this.getMainRoot(doc);
             if (!mainRoot) {
                 return {
@@ -666,6 +675,15 @@
                 return {
                     nodes: messages,
                     selector: matchedSelector,
+                    signalKey: 'messages',
+                    fallback: false
+                };
+            }
+
+            if (typeof this.allowsFallbackMessageDiscovery === 'function' && !this.allowsFallbackMessageDiscovery(doc)) {
+                return {
+                    nodes: [],
+                    selector: null,
                     signalKey: 'messages',
                     fallback: false
                 };
@@ -921,25 +939,42 @@
             }
         }
 
-        getConversationIdentity(locationOrUrl) {
+        classifyChatGPTSurface(locationOrUrl) {
+            const unsupported = {
+                provider: this.id,
+                type: 'unsupported',
+                conversationId: null,
+                key: `${this.id}:unsupported`,
+                surface: 'unsupported',
+                optimizerEligible: false,
+                allowFallbackDiscovery: false,
+                pathname: ''
+            };
+
             const urlStr = typeof locationOrUrl === 'string'
                 ? locationOrUrl
                 : (locationOrUrl?.href || String(locationOrUrl || ''));
 
-            if (!this.isSupportedUrl(urlStr)) {
+            if (!urlStr || urlStr === 'undefined' || urlStr === 'null') {
                 return {
                     provider: this.id,
                     type: 'unsupported',
                     conversationId: null,
-                    key: `${this.id}:unsupported`
+                    key: `${this.id}:unsupported`,
+                    surface: 'unclassified',
+                    optimizerEligible: true,
+                    allowFallbackDiscovery: false,
+                    pathname: ''
                 };
+            }
+
+            if (!this.isSupportedUrl(urlStr)) {
+                return unsupported;
             }
 
             try {
                 const parsed = new URL(urlStr);
                 const pathname = parsed.pathname || '/';
-
-                // Match existing conversation /c/:id or /g/:gptId/c/:id
                 const existingMatch = pathname.match(/(?:^|\/)c\/([a-zA-Z0-9_-]+)/);
                 if (existingMatch && existingMatch[1]) {
                     const conversationId = existingMatch[1];
@@ -947,45 +982,67 @@
                         provider: this.id,
                         type: 'existing',
                         conversationId,
-                        key: `${this.id}:c:${conversationId}`
+                        key: `${this.id}:c:${conversationId}`,
+                        surface: 'conversation',
+                        optimizerEligible: true,
+                        allowFallbackDiscovery: true,
+                        pathname
                     };
                 }
 
-                // Explicit non-conversation routes on ChatGPT
-                const nonConversationRegex = /^\/(?:settings|admin|auth|login|logout|pricing|api|help|account|privacy|terms)(?:\/|$)/i;
+                const nonConversationRegex = /^\/(?:settings|admin|auth|login|logout|pricing|api|help|account|privacy|terms|share|gpts|search|library|explore|codex|business|team)(?:\/|$)/i;
                 if (nonConversationRegex.test(pathname)) {
                     return {
-                        provider: this.id,
-                        type: 'unsupported',
-                        conversationId: null,
-                        key: `${this.id}:unsupported`
+                        ...unsupported,
+                        pathname
                     };
                 }
 
-                // Root / or custom GPT route /g/:gptId or /g/:gptId/ (without /c/)
                 if (pathname === '/' || pathname === '' || /^\/g\/[a-zA-Z0-9_-]+\/?$/.test(pathname)) {
                     return {
                         provider: this.id,
                         type: 'new',
                         conversationId: null,
-                        key: `${this.id}:new`
+                        key: `${this.id}:new`,
+                        surface: 'composer',
+                        optimizerEligible: true,
+                        allowFallbackDiscovery: false,
+                        pathname: pathname || '/'
                     };
                 }
 
                 return {
-                    provider: this.id,
-                    type: 'unsupported',
-                    conversationId: null,
-                    key: `${this.id}:unsupported`
+                    ...unsupported,
+                    pathname
                 };
             } catch {
-                return {
-                    provider: this.id,
-                    type: 'unsupported',
-                    conversationId: null,
-                    key: `${this.id}:unsupported`
-                };
+                return unsupported;
             }
+        }
+
+        getConversationIdentity(locationOrUrl) {
+            const surface = this.classifyChatGPTSurface(locationOrUrl);
+            return {
+                provider: surface.provider,
+                type: surface.type,
+                conversationId: surface.conversationId,
+                key: surface.key
+            };
+        }
+
+        getCurrentSurface(doc = (typeof document !== 'undefined' ? document : null), locationOrUrl = null) {
+            const loc = locationOrUrl ||
+                doc?.defaultView?.location ||
+                (typeof location !== 'undefined' ? location : '');
+            return this.classifyChatGPTSurface(loc);
+        }
+
+        shouldDiscoverConversationMessages(doc = (typeof document !== 'undefined' ? document : null)) {
+            return this.getCurrentSurface(doc).optimizerEligible;
+        }
+
+        allowsFallbackMessageDiscovery(doc = (typeof document !== 'undefined' ? document : null)) {
+            return this.getCurrentSurface(doc).allowFallbackDiscovery;
         }
 
         getComposerFromEventTarget(target, excludeSelector = '#cpo-root') {

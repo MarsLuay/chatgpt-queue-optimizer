@@ -100,8 +100,9 @@
   border-color: rgba(255, 255, 255, 0.3);
 }
 
-/* Performance optimizations when active */
-html.cpo-active * {
+/* Performance optimizations on the conversation subtree the optimizer owns */
+.cpo-conversation-root.cpo-active,
+.cpo-conversation-root.cpo-active * {
   /* Disable expensive animations in performance mode */
   animation-duration: 0.01ms !important;
   animation-delay: -1ms !important;
@@ -110,9 +111,9 @@ html.cpo-active * {
 }
 
 /* Preserve essential UI animations */
-html.cpo-active .cpo-more-banner,
-html.cpo-active .cpo-banner-button,
-html.cpo-active .cpo-inline-queue-toast {
+.cpo-conversation-root.cpo-active .cpo-more-banner,
+.cpo-conversation-root.cpo-active .cpo-banner-button,
+.cpo-conversation-root.cpo-active .cpo-inline-queue-toast {
   animation-duration: revert !important;
   animation-delay: revert !important;
   transition-duration: revert !important;

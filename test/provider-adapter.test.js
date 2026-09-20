@@ -256,6 +256,50 @@ test('ChatGPT conversation identity extraction classifies routes accurately', ()
     }
 });
 
+test('ChatGPT surface classification distinguishes conversation routes from unsupported pages', () => {
+    const chatgpt = getProvider('chatgpt');
+
+    const conversation = chatgpt.classifyChatGPTSurface('https://chatgpt.com/c/abc-123');
+    assert.equal(conversation.surface, 'conversation');
+    assert.equal(conversation.optimizerEligible, true);
+    assert.equal(conversation.allowFallbackDiscovery, true);
+    assert.equal(conversation.conversationId, 'abc-123');
+
+    const composer = chatgpt.classifyChatGPTSurface('https://chatgpt.com/');
+    assert.equal(composer.surface, 'composer');
+    assert.equal(composer.optimizerEligible, true);
+    assert.equal(composer.allowFallbackDiscovery, false);
+
+    const settings = chatgpt.classifyChatGPTSurface('https://chatgpt.com/settings');
+    assert.equal(settings.surface, 'unsupported');
+    assert.equal(settings.optimizerEligible, false);
+    assert.equal(settings.allowFallbackDiscovery, false);
+
+    const share = chatgpt.classifyChatGPTSurface('https://chatgpt.com/share/snapshot-id');
+    assert.equal(share.optimizerEligible, false);
+});
+
+test('ChatGPT message discovery ignores generic group nodes on unsupported routes', () => {
+    const chatgpt = getProvider('chatgpt');
+    const originalLocation = global.location;
+
+    const group = new MockTestElement('div', { class: 'group' }, 'Discover trending GPTs and other cards here.');
+    const main = new MockTestElement('main');
+    main.appendChild(group);
+    const { doc } = createTestDoc({ extraNodes: [main] });
+
+    try {
+        global.location = { href: 'https://chatgpt.com/settings' };
+        doc.defaultView = { location: global.location };
+        const discovery = chatgpt.getMessageDiscovery(doc);
+        assert.deepEqual(discovery.nodes, []);
+        assert.equal(discovery.fallback, false);
+    } finally {
+        if (originalLocation === undefined) delete global.location;
+        else global.location = originalLocation;
+    }
+});
+
 test('validateJobTargetConversation permits matches and detects cross-conversation navigation', async () => {
     const tabId = 101;
 
