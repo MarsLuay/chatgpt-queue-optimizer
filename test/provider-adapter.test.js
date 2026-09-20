@@ -408,7 +408,7 @@ test('handleStartSequence and handleEnqueueMessage bind conversation identity', 
     }, (res) => { startResponse = res; });
 
     // Allow microtasks to settle
-    await new Promise(r => setTimeout(r, 10));
+    await new Promise(r => { setTimeout(r, 10); });
 
     assert.ok(startResponse && startResponse.ok);
     const job = jobs.get(tabId);
@@ -435,7 +435,7 @@ test('handleStartSequence and handleEnqueueMessage bind conversation identity', 
         source: 'test'
     }, null, (res) => { enqueueResponse = res; });
 
-    await new Promise(r => setTimeout(r, 10));
+    await new Promise(r => { setTimeout(r, 10); });
 
     assert.ok(enqueueResponse && enqueueResponse.ok);
     const jobNew = jobs.get(tabIdNew);
@@ -473,7 +473,7 @@ test('popup queue starts wait for idle while active-queue append ordering stays 
         waitForIdleBeforeStart: true
     }, null, (res) => { enqueueResponse = res; });
 
-    await new Promise(r => setTimeout(r, 10));
+    await new Promise(r => { setTimeout(r, 10); });
 
     assert.ok(enqueueResponse?.ok);
     assert.equal(enqueueResponse.waitingForIdle, true);
@@ -497,7 +497,7 @@ test('popup queue starts wait for idle while active-queue append ordering stays 
         waitForIdleBeforeStart: true
     }, (res) => { sequenceResponse = res; });
 
-    await new Promise(r => setTimeout(r, 10));
+    await new Promise(r => { setTimeout(r, 10); });
 
     assert.ok(sequenceResponse?.ok);
     assert.equal(sequenceResponse.waitingForIdle, true);
@@ -533,7 +533,7 @@ test('popup queue starts wait for idle while active-queue append ordering stays 
         waitForIdleBeforeStart: true
     }, null, (res) => { appendResponse = res; });
 
-    await new Promise(r => setTimeout(r, 10));
+    await new Promise(r => { setTimeout(r, 10); });
 
     assert.ok(appendResponse?.ok);
     assert.equal(appendResponse.started, false);

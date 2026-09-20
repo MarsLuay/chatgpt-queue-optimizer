@@ -94,7 +94,9 @@ const {
 } = require('./background.js');
 
 function invokeHandler(handler) {
-  return new Promise((resolve) => handler(resolve));
+  return new Promise((resolve) => {
+    handler(resolve);
+  });
 }
 
 async function resetQueueFixture() {
@@ -311,7 +313,9 @@ test('clear log is a barrier against an older pending batch', async () => {
   }
 
   flushQueueDebugLogs();
-  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => {
+    setImmediate(resolve);
+  });
   assert.strictEqual(queueLogWrites().length, 1);
 
   const pendingClear = invokeHandler(handleClearQueueDebugLogs);

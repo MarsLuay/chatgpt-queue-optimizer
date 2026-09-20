@@ -1,7 +1,9 @@
+/** @type {Map<number, QueueJob>} */
 const jobs = new Map();
 const QUEUE_DEBUG_LOG_KEY = 'queueDebugLogs';
 const QUEUE_DURABLE_STATE_KEY = 'queueDurableJobs';
 const MAX_QUEUE_DEBUG_LOG_ENTRIES = 300;
+/** @type {QueueSettings} */
 const QUEUE_SETTINGS_DEFAULTS = {
     queueUnlimitedRetryWait: false,
     queueDeepResearchAware: true,
@@ -17,6 +19,7 @@ const SCHEDULED_ALARM_PREFIX = 'scheduled-msg:';
 // Chrome alarms may fire late, but a scheduled message must never be delivered early.
 const SCHEDULED_DUE_SKEW_MS = 0;
 
+/** @type {Promise<any>} */
 let scheduledStorageWrite = Promise.resolve();
 
 if (typeof importScripts === 'function') {
@@ -167,82 +170,89 @@ let pendingQueueLogEntries = [];
 let queueLogFlushTimer = null;
 let queueLogGeneration = 0;
 
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === 'startSequence') {
-        handleStartSequence(request, sendResponse);
-        return true;
-    }
+chrome.runtime.onMessage.addListener(
+    /**
+     * @param {RuntimeMessageRequest} request
+     * @param {chrome.runtime.MessageSender} sender
+     * @param {(response?: RuntimeMessageResponse) => void} sendResponse
+     */
+    (request, sender, sendResponse) => {
+        if (request.action === 'startSequence') {
+            handleStartSequence(request, sendResponse);
+            return true;
+        }
 
-    if (request.action === 'enqueueMessage') {
-        handleEnqueueMessage(request, sender, sendResponse);
-        return true;
-    }
+        if (request.action === 'enqueueMessage') {
+            handleEnqueueMessage(request, sender, sendResponse);
+            return true;
+        }
 
-    if (request.action === 'retryPausedJob') {
-        handleRetryPausedJob(request, sendResponse);
-        return true;
-    }
+        if (request.action === 'retryPausedJob') {
+            handleRetryPausedJob(request, sendResponse);
+            return true;
+        }
 
-    if (request.action === 'stopSequence') {
-        handleStopSequence(request, sendResponse);
-        return true;
-    }
+        if (request.action === 'stopSequence') {
+            handleStopSequence(request, sendResponse);
+            return true;
+        }
 
-    if (request.action === 'stopAllSequences') {
-        handleStopAllSequences(sendResponse);
-        return true;
-    }
+        if (request.action === 'stopAllSequences') {
+            handleStopAllSequences(sendResponse);
+            return true;
+        }
 
-    if (request.action === 'getRunningJobs') {
-        sendResponse({
-            ok: true,
-            jobs: getRunningJobsSnapshot()
-        });
-        return true;
-    }
+        if (request.action === 'getRunningJobs') {
+            sendResponse({
+                ok: true,
+                jobs: getRunningJobsSnapshot()
+            });
+            return true;
+        }
 
-    if (request.action === 'getQueueDebugLogs') {
-        handleGetQueueDebugLogs(sendResponse);
-        return true;
-    }
+        if (request.action === 'getQueueDebugLogs') {
+            handleGetQueueDebugLogs(sendResponse);
+            return true;
+        }
 
-    if (request.action === 'clearQueueDebugLogs') {
-        handleClearQueueDebugLogs(sendResponse);
-        return true;
-    }
+        if (request.action === 'clearQueueDebugLogs') {
+            handleClearQueueDebugLogs(sendResponse);
+            return true;
+        }
 
-    if (request.action === 'logAutomationEvent') {
-        handleLogAutomationEvent(request, sendResponse);
-        return true;
-    }
+        if (request.action === 'logAutomationEvent') {
+            handleLogAutomationEvent(request, sendResponse);
+            return true;
+        }
 
-    if (request.action === 'scheduleMessage') {
-        handleScheduleMessage(request, sendResponse);
-        return true;
-    }
+        if (request.action === 'scheduleMessage') {
+            handleScheduleMessage(request, sendResponse);
+            return true;
+        }
 
-    if (request.action === 'listScheduledMessages') {
-        handleListScheduledMessages(sendResponse);
-        return true;
-    }
+        if (request.action === 'listScheduledMessages') {
+            handleListScheduledMessages(sendResponse);
+            return true;
+        }
 
-    if (request.action === 'cancelScheduledMessage') {
-        handleCancelScheduledMessage(request, sendResponse);
-        return true;
-    }
+        if (request.action === 'cancelScheduledMessage') {
+            handleCancelScheduledMessage(request, sendResponse);
+            return true;
+        }
 
-    if (request.action === 'deleteScheduledMessage') {
-        handleDeleteScheduledMessage(request, sendResponse);
-        return true;
-    }
+        if (request.action === 'deleteScheduledMessage') {
+            handleDeleteScheduledMessage(request, sendResponse);
+            return true;
+        }
 
-    if (request.action === 'retryScheduledMessage') {
-        handleRetryScheduledMessage(request, sendResponse);
-        return true;
-    }
+        if (request.action === 'retryScheduledMessage') {
+            handleRetryScheduledMessage(request, sendResponse);
+            return true;
+        }
 
-    return false;
-});
+        return false;
+    }
+);
 
 if (chrome.browserAction && chrome.browserAction.onClicked) {
     chrome.browserAction.onClicked.addListener(() => {
@@ -425,7 +435,13 @@ async function resumeDurableQueues(source = 'manual') {
     return restoredJobs.length;
 }
 
+/**
+ * Restore persisted jobs from the QUEUE_DURABLE_STATE_KEY snapshot.
+ * @param {DurableQueueSnapshot|object} durableJobs
+ * @returns {QueueJob[]}
+ */
 function restoreDurableJobs(durableJobs) {
+    /** @type {QueueJob[]} */
     const restoredJobs = [];
 
     for (const rawJob of Object.values(durableJobs || {})) {
@@ -605,6 +621,10 @@ function handleLogAutomationEvent(request, sendResponse) {
     sendResponse({ ok: true });
 }
 
+/**
+ * @param {RuntimeMessageRequest} request
+ * @param {(response?: RuntimeMessageResponse) => void} sendResponse
+ */
 function handleStartSequence(request, sendResponse) {
     (async () => {
         const tabId = request.tabId;
@@ -1715,7 +1735,9 @@ async function sendPromptToSpecificTab(tabId, text) {
             target: { tabId },
             func: async (msg, contract, providerName) => {
                 function sleepInPage(ms) {
-                    return new Promise(resolve => setTimeout(resolve, ms));
+                    return new Promise(resolve => {
+                        setTimeout(resolve, ms);
+                    });
                 }
 
                 function describeElement(element) {
@@ -2194,7 +2216,11 @@ function getWaitContextLabel(context = {}) {
     return `command ${context.commandNumber || '?'}/${context.totalMessages || '?'}`;
 }
 
+/**
+ * @returns {Record<string, RunningJobSnapshot>}
+ */
 function getRunningJobsSnapshot() {
+    /** @type {Record<string, RunningJobSnapshot>} */
     const snapshot = {};
 
     for (const [tabId, job] of jobs.entries()) {
@@ -2342,6 +2368,7 @@ function flushQueueState() {
 }
 
 function getDurableJobsState() {
+    /** @type {DurableQueueSnapshot} */
     const state = {};
 
     for (const [tabId, job] of jobs.entries()) {
@@ -2393,7 +2420,7 @@ function updateQueueWakeAlarm(hasJobs = jobs.size > 0) {
 
 function recordCompletedRun(tabId) {
     chrome.storage.local.get(['successCount'], function (data) {
-        const newCount = (data.successCount || 0) + 1;
+        const newCount = Number(data.successCount || 0) + 1;
 
         chrome.storage.local.set(
             {
@@ -2531,11 +2558,13 @@ async function getQueueSettings() {
     try {
         const data = await readSyncStorage(QUEUE_SETTINGS_DEFAULTS);
 
-        return {
+        /** @type {QueueSettings} */
+        const settings = {
             queueUnlimitedRetryWait: data.queueUnlimitedRetryWait === true,
             queueDeepResearchAware: data.queueDeepResearchAware !== false,
             queueDeliveryTimeoutRefresh: data.queueDeliveryTimeoutRefresh !== false
         };
+        return settings;
     } catch (error) {
         console.warn('Could not read queue settings, using defaults:', error);
         return { ...QUEUE_SETTINGS_DEFAULTS };
@@ -2729,7 +2758,9 @@ function previewText(text, maxLength = 70) {
 }
 
 function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return new Promise(resolve => {
+        setTimeout(resolve, ms);
+    });
 }
 
 function scheduledAlarmName(id) {
@@ -2761,6 +2792,11 @@ function clearScheduledAlarm(id) {
     chrome.alarms.clear(scheduledAlarmName(id));
 }
 
+/**
+ * @template T
+ * @param {() => T|Promise<T>} operation
+ * @returns {Promise<T>}
+ */
 function withScheduledStorageLock(operation) {
     const next = scheduledStorageWrite
         .catch(() => {})

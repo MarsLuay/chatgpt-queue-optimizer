@@ -80,7 +80,7 @@ async function waitUntil(predicate, timeoutMs = 6000) {
         if (Date.now() - startedAt > timeoutMs) {
             assert.fail('Timed out waiting for queue state.');
         }
-        await new Promise(resolve => setTimeout(resolve, 10));
+        await new Promise(resolve => { setTimeout(resolve, 10); });
     }
 }
 
@@ -135,7 +135,7 @@ async function runPopupStart({ mode, busy }) {
         assert.equal(executeScriptCount, 0);
 
         if (busy) {
-            await new Promise(resolve => setTimeout(resolve, 1100));
+            await new Promise(resolve => { setTimeout(resolve, 1100); });
             assert.equal(executeScriptCount, 0, `${mode} steered a busy ChatGPT response`);
         }
 

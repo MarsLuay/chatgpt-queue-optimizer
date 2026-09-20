@@ -198,6 +198,12 @@
             };
         }
 
+        /**
+         * @param {any} root
+         * @param {string} selectorKey
+         * @param {((element: any, selector: string) => boolean)|null} [predicate]
+         * @returns {SelectorMatch[]}
+         */
         getSelectorNodes(root, selectorKey, predicate = null) {
             const selectors = Array.isArray(this.selectors?.[selectorKey])
                 ? this.selectors[selectorKey]
@@ -242,7 +248,7 @@
             };
         }
 
-        isComposerElement(element) {
+        isComposerElement(element, _details = {}) {
             const tagName = (element?.tagName || '').toLowerCase();
             return tagName === 'textarea' || element?.getAttribute?.('contenteditable') === 'true';
         }
@@ -254,7 +260,7 @@
             }));
         }
 
-        isSendActionElement(element) {
+        isSendActionElement(element, _details = {}) {
             const tagName = (element?.tagName || '').toLowerCase();
             return tagName === 'button' || typeof element?.click === 'function';
         }
@@ -338,10 +344,6 @@
             };
         }
 
-        getComposerFromEventTarget(target, excludeSelector = '#cpo-root') {
-            return null;
-        }
-
         getComposerText(composer) {
             return '';
         }
@@ -349,6 +351,7 @@
         clearComposer(composer) {
         }
 
+        /** @returns {GenerationState} */
         getGenerationState(doc) {
             return {
                 generating: false,
