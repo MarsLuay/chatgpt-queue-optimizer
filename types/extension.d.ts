@@ -8,6 +8,19 @@ type QueueJobPhase =
     | 'paused'
     | 'complete'
     | string;
+
+type QueueFailureClass =
+    | 'transient'
+    | 'generation-error'
+    | 'retry-visible'
+    | 'timeout'
+    | 'stalled-research'
+    | 'compatibility'
+    | 'user-stop'
+    | 'non-retryable'
+    | string;
+
+type QueueRetryMode = 'finite' | 'unlimited' | '' | string;
 type QueueJobStatus = 'running' | 'paused' | 'stopped' | 'idle' | string;
 type ScheduledMessageStatus = 'pending' | 'firing' | 'completed' | 'failed' | 'cancelled' | string;
 
@@ -23,6 +36,22 @@ interface QueueSettings {
     queueUnlimitedRetryWait: boolean;
     queueDeepResearchAware: boolean;
     queueDeliveryTimeoutRefresh: boolean;
+}
+
+interface QueueRetryPolicy {
+    maxAutomaticAttempts: number;
+    backoffBaseMs: number;
+    backoffFactor: number;
+    backoffMaxMs: number;
+    unlimitedDelayMs: number;
+    sleepSliceMs: number;
+}
+
+interface QueueWaitPolicy {
+    responseMaxWaitMs: number;
+    deepResearchMaxWaitMs: number;
+    deepResearchStaleMs: number;
+    checkIntervalMs: number;
 }
 
 interface QueueJob {
@@ -46,6 +75,17 @@ interface QueueJob {
     currentCommandNumber: number;
     currentPhase: QueueJobPhase;
     deliveryTimeoutAttempts: number;
+    retryAttemptCount?: number;
+    lastRetryableReason?: string;
+    retryClass?: QueueFailureClass;
+    retryMode?: QueueRetryMode;
+    nextRetryDelayMs?: number;
+    nextRetryAt?: number;
+    retryExhausted?: boolean;
+    waitStartedAt?: number;
+    lastResearchProgressAt?: number;
+    sawDeepResearch?: boolean;
+    sawGenerating?: boolean;
     startedAt: number;
     updatedAt: number;
 }
@@ -71,6 +111,17 @@ interface DurableQueueJob {
     currentPhase: QueueJobPhase;
     waitForIdleBeforeSend: boolean;
     deliveryTimeoutAttempts: number;
+    retryAttemptCount?: number;
+    lastRetryableReason?: string;
+    retryClass?: QueueFailureClass;
+    retryMode?: QueueRetryMode;
+    nextRetryDelayMs?: number;
+    nextRetryAt?: number;
+    retryExhausted?: boolean;
+    waitStartedAt?: number;
+    lastResearchProgressAt?: number;
+    sawDeepResearch?: boolean;
+    sawGenerating?: boolean;
     startedAt: number;
     updatedAt: number;
 }
@@ -101,6 +152,17 @@ interface RunningJobSnapshot {
     currentPhase: QueueJobPhase;
     waitForIdleBeforeSend: boolean;
     deliveryTimeoutAttempts: number;
+    retryAttemptCount?: number;
+    lastRetryableReason?: string;
+    retryClass?: QueueFailureClass;
+    retryMode?: QueueRetryMode;
+    nextRetryDelayMs?: number;
+    nextRetryAt?: number;
+    retryExhausted?: boolean;
+    waitStartedAt?: number;
+    lastResearchProgressAt?: number;
+    sawDeepResearch?: boolean;
+    sawGenerating?: boolean;
     startedAt: number;
     updatedAt: number;
 }
