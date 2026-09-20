@@ -36,6 +36,7 @@ function createMockDOM() {
       this.value = '';
       this.disabled = false;
       this.hidden = false;
+      this.style = {};
       this.listeners = { capture: {}, bubble: {} };
     }
 
@@ -290,6 +291,10 @@ function createMockDOM() {
     createElement(tag) { return new MockElement(tag); },
     querySelector(sel) { return documentElement.querySelector(sel); },
     querySelectorAll(sel) { return documentElement.querySelectorAll(sel); },
+    contains(node) {
+      return documentElement.contains(node);
+    },
+    defaultView: null,
     addEventListener(type, fn, capture = false) {
       const phase = capture ? 'capture' : 'bubble';
       if (!listeners.document[phase][type]) listeners.document[phase][type] = [];
@@ -306,6 +311,22 @@ function createMockDOM() {
   const window = {
     document,
     location: { href: 'https://chatgpt.com/c/test-chat' },
+    history: {
+      pushState(state, title, url) {
+        if (url) {
+          window.location.href = String(url).startsWith('http')
+            ? String(url)
+            : `https://chatgpt.com${url}`;
+        }
+      },
+      replaceState(state, title, url) {
+        if (url) {
+          window.location.href = String(url).startsWith('http')
+            ? String(url)
+            : `https://chatgpt.com${url}`;
+        }
+      }
+    },
     addEventListener(type, fn, capture = false) {
       const phase = capture ? 'capture' : 'bubble';
       if (!listeners.window[phase][type]) listeners.window[phase][type] = [];
@@ -324,6 +345,7 @@ function createMockDOM() {
       }
     }
   };
+  document.defaultView = window;
 
   class MockKeyboardEvent {
     constructor(type, init = {}) {
@@ -1199,4 +1221,89 @@ test('Claude: enqueue failure retains composer text', async () => {
   await new Promise(r => { setTimeout(r, 10); });
 
   assert.strictEqual(composer.textContent, 'Keep this draft');
+});
+
+test('ChatGPT optimizer binds conversation routes and cleans up after SPA navigation', async () => {
+  const fs = require('node:fs');
+  const css = fs.readFileSync(path.join(__dirname, '../styles.css'), 'utf8');
+  assert.equal(css.includes('html.cpo-active *'), false);
+  assert.equal(css.includes('.cpo-conversation-root.cpo-active'), true);
+
+  const { dom, optimizer } = setupTestEnv();
+  const observers = [];
+  global.MutationObserver = class {
+    constructor(cb) {
+      this.cb = cb;
+      this.target = null;
+      this.disconnected = false;
+      observers.push(this);
+    }
+    observe(target) {
+      this.target = target;
+      this.disconnected = false;
+    }
+    disconnect() {
+      this.disconnected = true;
+    }
+  };
+  const mainA = dom.document.createElement('main');
+  const turnA = dom.document.createElement('article');
+  turnA.setAttribute('data-testid', 'conversation-turn-1');
+  turnA.setAttribute('data-message-author-role', 'assistant');
+  turnA.textContent = 'Conversation A assistant reply that is long enough.';
+  turnA.innerText = turnA.textContent;
+  mainA.appendChild(turnA);
+  dom.document.body.appendChild(mainA);
+  await new Promise(resolve => {
+    setTimeout(resolve, 30);
+  });
+
+  optimizer.config.enabled = true;
+  optimizer.bindOptimizer();
+  assert.equal(optimizer.state.optimizerBound, true);
+  assert.equal(mainA.classList.contains('cpo-conversation-root'), true);
+  const conversationObserver = optimizer.state.mutationObserver;
+  assert.ok(conversationObserver);
+  assert.equal(typeof conversationObserver.disconnect, 'function');
+
+  turnA.classList.add('cpo-hidden');
+  global.location.href = 'https://chatgpt.com/c/other-chat';
+  dom.window.location.href = global.location.href;
+  const mainB = dom.document.createElement('main');
+  const turnB = dom.document.createElement('article');
+  turnB.setAttribute('data-testid', 'conversation-turn-1');
+  turnB.setAttribute('data-message-author-role', 'assistant');
+  turnB.textContent = 'Conversation B assistant reply that is long enough.';
+  turnB.innerText = turnB.textContent;
+  mainB.appendChild(turnB);
+  mainA.parentElement.removeChild(mainA);
+  dom.document.body.appendChild(mainB);
+
+  optimizer.handleRouteChange();
+  assert.equal(conversationObserver.disconnected, true);
+  assert.equal(mainA.classList.contains('cpo-conversation-root'), false);
+  assert.equal(turnA.classList.contains('cpo-hidden'), false);
+  assert.equal(mainB.classList.contains('cpo-conversation-root'), true);
+  assert.equal(optimizer.state.enterQueueListenerAttached, true);
+
+  global.location.href = 'https://chatgpt.com/settings';
+  dom.window.location.href = global.location.href;
+  optimizer.handleRouteChange();
+  assert.equal(optimizer.state.optimizerBound, false);
+  assert.equal(mainB.classList.contains('cpo-conversation-root'), false);
+  assert.equal(optimizer.getMessageNodes().length, 0);
+  assert.equal(optimizer.state.enterQueueListenerAttached, true);
+
+  global.location.href = 'https://chatgpt.com/c/restored-chat';
+  dom.window.location.href = global.location.href;
+  optimizer.handleRouteChange();
+  assert.equal(optimizer.state.optimizerBound, true);
+  assert.equal(mainB.classList.contains('cpo-conversation-root'), true);
+
+  optimizer.toggle();
+  assert.equal(optimizer.config.enabled, false);
+  assert.equal(optimizer.state.optimizerBound, false);
+  optimizer.toggle();
+  assert.equal(optimizer.config.enabled, true);
+  assert.equal(optimizer.state.optimizerBound, true);
 });

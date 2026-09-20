@@ -1,6 +1,8 @@
 (() => {
   'use strict';
 
+  let cpoHistoryPatched = false;
+
   class ChatGPTOptimizer {
     constructor() {
       this.config = {
@@ -27,7 +29,11 @@
         inlineQueueInFlight: false,
         lastQueuedAt: 0,
         lastQueuedText: '',
-        enterDiagnostics: []
+        enterDiagnostics: [],
+        routeKey: null,
+        routeWatcherAttached: false,
+        optimizerBound: false,
+        rootObserver: null
       };
 
       this._cachedMessages = null;
@@ -262,6 +268,7 @@
 
     bootstrap() {
       this.setupComposerQueueShortcut();
+      this.setupRouteWatcher();
 
       if (!this.provider?.supportsOptimizer) {
         this.state.isInitialized = true;
@@ -269,20 +276,151 @@
         return;
       }
 
+      const surface = this.getCurrentSurface();
+      this.state.routeKey = surface.key;
+      if (!surface.optimizerEligible) {
+        this.state.isInitialized = true;
+        console.log('CPO: Optimizer idle on unsupported ChatGPT route.');
+        return;
+      }
+
       this.waitForMessages().then(() => {
-        this.setupContainer();
-        this.setupObservers();
-
-        if (this.config.enabled) {
-          document.documentElement.classList.add('cpo-active');
-          this.refresh();
-        } else {
-          document.documentElement.classList.remove('cpo-active');
-        }
-
+        this.bindOptimizer();
         this.state.isInitialized = true;
         console.log('CPO: Initialized successfully');
       });
+    }
+
+    getCurrentSurface() {
+      if (this.provider && typeof this.provider.getCurrentSurface === 'function') {
+        return this.provider.getCurrentSurface(typeof document !== 'undefined' ? document : null);
+      }
+      if (this.provider && typeof this.provider.classifyChatGPTSurface === 'function') {
+        const loc = typeof window !== 'undefined' ? window.location : (typeof location !== 'undefined' ? location : '');
+        return this.provider.classifyChatGPTSurface(loc);
+      }
+      return {
+        provider: this.provider?.id || 'chatgpt',
+        type: 'unsupported',
+        conversationId: null,
+        key: `${this.provider?.id || 'chatgpt'}:unsupported`,
+        surface: 'unsupported',
+        optimizerEligible: false,
+        allowFallbackDiscovery: false,
+        pathname: ''
+      };
+    }
+
+    setupRouteWatcher() {
+      if (this.state.routeWatcherAttached) return;
+      const win = typeof window !== 'undefined' ? window : null;
+      if (!win) return;
+
+      const notify = () => this.handleRouteChange();
+      win.addEventListener('popstate', notify);
+      win.addEventListener('hashchange', notify);
+
+      if (win.history && !cpoHistoryPatched) {
+        const wrap = (method) => {
+          const original = win.history[method];
+          if (typeof original !== 'function') return;
+          win.history[method] = function patchedHistoryState(...args) {
+            const result = original.apply(this, args);
+            notify();
+            return result;
+          };
+        };
+        wrap('pushState');
+        wrap('replaceState');
+        cpoHistoryPatched = true;
+      }
+
+      if (!this.state.rootObserver && typeof MutationObserver !== 'undefined') {
+        this.state.rootObserver = new MutationObserver(() => {
+          if (!this.state.optimizerBound || !this.state.container) return;
+          const attached = typeof document !== 'undefined' && typeof document.contains === 'function'
+            ? document.contains(this.state.container)
+            : true;
+          if (!attached) {
+            this.handleRouteChange(true);
+          }
+        });
+        const root = typeof document !== 'undefined'
+          ? (document.documentElement || document.body)
+          : null;
+        if (root) {
+          this.state.rootObserver.observe(root, { childList: true, subtree: true });
+        }
+      }
+
+      this.state.routeWatcherAttached = true;
+    }
+
+    handleRouteChange(force = false) {
+      if (!this.provider?.supportsOptimizer) return;
+
+      const surface = this.getCurrentSurface();
+      const nextKey = surface.key;
+      const containerDetached = !!(this.state.container && typeof document !== 'undefined' && typeof document.contains === 'function' && !document.contains(this.state.container));
+      if (!force && nextKey === this.state.routeKey && !containerDetached) {
+        return;
+      }
+
+      this.state.routeKey = nextKey;
+      this.unbindOptimizer();
+      if (surface.optimizerEligible && this.config.enabled) {
+        this.bindOptimizer();
+      }
+    }
+
+    bindOptimizer() {
+      if (!this.provider?.supportsOptimizer) return;
+      const surface = this.getCurrentSurface();
+      if (!surface.optimizerEligible || !this.config.enabled) {
+        this.unbindOptimizer();
+        return;
+      }
+
+      this.setupContainer();
+      this.markConversationRoot();
+      this.setupObservers();
+      this.refresh();
+      this.state.optimizerBound = true;
+    }
+
+    unbindOptimizer() {
+      this.disable();
+      this.clearConversationRoot();
+      this.state.optimizerBound = false;
+      this.state.container = null;
+    }
+
+    markConversationRoot() {
+      this.clearConversationRoot();
+      const root = this.state.container;
+      if (root?.classList) {
+        root.classList.add('cpo-conversation-root');
+        if (this.config.enabled) {
+          root.classList.add('cpo-active');
+        }
+      }
+    }
+
+    clearConversationRoot() {
+      const marked = [];
+      if (this.state.container) {
+        marked.push(this.state.container);
+      }
+      if (typeof document !== 'undefined' && typeof document.querySelectorAll === 'function') {
+        marked.push(...Array.from(document.querySelectorAll('.cpo-conversation-root')));
+      }
+      for (const el of new Set(marked)) {
+        el.classList?.remove('cpo-conversation-root');
+        el.classList?.remove('cpo-active');
+      }
+      if (typeof document !== 'undefined') {
+        document.documentElement?.classList?.remove('cpo-active');
+      }
     }
 
     setupComposerQueueShortcut() {
@@ -680,6 +818,11 @@
         Date.now() - this._cacheTimestamp < 800
       ) {
         return this._cachedMessages;
+      }
+
+      const surface = this.getCurrentSurface();
+      if (this.provider?.supportsOptimizer && !surface.optimizerEligible) {
+        return [];
       }
 
       const mainRoot = this.getMainRoot();
@@ -1100,6 +1243,10 @@
     refresh() {
       if (!this.config.enabled) return;
       if (this._isRefreshing) return;
+      if (this.provider?.supportsOptimizer && !this.getCurrentSurface().optimizerEligible) {
+        this.unbindOptimizer();
+        return;
+      }
 
       this._isRefreshing = true;
 
@@ -1138,16 +1285,21 @@
       this.saveConfig();
 
       if (this.config.enabled) {
-        document.documentElement.classList.add('cpo-active');
-        this.refresh();
+        this.bindOptimizer();
       } else {
-        this.disable();
-        document.documentElement.classList.remove('cpo-active');
+        this.unbindOptimizer();
       }
     }
 
     disable() {
-      const messages = this.getMessageNodes();
+      const fromDocument = typeof document !== 'undefined' && typeof document.querySelectorAll === 'function'
+        ? Array.from(document.querySelectorAll('.cpo-hidden'))
+        : [];
+      const fromContainer = this.state.container && typeof this.state.container.querySelectorAll === 'function'
+        ? Array.from(this.state.container.querySelectorAll('.cpo-hidden'))
+        : [];
+      const fromCache = Array.isArray(this._cachedMessages) ? this._cachedMessages : [];
+      const messages = [...new Set([...fromDocument, ...fromContainer, ...fromCache])];
 
       messages.forEach((message) => {
         message.classList.remove('cpo-hidden');
