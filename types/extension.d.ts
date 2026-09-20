@@ -8,6 +8,7 @@ type QueueJobPhase =
     | 'awaiting-response'
     | 'terminal'
     | 'retry-wait'
+    | 'rollover-in-progress'
     | 'paused'
     | 'complete'
     | string;
@@ -33,6 +34,7 @@ type QueueFailureClass =
     | 'submission-unconfirmed'
     | 'waiting-for-user'
     | 'interrupted'
+    | 'conversation-max-length'
     | string;
 
 type QueueRetryMode = 'finite' | 'unlimited' | '' | string;
@@ -113,6 +115,17 @@ interface QueueJob {
     submissionAckSource?: string;
     terminalAckSource?: string;
     lastResponsePhase?: string;
+    rolloverInProgress?: boolean;
+    rolloverStage?: string;
+    rolloverReason?: string;
+    rolloverFromConversationId?: string | null;
+    rolloverToConversationId?: string | null;
+    rolloverNavigationStarted?: boolean;
+    rolloverRebindApplied?: boolean;
+    handoffSubmitted?: boolean;
+    handoffEstablished?: boolean;
+    handoffFingerprint?: string;
+    conversationGeneration?: number;
     startedAt: number;
     updatedAt: number;
 }
@@ -157,6 +170,17 @@ interface DurableQueueJob {
     submissionAckSource?: string;
     terminalAckSource?: string;
     lastResponsePhase?: string;
+    rolloverInProgress?: boolean;
+    rolloverStage?: string;
+    rolloverReason?: string;
+    rolloverFromConversationId?: string | null;
+    rolloverToConversationId?: string | null;
+    rolloverNavigationStarted?: boolean;
+    rolloverRebindApplied?: boolean;
+    handoffSubmitted?: boolean;
+    handoffEstablished?: boolean;
+    handoffFingerprint?: string;
+    conversationGeneration?: number;
     startedAt: number;
     updatedAt: number;
 }
@@ -207,6 +231,9 @@ interface RunningJobSnapshot {
     submissionAckSource?: string;
     terminalAckSource?: string;
     lastResponsePhase?: string;
+    rolloverInProgress?: boolean;
+    rolloverStage?: string;
+    conversationGeneration?: number;
     startedAt: number;
     updatedAt: number;
 }
