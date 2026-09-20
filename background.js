@@ -635,6 +635,7 @@ function handleStartSequence(request, sendResponse) {
             return;
         }
 
+        const waitForIdleBeforeStart = request.waitForIdleBeforeStart === true;
         const identity = request.conversationIdentity || await resolveTabConversationIdentity(tabId);
         const provider = identity?.provider || 'chatgpt';
         const conversationType = identity?.type || 'unknown';
@@ -658,7 +659,8 @@ function handleStartSequence(request, sendResponse) {
             totalMessages: messages.length,
             completedCount: 0,
             currentCommandNumber: 0,
-            currentPhase: 'queued',
+            currentPhase: waitForIdleBeforeStart ? 'waiting-for-idle' : 'queued',
+            waitForIdleBeforeSend: waitForIdleBeforeStart,
             deliveryTimeoutAttempts: 0,
             startedAt: Date.now(),
             updatedAt: Date.now()
@@ -672,7 +674,7 @@ function handleStartSequence(request, sendResponse) {
         await updateRunningJobsStorage({ force: true });
         processQueue(tabId);
 
-        sendResponse({ ok: true, tabId });
+        sendResponse({ ok: true, tabId, waitingForIdle: waitForIdleBeforeStart });
     })().catch((error) => {
         sendResponse({ ok: false, error: error?.message || String(error) });
     });

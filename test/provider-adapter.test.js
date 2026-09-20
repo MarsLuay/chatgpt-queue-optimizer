@@ -456,6 +456,94 @@ test('handleStartSequence and handleEnqueueMessage bind conversation identity', 
     jobs.clear();
 });
 
+test('popup queue starts wait for idle while active-queue append ordering stays unchanged', async () => {
+    jobs.clear();
+
+    const enqueueTabId = 303;
+    mockTabs.set(enqueueTabId, {
+        id: enqueueTabId,
+        url: 'https://chatgpt.com/c/popup-enqueue'
+    });
+
+    let enqueueResponse = null;
+    handleEnqueueMessage({
+        tabId: enqueueTabId,
+        message: 'popup next',
+        source: 'popup',
+        waitForIdleBeforeStart: true
+    }, null, (res) => { enqueueResponse = res; });
+
+    await new Promise(r => setTimeout(r, 10));
+
+    assert.ok(enqueueResponse?.ok);
+    assert.equal(enqueueResponse.waitingForIdle, true);
+    const enqueueJob = jobs.get(enqueueTabId);
+    assert.equal(enqueueJob.currentPhase, 'waiting-for-idle');
+    assert.equal(enqueueJob.waitForIdleBeforeSend, true);
+    assert.deepEqual(enqueueJob.queue, ['popup next']);
+
+    jobs.clear();
+
+    const sequenceTabId = 304;
+    mockTabs.set(sequenceTabId, {
+        id: sequenceTabId,
+        url: 'https://chatgpt.com/c/popup-sequence'
+    });
+
+    let sequenceResponse = null;
+    handleStartSequence({
+        tabId: sequenceTabId,
+        messages: ['sequence first', 'sequence second'],
+        waitForIdleBeforeStart: true
+    }, (res) => { sequenceResponse = res; });
+
+    await new Promise(r => setTimeout(r, 10));
+
+    assert.ok(sequenceResponse?.ok);
+    assert.equal(sequenceResponse.waitingForIdle, true);
+    const sequenceJob = jobs.get(sequenceTabId);
+    assert.equal(sequenceJob.currentPhase, 'waiting-for-idle');
+    assert.equal(sequenceJob.waitForIdleBeforeSend, true);
+    assert.deepEqual(sequenceJob.queue, ['sequence first', 'sequence second']);
+
+    jobs.clear();
+
+    const appendTabId = 305;
+    const appendJob = {
+        tabId: appendTabId,
+        provider: 'chatgpt',
+        conversationId: 'append-chat',
+        conversationType: 'existing',
+        targetKey: 'chatgpt:c:append-chat',
+        queue: ['existing queued item'],
+        currentMessage: 'in-flight item',
+        isRunning: true,
+        isPaused: false,
+        isStopped: false,
+        currentPhase: 'waiting',
+        waitForIdleBeforeSend: false
+    };
+    jobs.set(appendTabId, appendJob);
+
+    let appendResponse = null;
+    handleEnqueueMessage({
+        tabId: appendTabId,
+        message: 'popup appended item',
+        position: 'end',
+        waitForIdleBeforeStart: true
+    }, null, (res) => { appendResponse = res; });
+
+    await new Promise(r => setTimeout(r, 10));
+
+    assert.ok(appendResponse?.ok);
+    assert.equal(appendResponse.started, false);
+    assert.deepEqual(appendJob.queue, ['existing queued item', 'popup appended item']);
+    assert.equal(appendJob.currentMessage, 'in-flight item');
+    assert.equal(appendJob.currentPhase, 'waiting');
+
+    jobs.clear();
+});
+
 class MockTestElement {
     constructor(tagName, attrs = {}, text = '') {
         this.nodeType = 1;
