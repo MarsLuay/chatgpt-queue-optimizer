@@ -90,11 +90,15 @@ const {
   handleGetQueueDebugLogs,
   handleClearQueueDebugLogs,
   resumeDurableQueues,
+  restoreDurableJobs,
+  getDurableJobsState,
   MAX_QUEUE_DEBUG_LOG_ENTRIES
 } = require('./background.js');
 
 function invokeHandler(handler) {
-  return new Promise((resolve) => handler(resolve));
+  return new Promise((resolve) => {
+    handler(resolve);
+  });
 }
 
 async function resetQueueFixture() {
@@ -267,6 +271,53 @@ test('durable recovery still rewrites an unconfirmed command safely', async () =
   assert.deepStrictEqual(localStorageData.queueDurableJobs[7].queue, ['recover-me']);
 });
 
+test('durable recovery preserves retry budget and does not duplicate a retry-wait command', async () => {
+  await resetQueueFixture();
+  localStorageData.queueDurableJobs = {
+    29: {
+      tabId: 29,
+      provider: 'chatgpt',
+      conversationId: 'retry-wait',
+      conversationType: 'existing',
+      targetKey: 'chatgpt:c:retry-wait',
+      queue: ['later'],
+      currentMessage: 'current-command',
+      isRunning: true,
+      isPaused: false,
+      currentPhase: 'retry-wait',
+      totalMessages: 2,
+      completedCount: 0,
+      currentCommandNumber: 1,
+      retryAttemptCount: 2,
+      lastRetryableReason: 'Timed out waiting for ChatGPT response.',
+      retryClass: 'timeout',
+      retryMode: 'finite',
+      nextRetryDelayMs: 4000,
+      nextRetryAt: Date.now() + 8000,
+      waitStartedAt: 42,
+      lastResearchProgressAt: 84,
+      sawDeepResearch: true,
+      startedAt: 1,
+      updatedAt: 1
+    }
+  };
+
+  const restored = restoreDurableJobs(localStorageData.queueDurableJobs);
+  const job = restored[0];
+  assert.strictEqual(job.currentMessage, 'current-command');
+  assert.strictEqual(job.currentPhase, 'retry-wait');
+  assert.strictEqual(job.retryAttemptCount, 2);
+  assert.strictEqual(job.waitStartedAt, 42);
+  assert.strictEqual(job.sawDeepResearch, true);
+  assert.deepStrictEqual(job.queue, ['later']);
+
+  jobs.set(29, job);
+  const durable = getDurableJobsState();
+  assert.strictEqual(durable[29].retryAttemptCount, 2);
+  assert.strictEqual(durable[29].currentMessage, 'current-command');
+  assert.deepStrictEqual(durable[29].queue, ['later']);
+});
+
 test('batched logs expose pending entries and preserve order and trimming', async () => {
   await resetQueueFixture();
   const clearResponse = await invokeHandler(handleClearQueueDebugLogs);
@@ -311,7 +362,9 @@ test('clear log is a barrier against an older pending batch', async () => {
   }
 
   flushQueueDebugLogs();
-  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => {
+    setImmediate(resolve);
+  });
   assert.strictEqual(queueLogWrites().length, 1);
 
   const pendingClear = invokeHandler(handleClearQueueDebugLogs);

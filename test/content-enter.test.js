@@ -492,7 +492,7 @@ test('Enter during active streaming queues message and blocks native steer', asy
   assert.strictEqual(event.immediatePropagationStopped, true);
 
   // Wait for enqueue async callback
-  await new Promise(r => setTimeout(r, 10));
+  await new Promise(r => { setTimeout(r, 10); });
 
   const enqueueMsg = sentMessages.find(m => m.action === 'enqueueMessage');
   assert.ok(enqueueMsg);
@@ -545,7 +545,7 @@ test('Enter during active non-streaming work (reasoning/thinking) queues message
   assert.strictEqual(event.defaultPrevented, true);
   assert.strictEqual(event.propagationStopped, true);
 
-  await new Promise(r => setTimeout(r, 10));
+  await new Promise(r => { setTimeout(r, 10); });
 
   const enqueueMsg = sentMessages.find(m => m.action === 'enqueueMessage');
   assert.ok(enqueueMsg);
@@ -581,7 +581,7 @@ test('Enter during active non-streaming work (tool/research progress) queues mes
   assert.strictEqual(event.defaultPrevented, true);
   assert.strictEqual(event.propagationStopped, true);
 
-  await new Promise(r => setTimeout(r, 10));
+  await new Promise(r => { setTimeout(r, 10); });
 
   const enqueueMsg = sentMessages.find(m => m.action === 'enqueueMessage');
   assert.ok(enqueueMsg);
@@ -607,7 +607,7 @@ test('Idle Enter remains native and is not queued', async () => {
   assert.strictEqual(event.defaultPrevented, false);
   assert.strictEqual(event.propagationStopped, false);
 
-  await new Promise(r => setTimeout(r, 10));
+  await new Promise(r => { setTimeout(r, 10); });
 
   const enqueueMsg = sentMessages.find(m => m.action === 'enqueueMessage');
   assert.strictEqual(enqueueMsg, undefined);
@@ -726,7 +726,7 @@ test('Enqueue failure keeps typed composer text recoverable and stops keypress l
   assert.strictEqual(event.defaultPrevented, true);
   assert.strictEqual(event.propagationStopped, true);
 
-  await new Promise(r => setTimeout(r, 10));
+  await new Promise(r => { setTimeout(r, 10); });
 
   // Composer text must NOT be cleared on failure
   assert.strictEqual(composer.innerText, 'Unsaved draft prompt');
@@ -800,7 +800,7 @@ test('Rapid duplicate Enter is protected by in-flight and debounce rules', async
   assert.strictEqual(diags[diags.length - 1].enqueueResult, 'suppressed-inflight');
 
   // Let 1st finish
-  await new Promise(r => setTimeout(r, 10));
+  await new Promise(r => { setTimeout(r, 10); });
 
   // Put text back to simulate immediate second press within debounce window
   composer.value = 'Rapid Enter test';
@@ -832,7 +832,7 @@ test('Default-prevented ownership behavior owns Enter in real composer during ac
   assert.strictEqual(event.propagationStopped, true);
   assert.strictEqual(event.immediatePropagationStopped, true);
 
-  await new Promise(r => setTimeout(r, 10));
+  await new Promise(r => { setTimeout(r, 10); });
 
   const enqueueMsgs = sentMessages.filter(m => m.action === 'enqueueMessage');
   assert.strictEqual(enqueueMsgs.length, 1);
@@ -846,7 +846,7 @@ test('Default-prevented ownership behavior owns Enter in real composer during ac
 
 test('DEBUG_MESSAGES reports canonical signal diagnostics without message text', async () => {
   const { dom, optimizer } = setupTestEnv();
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await new Promise(resolve => { setTimeout(resolve, 20); });
   optimizer.config.enabled = false;
   const composer = dom.document.createElement('div');
   composer.setAttribute('data-testid', 'prompt-textarea');
@@ -952,7 +952,7 @@ test('Generation-end race: Enter right before generation ended is queued with wa
   // Synchronously intercepted
   assert.strictEqual(event.defaultPrevented, true);
 
-  await new Promise(r => setTimeout(r, 10));
+  await new Promise(r => { setTimeout(r, 10); });
 
   const enqueueMsgs = sentMessages.filter(m => m.action === 'enqueueMessage');
   assert.strictEqual(enqueueMsgs.length, 1);
@@ -983,7 +983,7 @@ test('Gemini: Enter during active generation queues and clears composer only aft
   assert.strictEqual(event.defaultPrevented, true);
   assert.strictEqual(event.propagationStopped, true);
 
-  await new Promise(r => setTimeout(r, 10));
+  await new Promise(r => { setTimeout(r, 10); });
 
   const enqueueMsg = sentMessages.find(m => m.action === 'enqueueMessage');
   assert.ok(enqueueMsg);
@@ -1042,7 +1042,7 @@ test('Gemini: enqueue failure retains composer text', async () => {
   composer.dispatchEvent(event);
   assert.strictEqual(event.defaultPrevented, true);
 
-  await new Promise(r => setTimeout(r, 10));
+  await new Promise(r => { setTimeout(r, 10); });
 
   assert.strictEqual(composer.textContent, 'Keep this draft');
 });
@@ -1129,7 +1129,7 @@ test('Claude: Enter during active generation queues and clears composer only aft
   assert.strictEqual(event.defaultPrevented, true);
   assert.strictEqual(event.propagationStopped, true);
 
-  await new Promise(r => setTimeout(r, 10));
+  await new Promise(r => { setTimeout(r, 10); });
 
   const enqueueMsg = sentMessages.find(m => m.action === 'enqueueMessage');
   assert.ok(enqueueMsg);
@@ -1194,7 +1194,7 @@ test('Claude: enqueue failure retains composer text', async () => {
   composer.dispatchEvent(event);
   assert.strictEqual(event.defaultPrevented, true);
 
-  await new Promise(r => setTimeout(r, 10));
+  await new Promise(r => { setTimeout(r, 10); });
 
   assert.strictEqual(composer.textContent, 'Keep this draft');
 });

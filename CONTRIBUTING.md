@@ -7,12 +7,18 @@ Thanks for your interest in contributing.
 For normal extension development you need:
 
 - Git.
-- Node.js with the built-in `node --test` test runner.
+- Node.js 18+ with npm, including the built-in `node --test` test runner.
 - Google Chrome for testing the primary Manifest V3 build.
 - Python 3 only when building browser/store packages or generating the Firefox source.
 - Firefox 140+ when testing the generated Firefox build.
 
-The repository currently declares no npm dependencies, so there is no required `npm install` step for the existing test suite.
+Install development dependencies from the repository root before running lint, typecheck, or the combined verification command:
+
+```bash
+npm install
+```
+
+The extension still loads unpacked from the repository root. There is no required transpile or bundle step.
 
 ## Development setup
 
@@ -23,13 +29,25 @@ git clone https://github.com/MarsLuay/chatgpt-queue-optimizer.git
 cd chatgpt-queue-optimizer
 ```
 
-Run the automated tests:
+Run the automated checks:
 
 ```bash
 npm test
+npm run lint
+npm run typecheck
+npm run check
 ```
 
-`npm test` maps to Node's built-in test runner (`node --test`). There is currently no configured lint script, so do not assume an `npm run lint` command exists.
+- `npm test` maps to Node's built-in test runner (`node --test`).
+- `npm run lint` runs ESLint with correctness rules over extension sources, tests, provider adapters, and config files.
+- `npm run typecheck` runs checked JavaScript / JSDoc analysis (`allowJs` + `checkJs`) without converting the extension to TypeScript.
+- `npm run check` is the single local/CI verification command: tests, lint, then typecheck.
+
+CI installs with `npm ci` and runs `npm run check`. Keep `package-lock.json` committed.
+
+### Lint and typecheck suppressions
+
+Do not disable correctness rules globally. If a suppression is required, keep it next to the violation, limit it to the smallest region, and add a short comment explaining why the code is safe.
 
 ### Load the development build in Chrome
 
@@ -67,7 +85,7 @@ The generated Firefox package requires Firefox 140 or newer. Temporary add-ons a
 Always run:
 
 ```bash
-npm test
+npm run check
 ```
 
 Also manually exercise the area you changed:

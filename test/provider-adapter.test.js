@@ -93,6 +93,7 @@ const {
     refreshChatGPTTab,
     waitForTabToRecover,
     waitForTabResponse,
+    classifyQueueFailure,
     QUEUE_SETTINGS_DEFAULTS,
     jobs
 } = require('../background.js');
@@ -408,7 +409,7 @@ test('handleStartSequence and handleEnqueueMessage bind conversation identity', 
     }, (res) => { startResponse = res; });
 
     // Allow microtasks to settle
-    await new Promise(r => setTimeout(r, 10));
+    await new Promise(r => { setTimeout(r, 10); });
 
     assert.ok(startResponse && startResponse.ok);
     const job = jobs.get(tabId);
@@ -435,7 +436,7 @@ test('handleStartSequence and handleEnqueueMessage bind conversation identity', 
         source: 'test'
     }, null, (res) => { enqueueResponse = res; });
 
-    await new Promise(r => setTimeout(r, 10));
+    await new Promise(r => { setTimeout(r, 10); });
 
     assert.ok(enqueueResponse && enqueueResponse.ok);
     const jobNew = jobs.get(tabIdNew);
@@ -473,7 +474,7 @@ test('popup queue starts wait for idle while active-queue append ordering stays 
         waitForIdleBeforeStart: true
     }, null, (res) => { enqueueResponse = res; });
 
-    await new Promise(r => setTimeout(r, 10));
+    await new Promise(r => { setTimeout(r, 10); });
 
     assert.ok(enqueueResponse?.ok);
     assert.equal(enqueueResponse.waitingForIdle, true);
@@ -481,6 +482,8 @@ test('popup queue starts wait for idle while active-queue append ordering stays 
     assert.equal(enqueueJob.currentPhase, 'waiting-for-idle');
     assert.equal(enqueueJob.waitForIdleBeforeSend, true);
     assert.deepEqual(enqueueJob.queue, ['popup next']);
+    enqueueJob.isStopped = true;
+    enqueueJob.isRunning = false;
 
     jobs.clear();
 
@@ -497,7 +500,7 @@ test('popup queue starts wait for idle while active-queue append ordering stays 
         waitForIdleBeforeStart: true
     }, (res) => { sequenceResponse = res; });
 
-    await new Promise(r => setTimeout(r, 10));
+    await new Promise(r => { setTimeout(r, 10); });
 
     assert.ok(sequenceResponse?.ok);
     assert.equal(sequenceResponse.waitingForIdle, true);
@@ -505,6 +508,8 @@ test('popup queue starts wait for idle while active-queue append ordering stays 
     assert.equal(sequenceJob.currentPhase, 'waiting-for-idle');
     assert.equal(sequenceJob.waitForIdleBeforeSend, true);
     assert.deepEqual(sequenceJob.queue, ['sequence first', 'sequence second']);
+    sequenceJob.isStopped = true;
+    sequenceJob.isRunning = false;
 
     jobs.clear();
 
@@ -533,7 +538,7 @@ test('popup queue starts wait for idle while active-queue append ordering stays 
         waitForIdleBeforeStart: true
     }, null, (res) => { appendResponse = res; });
 
-    await new Promise(r => setTimeout(r, 10));
+    await new Promise(r => { setTimeout(r, 10); });
 
     assert.ok(appendResponse?.ok);
     assert.equal(appendResponse.started, false);
@@ -838,7 +843,32 @@ test('Queued ChatGPT send uses the canonical composer and reports compatibility 
         canonicalDoc.appendChild(composer);
         canonicalDoc.appendChild(sendButton);
         global.document = canonicalDoc;
-        mockTabs.set(901, { id: 901, url: global.location.href });
+        mockTabs.set(901, {
+            id: 901,
+            url: global.location.href,
+            onMessage: (message) => {
+                if (message.type === 'GET_COMMAND_TURN_SNAPSHOT') {
+                    const chatgpt = getProvider('chatgpt');
+                    return {
+                        ok: true,
+                        snapshot: chatgpt.getCommandTurnSnapshot(canonicalDoc, {
+                            expectedText: message.expectedText
+                        })
+                    };
+                }
+                return { ok: true };
+            }
+        });
+
+        sendButton.click = function clickAndAccept() {
+            this.clicked = true;
+            const userTurn = new MockTestElement('article', {
+                'data-testid': 'conversation-turn-1',
+                'data-message-author-role': 'user',
+                'data-message-id': 'user-turn-queued'
+            }, 'queued prompt');
+            canonicalDoc.appendChild(userTurn);
+        };
 
         const sent = await sendPromptToSpecificTab(901, 'queued prompt');
         assert.equal(sent.ok, true);
@@ -1067,6 +1097,9 @@ test('ChatGPTAdapter detects delivery timeout distinct from generic errors', () 
     assert.equal(state1.hasError, true);
     assert.equal(state1.matchedError, 'Message delivery timed out. Please try again.');
     assert.equal(state1.generating, false);
+    const timeoutClass = classifyQueueFailure('wait', state1.matchedError, { state: state1 });
+    assert.equal(timeoutClass.class, 'timeout');
+    assert.equal(timeoutClass.retryable, true);
 
     // 2. Delivery timeout inside the latest turn
     const { doc: doc2 } = createTestDoc({
@@ -1478,5 +1511,111 @@ test('Durable state and settings preserve deliveryTimeoutAttempts and defaults',
     assert.equal(restored[0].deliveryTimeoutAttempts, 2);
 
     jobs.clear();
+});
+
+test('waitForTabResponse keeps Deep Research finite unless unlimited retry is enabled', async () => {
+    const tabId = 702;
+    mockTabs.set(tabId, {
+        id: tabId,
+        url: 'https://chatgpt.com/c/deep-research-wait',
+        onMessage: (message) => {
+            if (message.type === 'CHECK_GENERATION_STATE') {
+                return {
+                    state: {
+                        generating: false,
+                        deepResearchActive: true,
+                        researchStatusPreview: 'Deep research is searching sources',
+                        hasError: false,
+                        hasTryAgainButton: false
+                    }
+                };
+            }
+            return { ok: true };
+        }
+    });
+
+    jobs.set(tabId, {
+        tabId,
+        isRunning: true,
+        isPaused: false,
+        isStopped: false,
+        currentPhase: 'waiting'
+    });
+
+    const waitResult = await waitForTabResponse(tabId, {
+        commandNumber: 1,
+        totalMessages: 1,
+        queueSettings: {
+            queueUnlimitedRetryWait: false,
+            queueDeepResearchAware: true
+        },
+        maxWaitMs: 80,
+        deepResearchMaxWaitMs: 180,
+        deepResearchStaleMs: 1000,
+        checkIntervalMs: 20
+    });
+
+    assert.equal(waitResult.ok, false);
+    assert.match(waitResult.error, /Deep Research|timed out/i);
+    assert.equal(waitResult.details.sawDeepResearch, true);
+
+    const classified = classifyQueueFailure('wait', waitResult.error, waitResult.details);
+    assert.equal(classified.retryable, true);
+    jobs.clear();
+});
+
+test('ChatGPT command turn snapshot matches a new user turn without returning prompt text', () => {
+    const chatgpt = getProvider('chatgpt');
+    const user = new MockTestElement('article', {
+        'data-testid': 'conversation-turn-1',
+        'data-message-author-role': 'user',
+        'data-message-id': 'user-25'
+    }, '#25 fixture topic');
+    const assistant = new MockTestElement('article', {
+        'data-testid': 'conversation-turn-2',
+        'data-message-author-role': 'assistant',
+        'data-message-id': 'asst-25'
+    }, 'A completed assistant answer for topic 25.');
+    const { doc } = createTestDoc({ turns: [user, assistant] });
+    doc.defaultView = { location: { href: 'https://chatgpt.com/c/issue-43' } };
+
+    const snapshot = chatgpt.getCommandTurnSnapshot(doc, { expectedText: '#25 fixture topic' });
+    assert.equal(snapshot.matchedUserTurnId, 'user-25');
+    assert.equal(snapshot.latestUserTurnId, 'user-25');
+    assert.equal(snapshot.latestAssistantTurnId, 'asst-25');
+    assert.equal(snapshot.userTurns[0].matchedExpected, true);
+    assert.equal(JSON.stringify(snapshot).includes('#25 fixture topic'), false);
+    assert.equal(JSON.stringify(snapshot).includes('completed assistant answer'), false);
+
+    const terminal = chatgpt.getCommandResponseState(doc, { userTurnId: 'user-25' });
+    assert.equal(terminal.phase, 'terminal');
+    assert.equal(terminal.assistantTurnId, 'asst-25');
+    assert.equal(terminal.source, 'bound-assistant-turn');
+    assert.equal(JSON.stringify(terminal).includes('#25 fixture topic'), false);
+});
+
+test('ChatGPT command response state treats idle gaps as transient until the bound assistant turn completes', () => {
+    const chatgpt = getProvider('chatgpt');
+    const user = new MockTestElement('article', {
+        'data-testid': 'conversation-turn-1',
+        'data-message-author-role': 'user',
+        'data-message-id': 'user-26'
+    }, '#26 fixture topic');
+    const { doc } = createTestDoc({ turns: [user] });
+    const idle = chatgpt.getCommandResponseState(doc, { userTurnId: 'user-26' });
+    assert.equal(idle.phase, 'transient-idle');
+
+    const streamingAssistant = new MockTestElement('article', {
+        'data-testid': 'conversation-turn-2',
+        'data-message-author-role': 'assistant',
+        'data-message-id': 'asst-26',
+        'data-message-streaming': 'true'
+    }, 'partial');
+    const { doc: streamingDoc } = createTestDoc({
+        turns: [user, streamingAssistant],
+        extraNodes: [new MockTestElement('button', { 'data-testid': 'stop-button' })]
+    });
+    const active = chatgpt.getCommandResponseState(streamingDoc, { userTurnId: 'user-26' });
+    assert.equal(active.phase, 'active');
 });
 

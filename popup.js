@@ -1,3 +1,6 @@
+/**
+ * @param {RunningJobSnapshot|Record<string, unknown>} [job]
+ */
 function getPopupQueueStatusLabel(job = {}) {
     const status = String(job.status || '').trim().toLowerCase();
     const phase = String(job.currentPhase || '').trim().toLowerCase();
@@ -302,7 +305,9 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     function sleep(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms));
+        return new Promise(resolve => {
+            setTimeout(resolve, ms);
+        });
     }
 
     function getTabUrl(tab) {
@@ -512,50 +517,6 @@ document.addEventListener('DOMContentLoaded', function () {
                 panel.classList.toggle('active', panel === activePanel);
             }
         });
-    }
-
-    async function refreshTargetTabs() {
-        if (!targetTabSelect) return;
-
-        const previousValue = targetTabSelect.value || 'current';
-
-        targetTabSelect.textContent = '';
-
-        const currentOption = document.createElement('option');
-        currentOption.value = 'current';
-        currentOption.textContent = 'Current supported tab';
-        targetTabSelect.appendChild(currentOption);
-
-        const activeTab = await getActiveTab();
-        const chatgptTabs = await getAllChatGPTTabs();
-
-        chatgptTabs.forEach(tab => {
-            if (!tab.id) return;
-
-            const option = document.createElement('option');
-            option.value = String(tab.id);
-            option.textContent = cleanTabTitle(tab.title || 'Supported tab');
-            targetTabSelect.appendChild(option);
-        });
-
-        const optionValues = Array.from(targetTabSelect.options).map(opt => opt.value);
-
-        if (previousValue !== 'current' && optionValues.includes(previousValue)) {
-            targetTabSelect.value = previousValue;
-            return;
-        }
-
-        if (activeTab && isSupportedProviderUrl(getTabUrl(activeTab))) {
-            targetTabSelect.value = 'current';
-            return;
-        }
-
-        if (chatgptTabs.length > 0 && chatgptTabs[0].id) {
-            targetTabSelect.value = String(chatgptTabs[0].id);
-            return;
-        }
-
-        targetTabSelect.value = 'current';
     }
 
     async function populateTargetTabSelect(selectEl) {

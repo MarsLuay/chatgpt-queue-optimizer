@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM"],
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "strict": false,
+    "noImplicitAny": false,
+    "allowUnreachableCode": false,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true,
+    "maxNodeModuleJsDepth": 0,
+    "types": ["chrome", "node"]
+  },
+  "include": [
+    "background.js",
+    "content.js",
+    "provider-adapter.js",
+    "utils.js",
+    "types/extension.d.ts"
+  ],
+  "exclude": ["build", "node_modules", "*.test.js", "test", "tests"]
+}

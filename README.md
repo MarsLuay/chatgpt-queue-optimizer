@@ -91,8 +91,8 @@ The **Send message next** field lets you insert a single prompt into the active 
 
 Open the gear tab in the popup for queue settings and logs.
 
-- **Deep research aware**: keeps queue completion detection aware of ChatGPT Deep Research flows. It is enabled by default.
-- **Unlimited retry and wait**: allows the automation to keep waiting/retrying instead of stopping at the normal retry boundary. It is disabled by default.
+- **Deep research aware**: uses a longer finite wait and stale-progress timeout for ChatGPT Deep Research. It is enabled by default and does not wait forever unless **Unlimited retry and wait** is also enabled.
+- **Unlimited retry and wait**: the only setting that removes the finite retry/wait bound. Automatic retries still wait between attempts and remain interruptible. It is disabled by default.
 - **Automation log**: refresh, copy, or clear the stored automation log for troubleshooting.
 
 If you enable unlimited retry/wait, a queue can remain active for much longer during a stuck or repeatedly failing ChatGPT state.
