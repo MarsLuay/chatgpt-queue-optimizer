@@ -62,10 +62,68 @@ function formatPopupRunningInstanceText(tabTitle, job = {}) {
     return `${title} | ${status}${progress}${commandProgress} | Remaining: ${remaining}${nextPreview}${errorPreview}`;
 }
 
+function parseScheduledLocalDateTime(value) {
+    const text = String(value || '').trim();
+    const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(text);
+
+    if (!match) return null;
+
+    const [, year, month, day, hour, minute] = match.map(Number);
+    const date = new Date(year, month - 1, day, hour, minute, 0, 0);
+
+    if (
+        date.getFullYear() !== year ||
+        date.getMonth() !== month - 1 ||
+        date.getDate() !== day ||
+        date.getHours() !== hour ||
+        date.getMinutes() !== minute
+    ) {
+        return null;
+    }
+
+    const timestamp = date.getTime();
+    return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function formatScheduledLocalDateTime(timestamp) {
+    const date = new Date(Number(timestamp));
+    if (!Number.isFinite(date.getTime())) return 'Invalid date';
+
+    return date.toLocaleString([], {
+        dateStyle: 'medium',
+        timeStyle: 'short'
+    });
+}
+
+function getScheduledStatusLabel(status) {
+    const normalized = String(status || '').trim().toLowerCase();
+    return {
+        pending: 'Pending',
+        firing: 'Sending',
+        completed: 'Completed',
+        failed: 'Failed',
+        cancelled: 'Cancelled'
+    }[normalized] || 'Unknown';
+}
+
+function formatScheduledItemText(item = {}, targetTitle = '') {
+    const target = String(targetTitle || `Tab ${item.tabId || 'unknown'}`);
+    const preview = String(item.text || '').replace(/\s+/g, ' ').trim();
+    const status = getScheduledStatusLabel(item.status);
+    const due = formatScheduledLocalDateTime(item.dueTs);
+    const reason = item.failureReason ? ` | ${String(item.failureReason)}` : '';
+
+    return `${target} | ${status} | ${due} | ${preview}${reason}`;
+}
+
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
         formatPopupRunningInstanceText,
-        getPopupQueueStatusLabel
+        getPopupQueueStatusLabel,
+        parseScheduledLocalDateTime,
+        formatScheduledLocalDateTime,
+        getScheduledStatusLabel,
+        formatScheduledItemText
     };
 }
 
@@ -550,6 +608,303 @@ document.addEventListener('DOMContentLoaded', function () {
 
     async function refreshScheduledTargetTabs() {
         await populateTargetTabSelect(scheduledTargetTabSelect);
+    }
+
+    function showScheduledStatus(message, kind = 'info', duration = 3000) {
+        if (!scheduledStatusIndicator) return;
+
+        if (scheduledStatusTimer !== null) {
+            clearTimeout(scheduledStatusTimer);
+            scheduledStatusTimer = null;
+        }
+
+        const text = String(message || '').trim();
+        if (!text) {
+            scheduledStatusIndicator.hidden = true;
+            scheduledStatusIndicator.textContent = '';
+            return;
+        }
+
+        const normalizedKind = ['error', 'warning', 'success', 'info'].includes(kind) ? kind : 'info';
+        scheduledStatusIndicator.className = normalizedKind === 'error' ? 'error' : normalizedKind;
+        scheduledStatusIndicator.setAttribute(
+            'role',
+            normalizedKind === 'error' || normalizedKind === 'warning' ? 'alert' : 'status'
+        );
+        scheduledStatusIndicator.setAttribute(
+            'aria-live',
+            normalizedKind === 'error' || normalizedKind === 'warning' ? 'assertive' : 'polite'
+        );
+        scheduledStatusIndicator.textContent = text;
+        scheduledStatusIndicator.hidden = false;
+
+        if (duration > 0 && normalizedKind !== 'error') {
+            scheduledStatusTimer = setTimeout(() => {
+                scheduledStatusTimer = null;
+                scheduledStatusIndicator.hidden = true;
+                scheduledStatusIndicator.textContent = '';
+            }, duration);
+        }
+    }
+
+    function formatDateTimeLocalInput(timestamp) {
+        const date = new Date(Number(timestamp));
+        if (!Number.isFinite(date.getTime())) return '';
+
+        const pad = (value) => String(value).padStart(2, '0');
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+            `T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    }
+
+    function initializeScheduledDueDefault() {
+        if (!scheduledDueAtInput || scheduledDueAtInput.value) return;
+
+        const nextMinute = Math.ceil((Date.now() + 5 * 60 * 1000) / 60000) * 60000;
+        scheduledDueAtInput.value = formatDateTimeLocalInput(nextMinute);
+    }
+
+    async function getSelectedScheduledTargetTab() {
+        let tab = null;
+        const selectedValue = scheduledTargetTabSelect?.value || 'current';
+
+        if (selectedValue !== 'current') {
+            try {
+                tab = await tabsGet(Number(selectedValue));
+            } catch {
+                showScheduledStatus('Selected target tab no longer exists. Refresh the tab list.', 'error', 0);
+                await refreshScheduledTargetTabs();
+                return null;
+            }
+        } else {
+            tab = await getActiveTab();
+
+            if (!tab || !isSupportedProviderUrl(getTabUrl(tab))) {
+                const supportedTabs = await getAllSupportedTabs();
+                tab = supportedTabs[0] || null;
+
+                if (tab?.id && scheduledTargetTabSelect) {
+                    await refreshScheduledTargetTabs();
+                    scheduledTargetTabSelect.value = String(tab.id);
+                }
+            }
+        }
+
+        if (!tab || !tab.id) {
+            showScheduledStatus(
+                'No supported target tab is open. Open ChatGPT, Gemini, or Claude, then refresh the tab list.',
+                'error',
+                0
+            );
+            return null;
+        }
+
+        if (!isSupportedProviderUrl(getTabUrl(tab))) {
+            showScheduledStatus(
+                'Select a ChatGPT, Gemini, or Claude tab before scheduling.',
+                'error',
+                0
+            );
+            return null;
+        }
+
+        return tab;
+    }
+
+    function sendScheduledRuntimeMessage(request) {
+        return new Promise((resolve, reject) => {
+            chrome.runtime.sendMessage(request, (response) => {
+                if (chrome.runtime.lastError) {
+                    reject(new Error(chrome.runtime.lastError.message || 'Scheduled action failed.'));
+                    return;
+                }
+
+                resolve(response || {});
+            });
+        });
+    }
+
+    function getScheduledTargetTitleMap() {
+        return getAllSupportedTabs().then((tabs) => {
+            const titles = {};
+            tabs.forEach((tab) => {
+                if (tab?.id) titles[String(tab.id)] = cleanTabTitle(tab.title || 'Supported tab');
+            });
+            return titles;
+        }).catch(() => ({}));
+    }
+
+    async function renderScheduledItems(items) {
+        if (!scheduledItemsList) return;
+
+        const titleMap = await getScheduledTargetTitleMap();
+        const sortedItems = (Array.isArray(items) ? items : []).slice().sort((a, b) => {
+            const dueDiff = Number(a?.dueTs || 0) - Number(b?.dueTs || 0);
+            return dueDiff || Number(a?.createdAt || 0) - Number(b?.createdAt || 0);
+        });
+
+        scheduledItemsList.textContent = '';
+
+        if (sortedItems.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'instance-empty';
+            empty.textContent = 'No scheduled messages';
+            scheduledItemsList.appendChild(empty);
+            return;
+        }
+
+        sortedItems.forEach((item) => {
+            const row = document.createElement('div');
+            row.className = 'scheduled-row';
+
+            const main = document.createElement('div');
+            main.className = 'scheduled-row-main';
+
+            const info = document.createElement('div');
+            info.className = 'scheduled-info';
+            info.textContent = formatScheduledItemText(item, titleMap[String(item.tabId)]);
+
+            const badge = document.createElement('span');
+            badge.className = `scheduled-status-badge ${String(item.status || '').toLowerCase()}`;
+            badge.textContent = getScheduledStatusLabel(item.status);
+            info.appendChild(document.createElement('br'));
+            info.appendChild(badge);
+
+            const actions = document.createElement('div');
+            actions.className = 'scheduled-actions';
+
+            if (item.status === 'pending') {
+                const cancelButton = document.createElement('button');
+                cancelButton.type = 'button';
+                cancelButton.textContent = 'Cancel';
+                cancelButton.addEventListener('click', () => updateScheduledItem('cancelScheduledMessage', item.id));
+                actions.appendChild(cancelButton);
+            }
+
+            if (item.status === 'failed' || item.status === 'cancelled') {
+                const retryButton = document.createElement('button');
+                retryButton.type = 'button';
+                retryButton.textContent = 'Retry';
+                retryButton.addEventListener('click', () => retryScheduledItem(item));
+                actions.appendChild(retryButton);
+            }
+
+            if (item.status !== 'firing') {
+                const deleteButton = document.createElement('button');
+                deleteButton.type = 'button';
+                deleteButton.className = 'scheduled-delete-btn';
+                deleteButton.textContent = 'Delete';
+                deleteButton.addEventListener('click', () => updateScheduledItem('deleteScheduledMessage', item.id));
+                actions.appendChild(deleteButton);
+            }
+
+            main.appendChild(info);
+            main.appendChild(actions);
+            row.appendChild(main);
+            scheduledItemsList.appendChild(row);
+        });
+    }
+
+    async function refreshScheduledItems() {
+        if (!scheduledItemsList) return;
+
+        try {
+            const response = await sendScheduledRuntimeMessage({ action: 'listScheduledMessages' });
+            if (!response.ok) {
+                throw new Error(response.error || 'Could not read scheduled messages.');
+            }
+            await renderScheduledItems(response.items);
+        } catch (error) {
+            renderScheduledItems([]);
+            showScheduledStatus(error.message || 'Could not read scheduled messages.', 'error', 0);
+        }
+    }
+
+    async function updateScheduledItem(action, id) {
+        try {
+            const response = await sendScheduledRuntimeMessage({ action, id });
+            if (!response.ok) {
+                throw new Error(response.error || 'Could not update scheduled message.');
+            }
+            showScheduledStatus(action === 'deleteScheduledMessage' ? 'Scheduled message deleted.' : 'Scheduled message cancelled.');
+            await refreshScheduledItems();
+        } catch (error) {
+            showScheduledStatus(error.message || 'Could not update scheduled message.', 'error', 0);
+        }
+    }
+
+    async function retryScheduledItem(item) {
+        const dueTs = parseScheduledLocalDateTime(scheduledDueAtInput?.value || '');
+        const nextDueTs = dueTs && dueTs > Date.now() ? dueTs : Date.now() + 60 * 1000;
+
+        try {
+            const response = await sendScheduledRuntimeMessage({
+                action: 'retryScheduledMessage',
+                id: item.id,
+                dueTs: nextDueTs
+            });
+            if (!response.ok) {
+                throw new Error(response.error || 'Could not retry scheduled message.');
+            }
+            showScheduledStatus(`Scheduled message will retry at ${formatScheduledLocalDateTime(nextDueTs)}.`);
+            await refreshScheduledItems();
+        } catch (error) {
+            showScheduledStatus(error.message || 'Could not retry scheduled message.', 'error', 0);
+        }
+    }
+
+    if (refreshScheduledTargetTabsButton) {
+        refreshScheduledTargetTabsButton.addEventListener('click', refreshScheduledTargetTabs);
+    }
+
+    if (refreshScheduledItemsButton) {
+        refreshScheduledItemsButton.addEventListener('click', refreshScheduledItems);
+    }
+
+    if (scheduleMessageButton) {
+        scheduleMessageButton.addEventListener('click', async function () {
+            const message = scheduledMessageInput?.value.trim() || '';
+            const dueTs = parseScheduledLocalDateTime(scheduledDueAtInput?.value || '');
+
+            if (!message) {
+                showScheduledStatus('Type a message before scheduling.', 'error', 0);
+                return;
+            }
+
+            if (!dueTs) {
+                showScheduledStatus('Choose a valid local date and time.', 'error', 0);
+                return;
+            }
+
+            if (dueTs <= Date.now()) {
+                showScheduledStatus('Choose a future local date and time.', 'error', 0);
+                return;
+            }
+
+            const tab = await getSelectedScheduledTargetTab();
+            if (!tab) return;
+
+            scheduleMessageButton.disabled = true;
+            try {
+                const response = await sendScheduledRuntimeMessage({
+                    action: 'scheduleMessage',
+                    message,
+                    dueTs,
+                    tabId: tab.id
+                });
+
+                if (!response.ok) {
+                    throw new Error(response.error || 'Could not schedule message.');
+                }
+
+                scheduledMessageInput.value = '';
+                showScheduledStatus(`Message scheduled for ${formatScheduledLocalDateTime(response.item?.dueTs || dueTs)}.` , 'success');
+                await refreshScheduledItems();
+            } catch (error) {
+                showScheduledStatus(error.message || 'Could not schedule message.', 'error', 0);
+            } finally {
+                scheduleMessageButton.disabled = false;
+            }
+        });
     }
 
     function cleanTabTitle(title) {

@@ -811,7 +811,7 @@
         }
 
         #scheduled-status-indicator {
-            display: none;
+            display: block;
             background: var(--status-bg);
             color: var(--status-text);
             padding: 7px;
@@ -822,7 +822,12 @@
             margin-bottom: 10px;
         }
 
-        #scheduled-status-indicator.error {
+        #scheduled-status-indicator[hidden] {
+            display: none;
+        }
+
+        #scheduled-status-indicator.error,
+        #scheduled-status-indicator.warning {
             background: var(--disabled-bg);
             color: var(--disabled-text);
             border-color: var(--disabled-border);
@@ -1032,7 +1037,7 @@
         </div>
 
         <div id="scheduled-tool-panel" class="tool-panel">
-            <div id="scheduled-status-indicator" role="status" aria-live="polite"></div>
+            <div id="scheduled-status-indicator" role="status" aria-live="polite" aria-atomic="true" hidden></div>
 
             <div class="form-group">
                 <div class="queue-control-panel">
