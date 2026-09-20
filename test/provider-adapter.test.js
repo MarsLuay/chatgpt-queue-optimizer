@@ -89,6 +89,7 @@ const {
     handleEnqueueMessage,
     pauseJob,
     recoverFromDeliveryTimeout,
+    sendPromptToSpecificTab,
     refreshChatGPTTab,
     waitForTabToRecover,
     waitForTabResponse,
@@ -457,22 +458,75 @@ test('handleStartSequence and handleEnqueueMessage bind conversation identity', 
 
 class MockTestElement {
     constructor(tagName, attrs = {}, text = '') {
+        this.nodeType = 1;
         this.tagName = (tagName || 'div').toUpperCase();
         this.attributes = new Map(Object.entries(attrs));
         this.innerText = text;
         this.textContent = text;
         this.children = [];
         this.disabled = !!attrs.disabled;
+        this.hidden = false;
         this.parentElement = null;
         this.clicked = false;
+        this.id = attrs.id || '';
     }
 
     getAttribute(name) {
+        if (name === 'id') return this.id || null;
         return this.attributes.has(name) ? this.attributes.get(name) : null;
     }
 
     setAttribute(name, val) {
         this.attributes.set(name, String(val));
+        if (name === 'id') this.id = String(val);
+    }
+
+    contains(node) {
+        let current = node;
+        while (current) {
+            if (current === this) return true;
+            current = current.parentElement;
+        }
+        return false;
+    }
+
+    matches(selector) {
+        return selector.split(',').some((part) => {
+            part = part.trim();
+            if (!part) return false;
+            const descendant = part.split(/\s+/);
+            if (descendant.length > 1) {
+                let current = this;
+                for (let index = descendant.length - 1; index >= 0; index -= 1) {
+                    if (!current || !current.matches(descendant[index])) return false;
+                    current = current.parentElement;
+                }
+                return true;
+            }
+            if (part.startsWith('#')) return this.id === part.slice(1);
+            const tagMatch = part.match(/^([a-z0-9_-]+)?(\[.+\])?$/i);
+            if (!tagMatch) return false;
+            if (tagMatch[1] && this.tagName.toLowerCase() !== tagMatch[1].toLowerCase()) return false;
+            if (!tagMatch[2]) return !part.startsWith('[') || this.tagName.toLowerCase() === part.toLowerCase();
+            const attr = tagMatch[2].slice(1, -1);
+            const operator = attr.match(/(\^=|\*=|=)/)?.[1];
+            const [name, rawValue] = operator ? attr.split(operator) : [attr, null];
+            const value = this.getAttribute(name.trim());
+            if (!operator) return value !== null;
+            const expected = rawValue.replace(/[\"']/g, '').trim();
+            if (operator === '=') return value === expected;
+            if (operator === '^=') return String(value || '').startsWith(expected);
+            return String(value || '').includes(expected);
+        });
+    }
+
+    closest(selector) {
+        let current = this;
+        while (current) {
+            if (current.matches(selector)) return current;
+            current = current.parentElement;
+        }
+        return null;
     }
 
     appendChild(child) {
@@ -483,6 +537,14 @@ class MockTestElement {
 
     click() {
         this.clicked = true;
+    }
+
+    focus() {
+        this.focused = true;
+    }
+
+    dispatchEvent() {
+        return true;
     }
 
     querySelector(sel) {
@@ -497,6 +559,17 @@ class MockTestElement {
             return parts.some(part => {
                 if (part === 'button') return el.tagName === 'BUTTON';
                 if (part === 'article') return el.tagName === 'ARTICLE';
+                if (part === 'textarea') return el.tagName === 'TEXTAREA';
+                if (part === 'main') return el.tagName === 'MAIN';
+                if (part === 'body') return el.tagName === 'BODY';
+                if (part.startsWith('#')) return el.id === part.slice(1);
+                if (part.includes('contenteditable')) {
+                    return el.getAttribute('contenteditable') === 'true' &&
+                        (!part.includes('role="textbox"') || el.getAttribute('role') === 'textbox');
+                }
+                if (part.includes('[') && typeof el.matches === 'function') {
+                    return el.matches(part);
+                }
                 if (part.startsWith('[data-testid')) {
                     const val = el.getAttribute('data-testid') || '';
                     if (part.includes('*=')) {
@@ -521,6 +594,9 @@ class MockTestElement {
                     const target = part.match(/="([^"]+)"/)?.[1];
                     return el.getAttribute('data-message-author-role') === target;
                 }
+                if (part.startsWith('[data-message-id')) {
+                    return el.getAttribute('data-message-id') !== null;
+                }
                 if (part.startsWith('.')) {
                     const cls = part.slice(1);
                     return (el.getAttribute('class') || '').includes(cls);
@@ -540,17 +616,11 @@ class MockTestElement {
 const MockElement = MockTestElement;
 
 // Helper to construct lightweight DOM trees for provider adapter tests
-function createTestDoc({ turns = [], alertNodes = [], buttons = [] } = {}) {
+function createTestDoc({ turns = [], alertNodes = [], buttons = [], extraNodes = [] } = {}) {
     const docRoot = new MockTestElement('body');
 
-    for (const btn of buttons) {
-        docRoot.appendChild(btn);
-    }
-    for (const alert of alertNodes) {
-        docRoot.appendChild(alert);
-    }
-    for (const turn of turns) {
-        docRoot.appendChild(turn);
+    for (const node of [...extraNodes, ...buttons, ...alertNodes, ...turns]) {
+        docRoot.appendChild(node);
     }
 
     return {
@@ -558,6 +628,146 @@ function createTestDoc({ turns = [], alertNodes = [], buttons = [] } = {}) {
         doc: docRoot
     };
 }
+
+test('ChatGPT compatibility surface resolves canonical controls and rejects unscoped editable fallbacks', () => {
+    const chatgpt = getProvider('chatgpt');
+    const contract = chatgpt.getCompatibilityContract();
+    assert.deepEqual(contract.selectors, chatgpt.selectors);
+    assert.deepEqual(contract.requiredSignals, ['composer', 'sendButton']);
+    assert.ok(contract.signals.messageContext.includes('[data-testid^="conversation-turn"]'));
+    assert.ok(contract.signals.researchMarkers.includes('deep research'));
+    assert.ok(contract.signals.deliveryTimeoutMarkers.includes('message delivery timed out'));
+
+    const canonical = new MockTestElement('div', {
+        'data-testid': 'prompt-textarea',
+        contenteditable: 'true'
+    });
+    const unrelated = new MockTestElement('div', { contenteditable: 'true' });
+    const sendButton = new MockTestElement('button', { 'data-testid': 'send-button' });
+    const { doc } = createTestDoc({ extraNodes: [unrelated, canonical, sendButton] });
+
+    const composerMatch = chatgpt.getComposerMatch(doc);
+    assert.equal(composerMatch.element, canonical);
+    assert.equal(composerMatch.selector, '[data-testid="prompt-textarea"]');
+    assert.equal(chatgpt.getSendActionMatch(doc).element, sendButton);
+
+    const { doc: missingCanonical } = createTestDoc({
+        extraNodes: [new MockTestElement('div', { contenteditable: 'true' })]
+    });
+    assert.equal(chatgpt.getComposerMatch(missingCanonical).element, null);
+});
+
+test('ChatGPT compatibility diagnostics distinguish empty conversations from missing controls', () => {
+    const chatgpt = getProvider('chatgpt');
+    const composer = new MockTestElement('textarea', { id: 'prompt-textarea' });
+    const sendButton = new MockTestElement('button', { 'data-testid': 'send-button' });
+    const { doc } = createTestDoc({ extraNodes: [composer, sendButton] });
+    doc.defaultView = { location: { href: 'https://chatgpt.com/' } };
+
+    const empty = chatgpt.getCompatibilityDiagnostics(doc);
+    assert.equal(empty.root.selector, 'body');
+    assert.equal(empty.composer.selector, '#prompt-textarea');
+    assert.equal(empty.sendAction.selector, 'button[data-testid="send-button"]');
+    assert.equal(empty.messages.state, 'empty-conversation');
+    assert.deepEqual(empty.requiredFailures, []);
+    assert.equal(JSON.stringify(empty).includes('prompt text'), false);
+
+    const missing = chatgpt.getCompatibilityDiagnostics(createTestDoc({}).doc);
+    assert.equal(missing.messages.state, 'not-found');
+    assert.equal(missing.composer.matched, false);
+    assert.equal(missing.sendAction.matched, false);
+    assert.deepEqual(missing.requiredFailures, ['composer']);
+});
+
+test('ChatGPT message and generation diagnostics report matched canonical signals', () => {
+    const chatgpt = getProvider('chatgpt');
+    const composer = new MockTestElement('textarea', { id: 'prompt-textarea' });
+    const turn = new MockTestElement('article', {
+        'data-testid': 'conversation-turn-1',
+        'data-message-author-role': 'assistant'
+    }, 'A visible assistant response with enough text for message normalization.');
+    const status = new MockTestElement('div', { role: 'status' }, 'Deep research is searching sources');
+    const stop = new MockTestElement('button', { 'data-testid': 'stop-button' });
+    const { doc } = createTestDoc({ extraNodes: [composer, turn, status, stop] });
+
+    const messages = chatgpt.getMessageDiscovery(doc).nodes;
+    assert.deepEqual(messages, [turn]);
+
+    const dataIdMessage = new MockTestElement('div', {
+        'data-message-id': 'message-1'
+    }, 'A fallback message identified by a stable data-message-id attribute.');
+    const fallbackDoc = createTestDoc({ extraNodes: [dataIdMessage] }).doc;
+    assert.deepEqual(chatgpt.getMessageNodes(fallbackDoc), [dataIdMessage]);
+
+    const state = chatgpt.getGenerationState(doc);
+    assert.equal(state.generating, true);
+    assert.equal(state.deepResearchActive, true);
+    assert.equal(state.matchedSignals.stopButton, 'button[data-testid="stop-button"]');
+    assert.equal(state.matchedSignals.status, '[role="status"]');
+    assert.equal(state.matchedSignals.research, 'researchMarkers:deep research');
+});
+
+test('Queued ChatGPT send uses the canonical composer and reports compatibility failures without mutation', async () => {
+    const originalExecuteScript = chrome.scripting.executeScript;
+    const originalDocument = global.document;
+    const originalLocation = global.location;
+    const originalInputEvent = global.InputEvent;
+
+    try {
+        chrome.scripting.executeScript = async (details) => [{
+            result: await details.func(...details.args)
+        }];
+        global.InputEvent = class {
+            constructor(type, init) {
+                this.type = type;
+                this.init = init;
+            }
+        };
+        global.location = { href: 'https://chatgpt.com/c/send-contract' };
+
+        const canonicalDoc = new MockTestElement('body');
+        canonicalDoc.title = 'ChatGPT';
+        canonicalDoc.createElement = (tag) => new MockTestElement(tag);
+        canonicalDoc.activeElement = null;
+        const composer = new MockTestElement('textarea', { id: 'prompt-textarea' });
+        const sendButton = new MockTestElement('button', { 'data-testid': 'send-button' });
+        canonicalDoc.appendChild(composer);
+        canonicalDoc.appendChild(sendButton);
+        global.document = canonicalDoc;
+        mockTabs.set(901, { id: 901, url: global.location.href });
+
+        const sent = await sendPromptToSpecificTab(901, 'queued prompt');
+        assert.equal(sent.ok, true);
+        assert.equal(composer.value, 'queued prompt');
+        assert.equal(sendButton.clicked, true);
+        assert.equal(sent.details.composerSelector, '#prompt-textarea');
+        assert.equal(sent.details.sendButtonSelector, 'button[data-testid="send-button"]');
+
+        const unrelatedDoc = new MockTestElement('body');
+        unrelatedDoc.title = 'ChatGPT';
+        unrelatedDoc.createElement = (tag) => new MockTestElement(tag);
+        unrelatedDoc.activeElement = null;
+        const unrelated = new MockTestElement('div', { contenteditable: 'true' });
+        unrelated.textContent = 'draft';
+        unrelatedDoc.appendChild(unrelated);
+        global.document = unrelatedDoc;
+
+        const failed = await sendPromptToSpecificTab(901, 'must not send');
+        assert.equal(failed.ok, false);
+        assert.match(failed.error, /compatibility failure: required composer signal/);
+        assert.equal(failed.details.compatibilityFailure, 'composer');
+        assert.equal(unrelated.textContent, 'draft');
+    } finally {
+        chrome.scripting.executeScript = originalExecuteScript;
+        if (originalDocument === undefined) delete global.document;
+        else global.document = originalDocument;
+        if (originalLocation === undefined) delete global.location;
+        else global.location = originalLocation;
+        if (originalInputEvent === undefined) delete global.InputEvent;
+        else global.InputEvent = originalInputEvent;
+        mockTabs.delete(901);
+    }
+});
 
 test('ChatGPTAdapter detects delivery timeout distinct from generic errors', () => {
     const chatgpt = getProvider('chatgpt');

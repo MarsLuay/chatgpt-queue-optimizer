@@ -1595,20 +1595,13 @@ async function sendPromptToSpecificTab(tabId, text) {
             getActiveProviderAdapter(job?.provider) ||
             getActiveProviderAdapter('chatgpt');
         const providerName = provider?.name || 'Provider';
-        const composerSelectors = provider?.selectors?.composer || [
-            'div[contenteditable="true"]',
-            '[contenteditable="true"]'
-        ];
-        const sendButtonSelectors = provider?.selectors?.sendButton || [
-            'button[data-testid="send-button"]',
-            'button[aria-label="Send prompt"]',
-            'button[aria-label="Send message"]',
-            'button[type="submit"]'
-        ];
+        const compatibilityContract = provider && typeof provider.getCompatibilityContract === 'function'
+            ? provider.getCompatibilityContract()
+            : { provider: provider?.id || 'unknown', version: 1, selectors: {}, signals: {} };
 
         const results = await executeScript({
             target: { tabId },
-            func: async (msg, composerSelectors, sendButtonSelectors, providerName) => {
+            func: async (msg, contract, providerName) => {
                 function sleepInPage(ms) {
                     return new Promise(resolve => setTimeout(resolve, ms));
                 }
@@ -1621,114 +1614,144 @@ async function sendPromptToSpecificTab(tabId, text) {
                         id: element.id || '',
                         testId: element.getAttribute('data-testid') || element.getAttribute('data-test-id') || '',
                         ariaLabel: element.getAttribute('aria-label') || '',
-                        text: (element.innerText || element.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 160),
+                        textLength: (element.innerText || element.textContent || element.value || '').length,
                         disabled: !!element.disabled,
                         ariaDisabled: element.getAttribute('aria-disabled') || ''
                     };
                 }
 
-                function findFirstSelector(selectors) {
-                    const joined = selectors.join(',');
-                    const elements = document.querySelectorAll(joined);
+                function getSelectorList(signalKey) {
+                    return Array.isArray(contract?.selectors?.[signalKey])
+                        ? contract.selectors[signalKey]
+                        : [];
+                }
 
-                    if (elements.length > 0) {
-                        for (const selector of selectors) {
-                            for (let i = 0; i < elements.length; i++) {
-                                const element = elements[i];
-                                if (element.matches(selector)) {
-                                    return {
-                                        selector,
-                                        element
-                                    };
-                                }
+                function getCandidates(signalKey) {
+                    const candidates = [];
+                    const seen = new Set();
+                    for (const selector of getSelectorList(signalKey)) {
+                        let elements = [];
+                        try {
+                            elements = Array.from(document.querySelectorAll(selector));
+                        } catch {
+                            elements = [];
+                        }
+                        for (const element of elements) {
+                            if (!seen.has(element)) {
+                                seen.add(element);
+                                candidates.push({ element, selector, signalKey });
                             }
                         }
                     }
+                    return candidates;
+                }
 
-                    return {
+                function isComposerCandidate(element, selector) {
+                    const tagName = (element?.tagName || '').toLowerCase();
+                    const isEditable = tagName === 'textarea' || element?.getAttribute('contenteditable') === 'true';
+                    if (!isEditable || element.closest?.('#cpo-root')) return false;
+
+                    const messageContext = contract?.signals?.messageContext || [];
+                    if (messageContext.length > 0 && element.closest?.(messageContext.join(','))) {
+                        return false;
+                    }
+
+                    const weakComposerSelectors = contract?.signals?.weakComposerSelectors || [];
+                    if (weakComposerSelectors.includes(selector)) {
+                        const composerContext = contract?.signals?.composerContext || [];
+                        return composerContext.length > 0 && !!element.closest?.(composerContext.join(','));
+                    }
+
+                    return true;
+                }
+
+                function isSendActionCandidate(element, selector) {
+                    const tagName = (element?.tagName || '').toLowerCase();
+                    if (tagName !== 'button' && typeof element?.click !== 'function') return false;
+
+                    const weakSendButtonSelectors = contract?.signals?.weakSendButtonSelectors || [];
+                    if (!weakSendButtonSelectors.includes(selector)) return true;
+
+                    const composerContext = contract?.signals?.composerContext || [];
+                    return composerContext.length > 0 && !!element.closest?.(composerContext.join(','));
+                }
+
+                function findMatch(signalKey, predicate = null) {
+                    return getCandidates(signalKey).find(match => !predicate || predicate(match.element, match.selector)) || {
+                        element: null,
                         selector: '',
-                        element: null
+                        signalKey
                     };
                 }
 
-                const inputMatch = findFirstSelector(composerSelectors || [
-                    'div[contenteditable="true"]',
-                    '[contenteditable="true"]'
-                ]);
+                function compatibilityFailure(signalKey, message, details = {}) {
+                    return {
+                        ok: false,
+                        error: `${providerName || 'Provider'} compatibility failure: ${message}`,
+                        details: {
+                            compatibilityFailure: signalKey,
+                            signalKey,
+                            provider: providerName || '',
+                            url: location.href,
+                            title: document.title,
+                            ...details
+                        }
+                    };
+                }
 
+                const inputMatch = findMatch('composer', isComposerCandidate);
                 const input = inputMatch.element;
 
                 if (!input) {
-                    return {
-                        ok: false,
-                        error: `${providerName || 'Provider'} input box was not found.`,
-                        details: {
-                            contentEditableCount: document.querySelectorAll('[contenteditable="true"]').length,
-                            activeElement: describeElement(document.activeElement),
-                            url: location.href,
-                            title: document.title,
-                            provider: providerName || ''
-                        }
-                    };
+                    return compatibilityFailure('composer', 'required composer signal was not found.', {
+                        activeElement: describeElement(document.activeElement)
+                    });
                 }
 
                 input.focus();
-                input.textContent = '';
-                if (input.classList && typeof input.classList.remove === 'function') {
-                    input.classList.remove('ql-blank');
+                const tagName = (input.tagName || '').toLowerCase();
+                if (tagName === 'textarea') {
+                    input.value = String(msg || '');
+                } else {
+                    input.textContent = '';
+                    if (input.classList && typeof input.classList.remove === 'function') {
+                        input.classList.remove('ql-blank');
+                    }
+                    const paragraph = document.createElement('p');
+                    paragraph.innerText = msg;
+                    input.appendChild(paragraph);
                 }
 
-                const paragraph = document.createElement('p');
-                paragraph.innerText = msg;
-                input.appendChild(paragraph);
-
-                input.dispatchEvent(new InputEvent('input', {
-                    bubbles: true,
-                    inputType: 'insertText',
-                    data: msg
-                }));
+                if (typeof InputEvent === 'function') {
+                    input.dispatchEvent(new InputEvent('input', {
+                        bubbles: true,
+                        inputType: 'insertText',
+                        data: msg
+                    }));
+                }
 
                 await sleepInPage(700);
 
-                const sendButtonMatch = findFirstSelector(sendButtonSelectors || [
-                    'button[data-testid="send-button"]',
-                    'button[aria-label="Send prompt"]',
-                    'button[aria-label="Send message"]',
-                    'button[type="submit"]'
-                ]);
-
+                const sendButtonMatch = findMatch('sendButton', isSendActionCandidate);
                 const sendButton = sendButtonMatch.element;
 
                 if (!sendButton) {
-                    return {
-                        ok: false,
-                        error: `${providerName || 'Provider'} send button was not found.`,
-                        details: {
-                            inputSelector: inputMatch.selector,
-                            inputTextLength: (input.innerText || input.textContent || '').length,
-                            buttonCount: document.querySelectorAll('button').length,
-                            activeElement: describeElement(document.activeElement),
-                            url: location.href,
-                            title: document.title,
-                            provider: providerName || ''
-                        }
-                    };
+                    return compatibilityFailure('sendButton', 'required send action signal was not found.', {
+                        composerSelector: inputMatch.selector,
+                        composerSignal: inputMatch.signalKey,
+                        composer: describeElement(input)
+                    });
                 }
 
                 if (sendButton.disabled || sendButton.getAttribute('aria-disabled') === 'true') {
-                    return {
-                        ok: false,
-                        error: `${providerName || 'Provider'} send button is disabled.`,
-                        details: {
-                            inputSelector: inputMatch.selector,
-                            sendButtonSelector: sendButtonMatch.selector,
-                            inputTextLength: (input.innerText || input.textContent || '').length,
-                            sendButton: describeElement(sendButton),
-                            url: location.href,
-                            title: document.title,
-                            provider: providerName || ''
-                        }
-                    };
+                    return compatibilityFailure('sendButton', 'send action signal is disabled.', {
+                        composerSelector: inputMatch.selector,
+                        composerSignal: inputMatch.signalKey,
+                        sendButtonSelector: sendButtonMatch.selector,
+                        sendButtonSignal: sendButtonMatch.signalKey,
+                        composer: describeElement(input),
+                        sendButton: describeElement(sendButton)
+                    });
                 }
 
                 sendButton.click();
@@ -1736,8 +1759,10 @@ async function sendPromptToSpecificTab(tabId, text) {
                 return {
                     ok: true,
                     details: {
-                        inputSelector: inputMatch.selector,
+                        composerSelector: inputMatch.selector,
+                        composerSignal: inputMatch.signalKey,
                         sendButtonSelector: sendButtonMatch.selector,
+                        sendButtonSignal: sendButtonMatch.signalKey,
                         messageLength: String(msg || '').length,
                         url: location.href,
                         title: document.title,
@@ -1745,7 +1770,7 @@ async function sendPromptToSpecificTab(tabId, text) {
                     }
                 };
             },
-            args: [text, composerSelectors, sendButtonSelectors, providerName]
+            args: [text, compatibilityContract, providerName]
         });
 
         const result = results?.[0]?.result;
@@ -1755,6 +1780,7 @@ async function sendPromptToSpecificTab(tabId, text) {
                 ok: false,
                 error: result?.error || 'Could not send prompt.',
                 details: result?.details || {
+                    compatibilityFailure: 'script-result',
                     scriptResultCount: Array.isArray(results) ? results.length : 0
                 }
             };
@@ -2616,6 +2642,7 @@ if (typeof module !== 'undefined' && module.exports) {
         handleEnqueueMessage,
         pauseJob,
         recoverFromDeliveryTimeout,
+        sendPromptToSpecificTab,
         refreshChatGPTTab,
         waitForTabToRecover,
         waitForTabResponse,

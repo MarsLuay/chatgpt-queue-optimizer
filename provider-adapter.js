@@ -5,11 +5,87 @@
     const GEMINI_HOSTS = new Set(['gemini.google.com']);
     const CLAUDE_HOSTS = new Set(['claude.ai']);
 
+    const CHATGPT_MESSAGE_CONTEXT_SELECTORS = [
+        '[data-testid^="conversation-turn"]',
+        '[data-testid*="conversation-turn"]',
+        'article',
+        '[data-message-author-role]',
+        '[data-message-id]'
+    ];
+
+    const CHATGPT_COMPATIBILITY_SIGNALS = {
+        composerContext: [
+            '[data-testid*="composer"]',
+            '[data-testid*="prompt"]',
+            '[id*="prompt"]',
+            '[role="textbox"]',
+            'form'
+        ],
+        messageContext: CHATGPT_MESSAGE_CONTEXT_SELECTORS,
+        turnContext: CHATGPT_MESSAGE_CONTEXT_SELECTORS.slice(0, 3),
+        assistantContentSelectors: [
+            '.markdown',
+            '[data-testid*="copy"]',
+            '[aria-label*="Copy"]'
+        ],
+        weakComposerSelectors: [
+            'div[contenteditable="true"]',
+            '[contenteditable="true"]'
+        ],
+        weakSendButtonSelectors: [
+            'button[type="submit"]'
+        ],
+        stopLabels: [
+            'stop generating',
+            'stop streaming',
+            'stop response',
+            'interrupt',
+            'stop'
+        ],
+        retryLabels: [
+            'retry',
+            'try again',
+            'regenerate',
+            'regenerate response'
+        ],
+        researchMarkers: [
+            'deep research',
+            'researching',
+            'searching the web',
+            'searching sources',
+            'reading sources',
+            'analyzing sources',
+            'gathering sources',
+            'checking sources',
+            'synthesizing',
+            'creating report',
+            'writing report',
+            'thinking',
+            'working'
+        ],
+        deliveryTimeoutMarkers: [
+            'message delivery timed out',
+            'delivery timed out',
+            'message delivery timeout',
+            'delivery timeout',
+            'timed out. please try again'
+        ],
+        errorMarkers: [
+            'something went wrong',
+            'there was an error',
+            'error generating a response',
+            'network error',
+            'failed to generate',
+            'try again later'
+        ]
+    };
+
     const CHATGPT_SELECTORS = {
         composer: [
-            'textarea',
             '#prompt-textarea',
             '[data-testid="prompt-textarea"]',
+            'textarea',
+            '[contenteditable="true"][role="textbox"]',
             'div[contenteditable="true"]',
             '[contenteditable="true"]'
         ],
@@ -59,12 +135,7 @@
             '[class*="error-message"]'
         ],
         messages: [
-            '[data-testid^="conversation-turn"]',
-            '[data-testid*="conversation-turn"]',
-            'article[data-testid]',
-            'article',
-            '[data-message-author-role]',
-            '[data-message-id]',
+            ...CHATGPT_MESSAGE_CONTEXT_SELECTORS,
             '[data-testid="conversation-turn"]'
         ],
         fallbackMessages: [
@@ -84,6 +155,24 @@
         ]
     };
 
+    function cloneCompatibilityValue(value) {
+        if (Array.isArray(value)) {
+            return value.map(cloneCompatibilityValue);
+        }
+        if (value && typeof value === 'object') {
+            return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, cloneCompatibilityValue(child)]));
+        }
+        return value;
+    }
+
+    function summarizeSelectorMatch(match) {
+        return {
+            matched: !!match?.element,
+            selector: match?.selector || null,
+            signalKey: match?.signalKey || null
+        };
+    }
+
     class ProviderAdapter {
         constructor(idOrOptions, maybeName, options = {}) {
             if (idOrOptions && typeof idOrOptions === 'object') {
@@ -97,6 +186,142 @@
                 this.supportsOptimizer = !!options.supportsOptimizer;
                 this.selectors = options.selectors || {};
             }
+        }
+
+        getCompatibilityContract() {
+            return {
+                provider: this.id,
+                version: 1,
+                selectors: cloneCompatibilityValue(this.selectors),
+                signals: {}
+            };
+        }
+
+        getSelectorNodes(root, selectorKey, predicate = null) {
+            const selectors = Array.isArray(this.selectors?.[selectorKey])
+                ? this.selectors[selectorKey]
+                : [];
+            const matches = [];
+            const seen = new Set();
+
+            if (!root || selectors.length === 0) return matches;
+
+            for (const selector of selectors) {
+                let nodes = [];
+                try {
+                    if (
+                        (typeof root.matches === 'function' && root.matches(selector)) ||
+                        (typeof root.closest === 'function' && root.closest(selector) === root)
+                    ) {
+                        nodes.push(root);
+                    }
+                    if (typeof root.querySelectorAll === 'function') {
+                        nodes.push(...Array.from(root.querySelectorAll(selector)));
+                    }
+                } catch {
+                    nodes = [];
+                }
+
+                for (const element of nodes) {
+                    if (seen.has(element)) continue;
+                    if (predicate && !predicate(element, selector)) continue;
+                    seen.add(element);
+                    matches.push({ element, selector, signalKey: selectorKey });
+                }
+            }
+
+            return matches;
+        }
+
+        getSelectorMatch(root, selectorKey, predicate = null) {
+            return this.getSelectorNodes(root, selectorKey, predicate)[0] || {
+                element: null,
+                selector: '',
+                signalKey: selectorKey
+            };
+        }
+
+        isComposerElement(element) {
+            const tagName = (element?.tagName || '').toLowerCase();
+            return tagName === 'textarea' || element?.getAttribute?.('contenteditable') === 'true';
+        }
+
+        getComposerMatch(doc = (typeof document !== 'undefined' ? document : null)) {
+            return this.getSelectorMatch(doc, 'composer', (element, selector) => this.isComposerElement(element, {
+                selector,
+                source: 'document'
+            }));
+        }
+
+        isSendActionElement(element) {
+            const tagName = (element?.tagName || '').toLowerCase();
+            return tagName === 'button' || typeof element?.click === 'function';
+        }
+
+        getSendActionMatch(doc = (typeof document !== 'undefined' ? document : null)) {
+            return this.getSelectorMatch(doc, 'sendButton', (element, selector) => this.isSendActionElement(element, {
+                selector,
+                source: 'document'
+            }));
+        }
+
+        getComposerMatchFromEventTarget(target, excludeSelector = '#cpo-root') {
+            let element = target && target.nodeType === 1
+                ? target
+                : target?.parentElement;
+
+            while (element) {
+                if (excludeSelector && element.closest?.(excludeSelector)) return null;
+                const match = this.getSelectorNodes(element, 'composer', (candidate, selector) => this.isComposerElement(candidate, {
+                    selector,
+                    source: 'event'
+                }))[0];
+                if (match?.element === element) return match;
+                element = element.parentElement;
+            }
+
+            return null;
+        }
+
+        getComposerFromEventTarget(target, excludeSelector = '#cpo-root') {
+            return this.getComposerMatchFromEventTarget(target, excludeSelector)?.element || null;
+        }
+
+        getSendActionFromEventTarget(target) {
+            let element = target && target.nodeType === 1
+                ? target
+                : target?.parentElement;
+
+            while (element) {
+                const match = this.getSelectorNodes(element, 'sendButton', (candidate, selector) => this.isSendActionElement(candidate, {
+                    selector,
+                    source: 'event'
+                }))[0];
+                if (match?.element === element) return match;
+                element = element.parentElement;
+            }
+
+            return null;
+        }
+
+        getCompatibilityDiagnostics(doc = (typeof document !== 'undefined' ? document : null)) {
+            const root = this.getSelectorMatch(doc, 'mainRoot');
+            const composer = this.getComposerMatch(doc);
+            const sendAction = this.getSendActionMatch(doc);
+            return {
+                provider: this.id,
+                root: summarizeSelectorMatch({ ...root, signalKey: 'mainRoot' }),
+                composer: summarizeSelectorMatch({ ...composer, signalKey: 'composer' }),
+                sendAction: summarizeSelectorMatch({ ...sendAction, signalKey: 'sendButton' }),
+                messages: {
+                    matched: false,
+                    count: 0,
+                    selector: null,
+                    signalKey: 'messages',
+                    state: 'unsupported'
+                },
+                requiredFailures: []
+            };
         }
 
         isSupportedUrl(url) {
@@ -185,6 +410,167 @@
                 supportsOptimizer: true,
                 selectors: CHATGPT_SELECTORS
             });
+            this.compatibilitySignals = CHATGPT_COMPATIBILITY_SIGNALS;
+        }
+
+        getCompatibilityContract() {
+            return {
+                provider: this.id,
+                version: 1,
+                selectors: cloneCompatibilityValue(this.selectors),
+                signals: cloneCompatibilityValue(this.compatibilitySignals),
+                requiredSignals: ['composer', 'sendButton']
+            };
+        }
+
+        isComposerElement(element, { selector = '', source = 'document' } = {}) {
+            if (!super.isComposerElement(element)) return false;
+            if (element.closest?.('#cpo-root')) return false;
+
+            const messageContext = this.compatibilitySignals.messageContext.join(',');
+            if (element.closest?.(messageContext)) return false;
+
+            if (!this.compatibilitySignals.weakComposerSelectors.includes(selector)) {
+                return true;
+            }
+
+            const composerContext = this.compatibilitySignals.composerContext.join(',');
+            if (element.closest?.(composerContext)) return true;
+
+            // Weak editable fallbacks are only valid inside a known composer context.
+            // This keeps Enter and queued sends on the same canonical contract.
+        }
+
+        isSendActionElement(element, { selector = '' } = {}) {
+            if (!super.isSendActionElement(element)) return false;
+            if (!this.compatibilitySignals.weakSendButtonSelectors.includes(selector)) return true;
+
+            const composerContext = this.compatibilitySignals.composerContext.join(',');
+            return !!element.closest?.(composerContext);
+        }
+
+        getMessageDiscovery(doc = (typeof document !== 'undefined' ? document : null), mainRoot = null) {
+            if (!doc) {
+                return {
+                    nodes: [],
+                    selector: null,
+                    signalKey: 'messages',
+                    fallback: false
+                };
+            }
+
+            mainRoot = mainRoot || this.getMainRoot(doc);
+            if (!mainRoot) {
+                return {
+                    nodes: [],
+                    selector: null,
+                    signalKey: 'messages',
+                    fallback: false
+                };
+            }
+
+            const collected = [];
+            let matchedSelector = null;
+            const combinedSelector = this.selectors.messages.join(',');
+
+            try {
+                const nodes = Array.from(doc.querySelectorAll(combinedSelector));
+                for (const node of nodes) {
+                    if (!mainRoot.contains(node)) continue;
+
+                    const normalized = this.normalizeMessageNode(node, mainRoot);
+                    if (normalized && this.isValidMessageNode(normalized, mainRoot)) {
+                        collected.push(normalized);
+                        matchedSelector = matchedSelector || this.findMatchingSelector(node, 'messages');
+                    }
+                }
+            } catch (error) {
+                console.warn('CPO: Combined selector failed', error);
+            }
+
+            let messages = this.sortMessagesByPosition(this.removeDuplicates(collected));
+            if (messages.length > 0) {
+                return {
+                    nodes: messages,
+                    selector: matchedSelector,
+                    signalKey: 'messages',
+                    fallback: false
+                };
+            }
+
+            messages = this.getFallbackMessages(doc, mainRoot);
+            return {
+                nodes: messages,
+                selector: messages.length > 0 ? 'fallbackMessages' : null,
+                signalKey: 'fallbackMessages',
+                fallback: true
+            };
+        }
+
+        getConversationTurns(doc = (typeof document !== 'undefined' ? document : null)) {
+            const selectors = this.compatibilitySignals.turnContext || [];
+            const matches = [];
+            const seen = new Set();
+
+            for (const selector of selectors) {
+                let nodes = [];
+                try {
+                    nodes = Array.from(doc?.querySelectorAll?.(selector) || []);
+                } catch {
+                    nodes = [];
+                }
+                for (const element of nodes) {
+                    if (!seen.has(element)) {
+                        seen.add(element);
+                        matches.push(element);
+                    }
+                }
+            }
+
+            return matches;
+        }
+
+        findMatchingSelector(node, selectorKey) {
+            const selectors = this.selectors?.[selectorKey] || [];
+            return selectors.find((selector) => {
+                try {
+                    return node.matches?.(selector);
+                } catch {
+                    return false;
+                }
+            }) || null;
+        }
+
+        getCompatibilityDiagnostics(doc = (typeof document !== 'undefined' ? document : null)) {
+            const root = this.getSelectorMatch(doc, 'mainRoot');
+            const composer = this.getComposerMatch(doc);
+            const sendAction = this.getSendActionMatch(doc);
+            const discovery = this.getMessageDiscovery(doc, root.element);
+            const conversation = this.getConversationIdentity(
+                doc?.defaultView?.location || (typeof location !== 'undefined' ? location : '')
+            );
+            const isEmptyConversation = discovery.nodes.length === 0 &&
+                !!root.element &&
+                !!composer.element &&
+                ['new', 'existing'].includes(conversation.type);
+            const requiredFailures = [];
+            if (!root.element) requiredFailures.push('mainRoot');
+            if (!composer.element) requiredFailures.push('composer');
+
+            return {
+                provider: this.id,
+                root: summarizeSelectorMatch({ ...root, signalKey: 'mainRoot' }),
+                composer: summarizeSelectorMatch({ ...composer, signalKey: 'composer' }),
+                sendAction: summarizeSelectorMatch({ ...sendAction, signalKey: 'sendButton' }),
+                messages: {
+                    matched: discovery.nodes.length > 0,
+                    count: discovery.nodes.length,
+                    selector: discovery.selector,
+                    signalKey: discovery.signalKey,
+                    state: isEmptyConversation ? 'empty-conversation' : (discovery.nodes.length > 0 ? 'matched' : 'not-found')
+                },
+                requiredFailures
+            };
         }
 
         isSupportedUrl(url) {
@@ -268,29 +654,7 @@
         }
 
         getComposerFromEventTarget(target, excludeSelector = '#cpo-root') {
-            const element = target && target.nodeType === 1
-                ? target
-                : target?.parentElement;
-
-            if (!element) return null;
-            if (excludeSelector && element.closest(excludeSelector)) return null;
-
-            const composerSelector = this.selectors.composer.join(',');
-            const composer = element.closest(composerSelector);
-
-            if (!composer) return null;
-
-            const tagName = (composer.tagName || '').toLowerCase();
-            const isTextArea = tagName === 'textarea';
-            const isEditable = composer.getAttribute('contenteditable') === 'true';
-
-            if (!isTextArea && !isEditable) return null;
-
-            if (composer.closest('[data-message-author-role], [data-message-id], [data-testid^="conversation-turn"]')) {
-                return null;
-            }
-
-            return composer;
+            return this.getComposerMatchFromEventTarget(target, excludeSelector)?.element || null;
         }
 
         getComposerText(composer) {
@@ -345,50 +709,46 @@
             }
 
             const buttons = Array.from(doc.querySelectorAll('button'));
-            const stopButton = buttons.find(button => {
+            const stopSelectorMatch = this.getSelectorMatch(doc, 'stopButton', (button) => {
+                return !button.disabled && button.getAttribute('aria-disabled') !== 'true';
+            });
+            const semanticStopButton = buttons.find(button => {
                 if (button.disabled || button.getAttribute('aria-disabled') === 'true') {
                     return false;
                 }
-                const testId = (button.getAttribute('data-testid') || '').toLowerCase();
-                if (testId === 'stop-button' || testId.includes('stop')) {
-                    return true;
-                }
+                const testId = (
+                    button.getAttribute('data-testid') ||
+                    button.getAttribute('data-test-id') ||
+                    ''
+                ).toLowerCase();
                 const label = (
                     button.getAttribute('aria-label') ||
                     button.innerText ||
                     button.textContent ||
                     ''
                 ).toLowerCase().trim();
-
-                return (
-                    label === 'stop generating' ||
-                    label === 'stop streaming' ||
-                    label === 'stop response' ||
-                    label.includes('stop generating') ||
-                    label.includes('stop streaming') ||
-                    label.includes('stop response') ||
-                    label.includes('interrupt') ||
-                    (label === 'stop' && (button.closest?.('form, [data-testid*="composer"], [data-testid*="action"]') || testId.includes('stop')))
+                return this.compatibilitySignals.stopLabels.some(marker =>
+                    label === marker || label.includes(marker) || testId.includes(marker.replace(/ /g, '-'))
                 );
             });
+            const stopButton = stopSelectorMatch.element || semanticStopButton;
             const hasActiveStopButton = !!stopButton;
 
-            const streamingSelector = this.selectors.streaming.join(',');
-            const resultStreaming = doc.querySelector(streamingSelector);
+            const streamingMatch = this.getSelectorMatch(doc, 'streaming');
+            const resultStreaming = streamingMatch.element;
             const hasResultStreaming = !!resultStreaming;
 
-            const statusSelector = this.selectors.status.join(',');
-            const statusNodes = Array.from(doc.querySelectorAll(statusSelector))
-                .filter(node => node.getAttribute('aria-live') !== 'off');
+            const statusMatches = this.getSelectorNodes(doc, 'status', (node) => node.getAttribute('aria-live') !== 'off');
+            const statusNodes = statusMatches.map(match => match.element);
 
-            const turns = Array.from(doc.querySelectorAll('[data-testid^="conversation-turn"], article'));
+            const turns = this.getConversationTurns(doc);
             const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
 
-            const latestTurnActiveElement = latestTurn
-                ? latestTurn.querySelector(
-                    '[role="status"], [aria-live], [data-testid*="status"], [data-testid*="progress"], [data-testid*="research"], [data-testid*="thinking"], [data-testid*="reasoning"], [data-testid*="thought"], [data-testid*="tool-progress"], .result-thinking, svg.animate-spin, [class*="animate-spin"], [data-testid*="loading-spinner"]'
-                )
+            const latestTurnActiveMatch = latestTurn
+                ? this.getSelectorNodes(latestTurn, 'status', (node) => node.getAttribute('aria-live') !== 'off')[0] ||
+                    this.getSelectorNodes(latestTurn, 'spinner')[0]
                 : null;
+            const latestTurnActiveElement = latestTurnActiveMatch?.element || null;
 
             const activeNodes = [...statusNodes];
             if (latestTurnActiveElement && !activeNodes.includes(latestTurnActiveElement)) {
@@ -396,8 +756,11 @@
             }
 
             const visibleActiveNodes = activeNodes.filter(node => !node.hidden && node.getAttribute('aria-hidden') !== 'true');
-            const hasActiveSpinner = visibleActiveNodes.some(node => node.querySelector?.('svg.animate-spin, [class*="animate-spin"]') || node.classList?.contains('animate-spin')) ||
-                !!latestTurn?.querySelector?.('svg.animate-spin, [class*="animate-spin"], [data-testid*="loading-spinner"]');
+            const spinnerNodes = this.getSelectorNodes(doc, 'spinner', (node) => !node.hidden && node.getAttribute('aria-hidden') !== 'true');
+            const latestTurnSpinner = latestTurn
+                ? this.getSelectorNodes(latestTurn, 'spinner', (node) => !node.hidden && node.getAttribute('aria-hidden') !== 'true')
+                : [];
+            const hasActiveSpinner = spinnerNodes.length > 0 || latestTurnSpinner.length > 0;
 
             const statusText = visibleActiveNodes
                 .map(node => node.innerText || node.textContent || '')
@@ -407,53 +770,22 @@
                 .slice(0, 1200);
             const activeTextLower = statusText.toLowerCase();
 
-            const researchProgressMarkers = [
-                'deep research',
-                'researching',
-                'searching the web',
-                'searching sources',
-                'reading sources',
-                'analyzing sources',
-                'gathering sources',
-                'checking sources',
-                'synthesizing',
-                'creating report',
-                'writing report',
-                'thinking',
-                'working'
-            ];
-
-            const matchedResearchMarker = researchProgressMarkers.find(marker => activeTextLower.includes(marker)) || '';
+            const matchedResearchMarker = this.compatibilitySignals.researchMarkers.find(marker => activeTextLower.includes(marker)) || '';
             const hasActiveToolOrResearch = !!matchedResearchMarker || hasActiveSpinner;
             const isDeepResearch = matchedResearchMarker === 'deep research' ||
                 activeTextLower.includes('deep research') ||
                 activeTextLower.includes('researching');
 
-            const alertSelector = this.selectors.errorAlerts.join(',');
-            const alertNodes = Array.from(doc.querySelectorAll(alertSelector));
+            const alertMatches = this.getSelectorNodes(doc, 'errorAlerts');
+            const alertNodes = alertMatches.map(match => match.element);
             const alertText = alertNodes.map(node => node.innerText || node.textContent || '').join(' ').toLowerCase();
             const latestTurnText = latestTurn ? (latestTurn.innerText || latestTurn.textContent || '').toLowerCase() : '';
             const errorSearchText = `${alertText} ${latestTurnText}`.trim();
 
-            const deliveryTimeoutMarkers = [
-                'message delivery timed out',
-                'delivery timed out',
-                'message delivery timeout',
-                'delivery timeout',
-                'timed out. please try again'
-            ];
-            const matchedDeliveryTimeout = deliveryTimeoutMarkers.find(marker => errorSearchText.includes(marker)) || '';
+            const matchedDeliveryTimeout = this.compatibilitySignals.deliveryTimeoutMarkers.find(marker => errorSearchText.includes(marker)) || '';
             const hasDeliveryTimedOut = !!matchedDeliveryTimeout;
 
-            const generalErrorMarkers = [
-                'something went wrong',
-                'there was an error',
-                'error generating a response',
-                'network error',
-                'failed to generate',
-                'try again later'
-            ];
-            const matchedGeneralError = generalErrorMarkers.find(marker => errorSearchText.includes(marker)) || '';
+            const matchedGeneralError = this.compatibilitySignals.errorMarkers.find(marker => errorSearchText.includes(marker)) || '';
 
             const matchedError = matchedDeliveryTimeout
                 ? 'Message delivery timed out. Please try again.'
@@ -467,8 +799,8 @@
                     .trim()
                 : '';
 
-            const retryBtn = this.getRetryButton(doc);
-            const hasTryAgainButton = !!retryBtn;
+            const retryMatch = this.getRetryButtonMatch(doc);
+            const hasTryAgainButton = !!retryMatch.element;
 
             const hasKnownError = !!matchedError || hasDeliveryTimedOut;
             const isWorking = hasActiveStopButton || hasResultStreaming || hasActiveToolOrResearch;
@@ -491,51 +823,84 @@
                 hasTryAgainButton,
                 errorSnippet,
                 matchedError,
+                matchedSignals: {
+                    stopButton: stopSelectorMatch.selector || (semanticStopButton ? 'stopButton.semantic' : null),
+                    streaming: streamingMatch.selector || null,
+                    status: statusMatches[0]?.selector || null,
+                    spinner: spinnerNodes[0]?.selector || latestTurnSpinner[0]?.selector || null,
+                    research: matchedResearchMarker ? `researchMarkers:${matchedResearchMarker}` : null,
+                    error: alertMatches[0]?.selector || null,
+                    retry: retryMatch.signalKey || null
+                },
                 url,
                 title
             };
         }
 
-        getRetryButton(doc = (typeof document !== 'undefined' ? document : null)) {
-            if (!doc) return null;
+        getRetryButtonMatch(doc = (typeof document !== 'undefined' ? document : null)) {
+            const empty = {
+                element: null,
+                selector: '',
+                signalKey: 'retryButton'
+            };
+            if (!doc) return empty;
 
             const isRetryOrRegenerate = (btn) => {
                 if (!btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true') {
                     return false;
                 }
-                const testId = (btn.getAttribute('data-testid') || '').toLowerCase();
+                const testId = (
+                    btn.getAttribute('data-testid') ||
+                    btn.getAttribute('data-test-id') ||
+                    ''
+                ).toLowerCase();
                 if (testId === 'retry-button' || testId.includes('retry') || testId.includes('regenerate')) {
                     return true;
                 }
                 const label = (btn.getAttribute('aria-label') || '').toLowerCase().trim();
-                if (label === 'retry' || label === 'try again' || label === 'regenerate' || label === 'regenerate response' ||
-                    label.includes('try again') || label.includes('regenerate') || label.includes('retry')) {
-                    return true;
-                }
                 const text = (btn.innerText || btn.textContent || '').toLowerCase().trim();
-                return text === 'retry' || text === 'try again' || text === 'regenerate' || text === 'regenerate response' ||
-                    text.includes('try again') || text.includes('regenerate') || text.includes('retry');
+                return this.compatibilitySignals.retryLabels.some(marker =>
+                    label === marker || label.includes(marker) || text === marker || text.includes(marker)
+                );
             };
 
-            const turns = Array.from(doc.querySelectorAll('[data-testid^="conversation-turn"], article'));
+            const turns = this.getConversationTurns(doc);
             const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
 
             if (latestTurn) {
                 const turnButtons = Array.from(latestTurn.querySelectorAll('button'));
                 const foundInTurn = turnButtons.reverse().find(isRetryOrRegenerate);
-                if (foundInTurn) return foundInTurn;
+                if (foundInTurn) {
+                    return {
+                        element: foundInTurn,
+                        selector: 'retryButton.latestTurn',
+                        signalKey: 'retryButton'
+                    };
+                }
             }
 
-            const alertSelector = this.selectors.errorAlerts.join(',');
-            const alertNodes = Array.from(doc.querySelectorAll(alertSelector));
-            for (const alertNode of alertNodes) {
-                const alertButtons = Array.from(alertNode.querySelectorAll('button'));
+            const alertMatches = this.getSelectorNodes(doc, 'errorAlerts');
+            for (const alertMatch of alertMatches) {
+                const alertButtons = Array.from(alertMatch.element.querySelectorAll('button'));
                 const foundInAlert = alertButtons.reverse().find(isRetryOrRegenerate);
-                if (foundInAlert) return foundInAlert;
+                if (foundInAlert) {
+                    return {
+                        element: foundInAlert,
+                        selector: alertMatch.selector,
+                        signalKey: 'retryButton'
+                    };
+                }
             }
 
             const allButtons = Array.from(doc.querySelectorAll('button'));
-            return allButtons.reverse().find(isRetryOrRegenerate) || null;
+            const fallback = allButtons.reverse().find(isRetryOrRegenerate);
+            return fallback
+                ? { element: fallback, selector: 'retryButton.semantic', signalKey: 'retryButton' }
+                : empty;
+        }
+
+        getRetryButton(doc = (typeof document !== 'undefined' ? document : null)) {
+            return this.getRetryButtonMatch(doc).element;
         }
 
         clickRetryButton(doc = (typeof document !== 'undefined' ? document : null)) {
@@ -552,7 +917,7 @@
         getLastAssistantTurn(doc = (typeof document !== 'undefined' ? document : null)) {
             if (!doc) return null;
 
-            const turns = Array.from(doc.querySelectorAll('[data-testid^="conversation-turn"], article'));
+            const turns = this.getConversationTurns(doc);
             if (turns.length === 0) return null;
 
             const latestTurn = turns[turns.length - 1];
@@ -562,7 +927,7 @@
                 (
                     !latestTurn.querySelector('[data-message-author-role="user"]') &&
                     latestTurn.getAttribute('data-message-author-role') !== 'user' &&
-                    (latestTurn.querySelector('.markdown, [data-testid*="copy"], [aria-label*="Copy"]') || turns.length >= 2)
+                    (latestTurn.querySelector(this.compatibilitySignals.assistantContentSelectors.join(',')) || turns.length >= 2)
                 )
             );
 
@@ -580,24 +945,8 @@
             const text = (latestTurn.innerText || latestTurn.textContent || '').trim();
             const textLower = text.toLowerCase();
 
-            const deliveryTimeoutMarkers = [
-                'message delivery timed out',
-                'delivery timed out',
-                'message delivery timeout',
-                'delivery timeout',
-                'timed out. please try again'
-            ];
-            const hasDeliveryTimeout = deliveryTimeoutMarkers.some(marker => textLower.includes(marker));
-
-            const generalErrorMarkers = [
-                'something went wrong',
-                'there was an error',
-                'error generating a response',
-                'network error',
-                'failed to generate',
-                'try again later'
-            ];
-            const hasGeneralError = generalErrorMarkers.some(marker => textLower.includes(marker));
+            const hasDeliveryTimeout = this.compatibilitySignals.deliveryTimeoutMarkers.some(marker => textLower.includes(marker));
+            const hasGeneralError = this.compatibilitySignals.errorMarkers.some(marker => textLower.includes(marker));
             const hasError = hasDeliveryTimeout || hasGeneralError;
 
             const retryBtn = this.getRetryButton(latestTurn);
@@ -614,44 +963,11 @@
         }
 
         getMainRoot(doc = (typeof document !== 'undefined' ? document : null)) {
-            if (!doc) return null;
-            return (
-                doc.querySelector('main') ||
-                doc.querySelector('[role="main"]') ||
-                doc.querySelector('#__next') ||
-                doc.body
-            );
+            return this.getSelectorMatch(doc, 'mainRoot').element || null;
         }
 
         getMessageNodes(doc = (typeof document !== 'undefined' ? document : null), mainRoot = null) {
-            if (!doc) return [];
-            mainRoot = mainRoot || this.getMainRoot(doc);
-            if (!mainRoot) return [];
-
-            const collected = [];
-            const combinedSelector = this.selectors.messages.join(',');
-
-            try {
-                const nodes = Array.from(doc.querySelectorAll(combinedSelector));
-                for (const node of nodes) {
-                    if (!mainRoot.contains(node)) continue;
-
-                    const normalized = this.normalizeMessageNode(node, mainRoot);
-                    if (normalized && this.isValidMessageNode(normalized, mainRoot)) {
-                        collected.push(normalized);
-                    }
-                }
-            } catch (error) {
-                console.warn('CPO: Combined selector failed', error);
-            }
-
-            let messages = this.sortMessagesByPosition(this.removeDuplicates(collected));
-            if (messages.length > 0) {
-                return messages;
-            }
-
-            messages = this.getFallbackMessages(doc, mainRoot);
-            return messages;
+            return this.getMessageDiscovery(doc, mainRoot).nodes;
         }
 
         normalizeMessageNode(node, mainRoot) {
@@ -659,11 +975,9 @@
             if (node.closest('#cpo-root')) return null;
             if (node.classList && node.classList.contains('cpo-more-banner')) return null;
 
-            const turn =
-                node.closest('[data-testid^="conversation-turn"]') ||
-                node.closest('[data-testid*="conversation-turn"]') ||
-                node.closest('article') ||
-                node.closest('[data-message-id]');
+            const turn = (this.compatibilitySignals.turnContext || [])
+                .map(selector => node.closest?.(selector))
+                .find(candidate => candidate && mainRoot.contains(candidate));
 
             if (turn && mainRoot.contains(turn)) {
                 return turn;
@@ -682,7 +996,8 @@
                 return false;
             }
 
-            if (node.querySelector('textarea, input[type="text"], input:not([type]), form')) {
+            const composerOrFormSelector = `${this.selectors.composer.join(',')}, form`;
+            if (node.querySelector(composerOrFormSelector)) {
                 const text = (node.textContent || '').trim();
                 if (text.length < 80) return false;
             }
@@ -691,13 +1006,9 @@
             if (text.length < 1) return false;
 
             const hasMessageMarker =
-                (typeof node.matches === 'function' && (
-                    node.matches('[data-testid^="conversation-turn"]') ||
-                    node.matches('[data-testid*="conversation-turn"]') ||
-                    node.matches('article') ||
-                    node.matches('[data-message-id]')
-                )) ||
-                !!node.querySelector('[data-message-author-role], [data-message-id]');
+                (typeof node.matches === 'function' && (this.compatibilitySignals.messageContext || [])
+                    .some(selector => node.matches(selector))) ||
+                !!node.querySelector((this.compatibilitySignals.messageContext || []).join(','));
 
             if (!hasMessageMarker) return false;
 
@@ -714,7 +1025,7 @@
                     if (!mainRoot.contains(node)) continue;
                     if (node.closest('#cpo-root')) continue;
                     if (node.id && node.id.includes('thread-bottom')) continue;
-                    if (node.querySelector('textarea, input[type="text"], form')) continue;
+                    if (node.querySelector(`${this.selectors.composer.join(',')}, input, form`)) continue;
 
                     const text = (node.textContent || '').trim();
                     if (text.length < 15) continue;
@@ -739,15 +1050,12 @@
             const text = (node.textContent || '').trim();
             if (text.length < 15) return false;
 
-            if (node.querySelector('textarea, input, form')) return false;
+            if (node.querySelector(`${this.selectors.composer.join(',')}, input, form`)) return false;
 
             const hasContent =
                 node.querySelector('p, pre, code, ul, ol, h1, h2, h3, h4, h5, h6, [data-message-author-role]') ||
-                (typeof node.matches === 'function' && (
-                    node.matches('article') ||
-                    node.matches('[data-message-id]') ||
-                    node.matches('[data-testid*="conversation-turn"]')
-                ));
+                (typeof node.matches === 'function' && (this.compatibilitySignals.messageContext || [])
+                    .some(selector => node.matches(selector)));
 
             return !!hasContent;
         }

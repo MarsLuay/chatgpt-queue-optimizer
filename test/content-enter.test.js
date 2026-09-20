@@ -82,6 +82,10 @@ function createMockDOM() {
       return false;
     }
 
+    matches(selector) {
+      return matchesSelector(this, selector);
+    }
+
     closest(selector) {
       let curr = this;
       while (curr) {
@@ -805,6 +809,31 @@ test('Default-prevented ownership behavior owns Enter in real composer during ac
   assert.strictEqual(lastDiag.defaultPrevented, true);
   assert.strictEqual(lastDiag.interception, true);
   assert.strictEqual(lastDiag.enqueueResult, 'success');
+});
+
+test('DEBUG_MESSAGES reports canonical signal diagnostics without message text', async () => {
+  const { dom, optimizer } = setupTestEnv();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  optimizer.config.enabled = false;
+  const composer = dom.document.createElement('div');
+  composer.setAttribute('data-testid', 'prompt-textarea');
+  composer.setAttribute('contenteditable', 'true');
+  const turn = dom.document.createElement('article');
+  turn.setAttribute('data-testid', 'conversation-turn-1');
+  turn.textContent = 'private prompt text must stay out of diagnostics';
+  turn.innerText = turn.textContent;
+  dom.document.body.appendChild(composer);
+  dom.document.body.appendChild(turn);
+
+  let response = null;
+  optimizer.handleMessage({ type: 'DEBUG_MESSAGES' }, null, (value) => {
+    response = value;
+  });
+
+  assert.equal(response.count, 1);
+  assert.equal(response.diagnostics.messages.selector, '[data-testid^="conversation-turn"]');
+  assert.equal(response.diagnostics.composer.selector, '[data-testid="prompt-textarea"]');
+  assert.equal(JSON.stringify(response).includes('private prompt text'), false);
 });
 
 test('Historical page text does not create false active states', () => {

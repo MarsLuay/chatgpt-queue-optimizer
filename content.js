@@ -141,6 +141,7 @@
               bannerExists: !!this.state.moreBanner,
               initialized: this.state.isInitialized,
               selector: this._loggedSelector || 'none',
+              compatibility: this.getCompatibilityDiagnostics(),
               enterDiagnostics: this.state.enterDiagnostics || []
             }
           });
@@ -203,25 +204,22 @@
 
         case 'DEBUG_MESSAGES': {
           const debugMessages = this.getMessageNodes();
+          const compatibility = this.getCompatibilityDiagnostics();
 
           if (this.config.debug) {
             console.log('CPO Debug: Found messages:', debugMessages.length);
-            console.log('CPO Debug Selectors:');
-            console.log('- [data-testid^="conversation-turn"]:', document.querySelectorAll('[data-testid^="conversation-turn"]').length);
-            console.log('- [data-testid*="conversation-turn"]:', document.querySelectorAll('[data-testid*="conversation-turn"]').length);
-            console.log('- article:', document.querySelectorAll('article').length);
-            console.log('- [data-message-author-role]:', document.querySelectorAll('[data-message-author-role]').length);
-            console.log('- [data-message-id]:', document.querySelectorAll('[data-message-id]').length);
-            console.log('- main:', document.querySelectorAll('main').length);
-
-            debugMessages.forEach((msg, i) => {
-              if (i < 10) {
-                console.log(`CPO Debug Message ${i + 1}:`, msg, 'Text preview:', msg.textContent.trim().substring(0, 160));
-              }
+            console.log('CPO Debug compatibility:', compatibility);
+            debugMessages.slice(0, 10).forEach((msg, i) => {
+              console.log(`CPO Debug Message ${i + 1}:`, {
+                tagName: msg.tagName || '',
+                id: msg.id || '',
+                testId: msg.getAttribute?.('data-testid') || '',
+                role: msg.getAttribute?.('data-message-author-role') || ''
+              });
             });
           }
 
-          sendResponse({ count: debugMessages.length });
+          sendResponse({ count: debugMessages.length, diagnostics: compatibility });
           break;
         }
 
@@ -285,11 +283,10 @@
 
       target.addEventListener('submit', markSubmission, true);
       target.addEventListener('click', (event) => {
-        const sendButtonSelectors = this.provider?.selectors?.sendButton
-          ? this.provider.selectors.sendButton.join(', ')
-          : 'button[data-testid="send-button"], button[data-testid="fruitjuice-send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"]';
-        const button = event.target?.closest?.(sendButtonSelectors);
-        if (button) {
+        const sendAction = this.provider && typeof this.provider.getSendActionFromEventTarget === 'function'
+          ? this.provider.getSendActionFromEventTarget(event.target)
+          : null;
+        if (sendAction?.element) {
           markSubmission();
         }
       }, true);
@@ -341,7 +338,10 @@
         return;
       }
 
-      const composer = this.getComposerFromEventTarget(event.target);
+      const composerMatch = this.provider && typeof this.provider.getComposerMatchFromEventTarget === 'function'
+        ? this.provider.getComposerMatchFromEventTarget(event.target, '#cpo-root')
+        : null;
+      const composer = composerMatch?.element || this.getComposerFromEventTarget(event.target);
       if (!composer) return;
 
       const text = this.getComposerText(composer).trim();
@@ -357,6 +357,8 @@
         key: 'Enter',
         composerMatch: {
           matched: true,
+          selector: composerMatch?.selector || null,
+          signalKey: composerMatch?.signalKey || 'composer',
           tagName: (composer.tagName || '').toLowerCase(),
           id: composer.id || '',
           testId: composer.getAttribute?.('data-testid') || '',
@@ -427,28 +429,7 @@
         return this.provider.getComposerFromEventTarget(target, '#cpo-root');
       }
 
-      const element = target && (target.nodeType === 1 || target.nodeType === (typeof Node !== 'undefined' ? Node.ELEMENT_NODE : 1))
-        ? target
-        : target?.parentElement;
-
-      if (!element || element.closest('#cpo-root')) return null;
-
-      const composer = element.closest(
-        'textarea, #prompt-textarea, [data-testid="prompt-textarea"], div[contenteditable="true"], [contenteditable="true"]'
-      );
-
-      if (!composer) return null;
-
-      const tagName = composer.tagName ? composer.tagName.toLowerCase() : '';
-      const isTextArea = tagName === 'textarea';
-      const isEditable = composer.getAttribute('contenteditable') === 'true';
-
-      if (!isTextArea && !isEditable) return null;
-      if (composer.closest('[data-message-author-role], [data-message-id], [data-testid^="conversation-turn"]')) {
-        return null;
-      }
-
-      return composer;
+      return null;
     }
 
     getComposerText(composer) {
@@ -517,6 +498,21 @@
         matchedError: '',
         url: typeof location !== 'undefined' ? location.href : '',
         title: typeof document !== 'undefined' ? document.title : ''
+      };
+    }
+
+    getCompatibilityDiagnostics() {
+      if (this.provider && typeof this.provider.getCompatibilityDiagnostics === 'function') {
+        return this.provider.getCompatibilityDiagnostics(document);
+      }
+
+      return {
+        provider: this.provider?.id || null,
+        root: { matched: false, selector: null, signalKey: 'mainRoot' },
+        composer: { matched: false, selector: null, signalKey: 'composer' },
+        sendAction: { matched: false, selector: null, signalKey: 'sendButton' },
+        messages: { matched: false, count: 0, selector: null, signalKey: 'messages', state: 'unsupported' },
+        requiredFailures: []
       };
     }
 
@@ -629,12 +625,7 @@
         return this.provider.getMainRoot(document);
       }
 
-      return (
-        document.querySelector('main') ||
-        document.querySelector('[role="main"]') ||
-        document.querySelector('#__next') ||
-        document.body
-      );
+      return document.body || null;
     }
 
     getMessageNodes() {
@@ -657,8 +648,9 @@
 
       if (messages && messages.length > 0) {
         if (!this._loggedSelector) {
-          this._loggedSelector = 'provider-adapter-messages';
-          console.log(`CPO: Found ${messages.length} messages using ${this.provider?.name || 'ChatGPT'} adapter`);
+          const compatibility = this.getCompatibilityDiagnostics();
+          this._loggedSelector = compatibility.messages.selector || compatibility.messages.signalKey || 'none';
+          console.log(`CPO: Found ${messages.length} messages using ${this.provider?.name || 'ChatGPT'} adapter (${this._loggedSelector})`);
         }
 
         this._cachedMessages = messages;
@@ -681,21 +673,7 @@
         return this.provider.normalizeMessageNode(node, mainRoot);
       }
 
-      if (!node || !mainRoot.contains(node)) return null;
-      if (node.closest('#cpo-root')) return null;
-      if (node.classList && node.classList.contains('cpo-more-banner')) return null;
-
-      const turn =
-        node.closest('[data-testid^="conversation-turn"]') ||
-        node.closest('[data-testid*="conversation-turn"]') ||
-        node.closest('article') ||
-        node.closest('[data-message-id]');
-
-      if (turn && mainRoot.contains(turn)) {
-        return turn;
-      }
-
-      return node;
+      return null;
     }
 
     isValidMessageNode(node, mainRoot) {
@@ -703,37 +681,7 @@
         return this.provider.isValidMessageNode(node, mainRoot);
       }
 
-      if (!node || !mainRoot.contains(node)) return false;
-      if (node.closest('#cpo-root')) return false;
-      if (node.classList && node.classList.contains('cpo-more-banner')) return false;
-
-      const tag = node.tagName ? node.tagName.toLowerCase() : '';
-
-      if (['script', 'style', 'nav', 'aside', 'header', 'footer'].includes(tag)) {
-        return false;
-      }
-
-      if (node.querySelector('textarea, input[type="text"], input:not([type]), form')) {
-        const text = node.textContent.trim();
-        if (text.length < 80) return false;
-      }
-
-      const text = node.textContent.trim();
-
-      if (text.length < 1) return false;
-
-      const hasMessageMarker =
-        (typeof node.matches === 'function' && (
-          node.matches('[data-testid^="conversation-turn"]') ||
-          node.matches('[data-testid*="conversation-turn"]') ||
-          node.matches('article') ||
-          node.matches('[data-message-id]')
-        )) ||
-        !!node.querySelector('[data-message-author-role], [data-message-id]');
-
-      if (!hasMessageMarker) return false;
-
-      return true;
+      return false;
     }
 
     getFallbackMessages(mainRoot = this.getMainRoot()) {
@@ -749,24 +697,7 @@
         return this.provider.isValidFallbackNode(node, mainRoot);
       }
 
-      if (!node || !mainRoot.contains(node)) return false;
-      if (node.closest('#cpo-root')) return false;
-      if (node.classList && node.classList.contains('cpo-more-banner')) return false;
-
-      const text = node.textContent.trim();
-      if (text.length < 15) return false;
-
-      if (node.querySelector('textarea, input, form')) return false;
-
-      const hasContent =
-        node.querySelector('p, pre, code, ul, ol, h1, h2, h3, h4, h5, h6, [data-message-author-role]') ||
-        (typeof node.matches === 'function' && (
-          node.matches('article') ||
-          node.matches('[data-message-id]') ||
-          node.matches('[data-testid*="conversation-turn"]')
-        ));
-
-      return !!hasContent;
+      return false;
     }
 
     sortMessagesByPosition(messages) {
@@ -830,10 +761,6 @@
       if (!containsAll || !container) {
         const candidates = [
           this.getMainRoot(),
-          document.querySelector('main'),
-          document.querySelector('[role="main"]'),
-          messages[0].closest('main'),
-          messages[0].closest('[role="main"]'),
           messages[0].parentElement
         ].filter(Boolean);
 
