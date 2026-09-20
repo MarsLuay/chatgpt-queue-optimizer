@@ -241,14 +241,51 @@
         }
 
         #status-indicator {
-            display: none;
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
             background: var(--status-bg);
             color: var(--status-text);
             padding: 7px;
             border-radius: 10px;
             font-size: 11px;
             border: 1px solid var(--status-border);
-            text-align: center;
+            text-align: left;
+            line-height: 1.35;
+            overflow-wrap: anywhere;
+        }
+
+        #status-indicator[hidden] {
+            display: none;
+        }
+
+        #status-indicator.popup-status-error,
+        #status-indicator.popup-status-warning {
+            background: var(--disabled-bg);
+            color: var(--disabled-text);
+            border-color: var(--disabled-border);
+        }
+
+        .popup-status-message {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .popup-status-dismiss {
+            flex: 0 0 auto;
+            width: auto;
+            padding: 3px 6px;
+            background: transparent;
+            color: inherit;
+            border: 1px solid currentColor;
+            font-size: 10px;
+            line-height: 1.1;
+        }
+
+        .popup-status-dismiss:hover,
+        .popup-status-dismiss:focus-visible {
+            background: color-mix(in srgb, currentColor 12%, transparent);
+            color: inherit;
         }
 
         .queue-control-panel,
@@ -905,9 +942,7 @@
         </div>
 
         <div id="queue-tool-panel" class="tool-panel active">
-            <div id="status-indicator">
-                Automation running...
-            </div>
+            <div id="status-indicator" class="popup-status" role="status" aria-live="polite" aria-atomic="true" hidden></div>
 
             <div class="form-group">
                 <div class="queue-control-panel">

@@ -1,3 +1,74 @@
+function getPopupQueueStatusLabel(job = {}) {
+    const status = String(job.status || '').trim().toLowerCase();
+    const phase = String(job.currentPhase || '').trim().toLowerCase();
+
+    if (
+        ['complete', 'completed', 'done', 'finished'].includes(status) ||
+        ['complete', 'completed', 'done', 'finished'].includes(phase)
+    ) {
+        return 'Complete';
+    }
+
+    if (['failed', 'error'].includes(status) || ['failed', 'error'].includes(phase)) {
+        return 'Failed';
+    }
+
+    if (job.isPaused || status === 'paused') {
+        return 'Paused';
+    }
+
+    if (['retrying', 'retry-wait', 'retry_wait'].includes(status) || ['retrying', 'retry-wait', 'retry_wait'].includes(phase)) {
+        return 'Retrying';
+    }
+
+    if (job.waitForIdleBeforeSend || ['waiting-for-idle', 'wait-for-idle', 'waiting_idle'].includes(phase)) {
+        return 'Waiting for idle';
+    }
+
+    if (['waiting', 'wait'].includes(phase)) {
+        return 'Waiting';
+    }
+
+    if (['sending', 'send'].includes(phase)) {
+        return 'Sending';
+    }
+
+    if (phase === 'queued') {
+        return 'Queued';
+    }
+
+    if (status === 'stopped') {
+        return 'Stopped';
+    }
+
+    return 'Running';
+}
+
+function formatPopupRunningInstanceText(tabTitle, job = {}) {
+    const title = String(tabTitle || 'Supported tab');
+    const status = getPopupQueueStatusLabel(job);
+    const totalMessages = Number(job.totalMessages || 0);
+    const completedCount = Number(job.completedCount || 0);
+    const progress = totalMessages > 0 ? ` | Done: ${completedCount}/${totalMessages}` : '';
+    const commandNumber = Number(job.currentCommandNumber || 0);
+    const commandProgress = commandNumber > 0 && totalMessages > 0
+        ? ` | Command: ${commandNumber}/${totalMessages}`
+        : '';
+    const nextPreview = job.nextMessagePreview ? ` | Next: ${job.nextMessagePreview}` : '';
+    const errorMessage = job.lastError || job.pausedReason || '';
+    const errorPreview = errorMessage ? ` | Error: ${errorMessage}` : '';
+    const remaining = job.remaining ?? 0;
+
+    return `${title} | ${status}${progress}${commandProgress} | Remaining: ${remaining}${nextPreview}${errorPreview}`;
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+        formatPopupRunningInstanceText,
+        getPopupQueueStatusLabel
+    };
+}
+
 document.addEventListener('DOMContentLoaded', function () {
     const queueToolTab = document.getElementById('queue-tool-tab');
     const scheduledToolTab = document.getElementById('scheduled-tool-tab');
@@ -77,6 +148,9 @@ document.addEventListener('DOMContentLoaded', function () {
     let lastOptimizerLogSignature = '';
     let lastOptimizerLogAt = 0;
     let scheduledStatusTimer = null;
+    let popupStatusTimer = null;
+    let activePopupStatus = null;
+    let dismissedPopupStatusKey = '';
 
     const EDIT_SEQUENCE_VALUE = '__edit_selected_sequence__';
     let selectedSequenceName = '';
@@ -304,7 +378,12 @@ document.addEventListener('DOMContentLoaded', function () {
         if (request.action === 'automationPaused') {
             refreshRunningJobsStatus();
             refreshQueueLog();
-            showTempStatus(`Queue paused: ${request.error || 'ChatGPT failed.'}`);
+            showPopupStatus(`Queue paused: ${request.error || 'ChatGPT failed.'}`, {
+                kind: 'error',
+                persistent: true,
+                source: 'queue',
+                key: `queue:${request.tabId || 'unknown'}:paused:${request.error || 'ChatGPT failed.'}`
+            });
         }
 
         if (request.action === 'queueDebugLogUpdated') {
@@ -504,7 +583,7 @@ document.addEventListener('DOMContentLoaded', function () {
             try {
                 tab = await tabsGet(selectedTabId);
             } catch {
-                alert('Selected tab no longer exists. Refresh the tab list.');
+                showErrorStatus('Selected tab no longer exists. Refresh the tab list.', 'target-tab-missing');
                 await refreshTargetTabs();
                 return null;
             }
@@ -515,7 +594,10 @@ document.addEventListener('DOMContentLoaded', function () {
                 const chatgptTabs = await getAllChatGPTTabs();
 
                 if (chatgptTabs.length === 0) {
-                    alert('No supported tab is open. Open chatgpt.com, gemini.google.com, or claude.ai, then try again.');
+                    showErrorStatus(
+                        'No supported tab is open. Open chatgpt.com, gemini.google.com, or claude.ai, then try again.',
+                        'target-tab-none'
+                    );
                     return null;
                 }
 
@@ -529,12 +611,15 @@ document.addEventListener('DOMContentLoaded', function () {
         }
 
         if (!tab || !tab.id) {
-            alert('Could not find the selected tab.');
+            showErrorStatus('Could not find the selected tab.', 'target-tab-unavailable');
             return null;
         }
 
         if (!isSupportedProviderUrl(getTabUrl(tab))) {
-            alert('Select a ChatGPT, Gemini, or Claude tab before starting or adding to the queue.');
+            showErrorStatus(
+                'Select a ChatGPT, Gemini, or Claude tab before starting or adding to the queue.',
+                'target-tab-unsupported'
+            );
             return null;
         }
 
@@ -659,7 +744,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 tabId: tab.id
             }, function (response) {
                 if (chrome.runtime.lastError) {
-                    alert(chrome.runtime.lastError.message || 'Could not stop sequence.');
+                    showErrorStatus(chrome.runtime.lastError.message || 'Could not stop sequence.', 'stop-sequence-error');
                     return;
                 }
 
@@ -667,7 +752,7 @@ document.addEventListener('DOMContentLoaded', function () {
                     showTempStatus(`Stopped sequence on "${cleanTabTitle(tab.title)}".`);
                     refreshRunningJobsStatus();
                 } else {
-                    alert(response?.error || 'Could not stop sequence.');
+                    showErrorStatus(response?.error || 'Could not stop sequence.');
                 }
             });
 
@@ -675,7 +760,7 @@ document.addEventListener('DOMContentLoaded', function () {
         }
 
         if (messages.length === 0) {
-            alert('No sequence messages to send. Open "Make a sequence" and add messages first.');
+            showErrorStatus('No sequence messages to send. Open "Make a sequence" and add messages first.', 'sequence-empty');
             return;
         }
 
@@ -688,7 +773,7 @@ document.addEventListener('DOMContentLoaded', function () {
             tabId: tab.id
         }, function (response) {
             if (chrome.runtime.lastError) {
-                alert(chrome.runtime.lastError.message || 'Could not start sequence.');
+                showErrorStatus(chrome.runtime.lastError.message || 'Could not start sequence.', 'start-sequence-error');
                 return;
             }
 
@@ -696,7 +781,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 showTempStatus(`Started sequence on "${cleanTabTitle(tab.title)}".`);
                 refreshRunningJobsStatus();
             } else {
-                alert(response?.error || 'Could not start sequence.');
+                showErrorStatus(response?.error || 'Could not start sequence.');
             }
         });
     });
@@ -705,7 +790,7 @@ document.addEventListener('DOMContentLoaded', function () {
         const rawMessage = queueMessageInput.value.trim();
 
         if (!rawMessage) {
-            alert('Type a message in the "Send message next" box.');
+            showErrorStatus('Type a message in the "Send message next" box.', 'enqueue-message-empty');
             return;
         }
 
@@ -723,7 +808,7 @@ document.addEventListener('DOMContentLoaded', function () {
             message: resolvedMessage
         }, function (response) {
             if (chrome.runtime.lastError) {
-                alert(chrome.runtime.lastError.message || 'Could not add message to queue.');
+                showErrorStatus(chrome.runtime.lastError.message || 'Could not add message to queue.', 'enqueue-message-error');
                 return;
             }
 
@@ -740,7 +825,7 @@ document.addEventListener('DOMContentLoaded', function () {
                     showTempStatus(`Message will send next on "${cleanTabTitle(tab.title)}".`);
                 }
             } else {
-                alert(response?.error || 'Could not add message to queue.');
+                showErrorStatus(response?.error || 'Could not add message to queue.');
             }
         });
     });
@@ -750,7 +835,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
         chrome.runtime.sendMessage({ action: 'getRunningJobs' }, function (response) {
             if (chrome.runtime.lastError) {
-                alert(chrome.runtime.lastError.message || 'Could not read running jobs.');
+                showErrorStatus(chrome.runtime.lastError.message || 'Could not read running jobs.', 'running-jobs-error');
                 return;
             }
 
@@ -803,7 +888,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 await copyTextToClipboard(text);
                 showTempStatus('Queue log copied.');
             } catch {
-                alert('Could not copy queue log.');
+                showErrorStatus('Could not copy queue log.', 'copy-queue-log-error');
             }
         });
     }
@@ -812,12 +897,12 @@ document.addEventListener('DOMContentLoaded', function () {
         clearQueueLogButton.addEventListener('click', function () {
             chrome.runtime.sendMessage({ action: 'clearQueueDebugLogs' }, function (response) {
                 if (chrome.runtime.lastError) {
-                    alert(chrome.runtime.lastError.message || 'Could not clear queue log.');
+                    showErrorStatus(chrome.runtime.lastError.message || 'Could not clear queue log.', 'clear-queue-log-error');
                     return;
                 }
 
                 if (!response || !response.ok) {
-                    alert(response?.error || 'Could not clear queue log.');
+                    showErrorStatus(response?.error || 'Could not clear queue log.');
                     return;
                 }
 
@@ -872,7 +957,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 if (updated === null) return;
 
                 if (!updated.trim()) {
-                    alert('Message cannot be empty.');
+                    showErrorStatus('Message cannot be empty.', 'message-empty');
                     return;
                 }
 
@@ -1094,25 +1179,108 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     }
 
-    function showTempStatus(msg) {
-        const prevChildren = Array.from(statusIndicator.childNodes).map(node => node.cloneNode(true));
-        const prevDisplay = statusIndicator.style.display;
-        const prevBg = statusIndicator.style.background;
-        const prevColor = statusIndicator.style.color;
+    function showPopupStatus(message, options = {}) {
+        const text = String(message || '').trim();
 
-        statusIndicator.textContent = msg;
-        statusIndicator.style.display = 'block';
-        statusIndicator.style.background = 'var(--status-bg)';
-        statusIndicator.style.color = 'var(--status-text)';
+        if (!text) {
+            clearPopupStatus();
+            return;
+        }
 
-        setTimeout(() => {
-            statusIndicator.replaceChildren(...prevChildren.map(node => node.cloneNode(true)));
-            statusIndicator.style.background = prevBg;
-            statusIndicator.style.color = prevColor;
-            statusIndicator.style.display = prevDisplay;
+        const allowedKinds = ['info', 'success', 'warning', 'error'];
+        const kind = allowedKinds.includes(options.kind) ? options.kind : 'info';
+        const persistent = options.persistent === true;
+        const source = options.source || 'action';
+        const key = options.key || `${source}:${kind}:${text}`;
 
-            refreshRunningJobsStatus();
-        }, 2000);
+        if (persistent && dismissedPopupStatusKey === key) {
+            return;
+        }
+
+        if (!persistent && source === 'queue') {
+            dismissedPopupStatusKey = '';
+        }
+
+        if (popupStatusTimer !== null) {
+            clearTimeout(popupStatusTimer);
+            popupStatusTimer = null;
+        }
+
+        activePopupStatus = { key, kind, persistent, source };
+        statusIndicator.className = `popup-status popup-status-${kind}`;
+        statusIndicator.dataset.statusKind = kind;
+        statusIndicator.setAttribute('role', kind === 'error' || kind === 'warning' ? 'alert' : 'status');
+        statusIndicator.setAttribute('aria-live', kind === 'error' || kind === 'warning' ? 'assertive' : 'polite');
+        statusIndicator.setAttribute('aria-atomic', 'true');
+        statusIndicator.replaceChildren();
+
+        const messageElement = document.createElement('span');
+        messageElement.className = 'popup-status-message';
+        messageElement.textContent = text;
+        statusIndicator.appendChild(messageElement);
+
+        if (persistent) {
+            const dismissButton = document.createElement('button');
+            dismissButton.type = 'button';
+            dismissButton.className = 'popup-status-dismiss';
+            dismissButton.textContent = 'Dismiss';
+            dismissButton.setAttribute('aria-label', 'Dismiss status message');
+            dismissButton.addEventListener('click', dismissPopupStatus);
+            statusIndicator.appendChild(dismissButton);
+        }
+
+        statusIndicator.hidden = false;
+
+        const duration = Number(options.duration ?? (persistent ? 0 : 2000));
+        if (!persistent && duration > 0) {
+            popupStatusTimer = setTimeout(() => {
+                if (activePopupStatus?.key === key) {
+                    clearPopupStatus();
+                    refreshRunningJobsStatus();
+                }
+            }, duration);
+        }
+    }
+
+    function showErrorStatus(message, key) {
+        showPopupStatus(message, {
+            kind: 'error',
+            persistent: true,
+            key
+        });
+    }
+
+    function dismissPopupStatus() {
+        if (activePopupStatus?.persistent && activePopupStatus.source === 'queue') {
+            dismissedPopupStatusKey = activePopupStatus.key;
+        }
+
+        clearPopupStatus();
+    }
+
+    function clearPopupStatus({ resetDismissed = false } = {}) {
+        if (popupStatusTimer !== null) {
+            clearTimeout(popupStatusTimer);
+            popupStatusTimer = null;
+        }
+
+        activePopupStatus = null;
+
+        if (resetDismissed) {
+            dismissedPopupStatusKey = '';
+        }
+
+        statusIndicator.hidden = true;
+        statusIndicator.className = 'popup-status';
+        statusIndicator.dataset.statusKind = 'info';
+        statusIndicator.setAttribute('role', 'status');
+        statusIndicator.setAttribute('aria-live', 'polite');
+        statusIndicator.setAttribute('aria-atomic', 'true');
+        statusIndicator.replaceChildren();
+    }
+
+    function showTempStatus(message) {
+        showPopupStatus(message, { kind: 'info', source: 'action', duration: 2000 });
     }
 
     function refreshQueueLog() {
@@ -1279,10 +1447,10 @@ document.addEventListener('DOMContentLoaded', function () {
         chrome.runtime.sendMessage({ action: 'getRunningJobs' }, async function (response) {
             if (chrome.runtime.lastError) {
                 stopAutomationButton.style.display = 'none';
-                statusIndicator.style.display = 'none';
                 setSendSequenceButtonMode(false);
                 updateMessagesToGoFooter({});
                 await renderRunningInstances({});
+                showErrorStatus(chrome.runtime.lastError.message || 'Could not read running jobs.', 'running-jobs-error');
                 return;
             }
 
@@ -1294,9 +1462,10 @@ document.addEventListener('DOMContentLoaded', function () {
 
             if (runningCount === 0) {
                 stopAutomationButton.style.display = 'none';
-                statusIndicator.style.display = 'none';
-                setStatusIndicatorContent('Automation running...');
                 setSendSequenceButtonMode(false);
+                if (activePopupStatus?.source === 'queue') {
+                    clearPopupStatus({ resetDismissed: true });
+                }
                 return;
             }
 
@@ -1305,32 +1474,42 @@ document.addEventListener('DOMContentLoaded', function () {
 
             stopAutomationButton.style.display = 'none';
 
+            if (activePopupStatus?.persistent && activePopupStatus.source !== 'queue') {
+                return;
+            }
+
             if (selectedTabJob) {
                 setSendSequenceButtonMode(true);
 
-                if (selectedTabJob.isPaused) {
-                    setStatusIndicatorContent(`Paused. Remaining: ${selectedTabJob.remaining}`);
-                    statusIndicator.style.background = 'var(--disabled-bg)';
-                    statusIndicator.style.color = 'var(--disabled-text)';
+                if (selectedTabJob.isPaused || selectedTabJob.status === 'failed') {
+                    const reason = selectedTabJob.lastError || selectedTabJob.pausedReason;
+                    const reasonText = reason ? ` ${reason}` : '';
+                    showPopupStatus(`Queue ${getPopupQueueStatusLabel(selectedTabJob).toLowerCase()}. Remaining: ${selectedTabJob.remaining}.${reasonText}`, {
+                        kind: 'error',
+                        persistent: true,
+                        source: 'queue',
+                        key: `queue:${selectedTabId}:paused:${reason || selectedTabJob.remaining}`
+                    });
                 } else {
-                    setStatusIndicatorContent(`Running. Remaining: ${selectedTabJob.remaining}`);
-                    statusIndicator.style.background = 'var(--status-bg)';
-                    statusIndicator.style.color = 'var(--status-text)';
+                    dismissedPopupStatusKey = '';
+                    showPopupStatus(`${getPopupQueueStatusLabel(selectedTabJob)}. Remaining: ${selectedTabJob.remaining}`, {
+                        kind: 'info',
+                        source: 'queue',
+                        duration: 0,
+                        key: `queue:${selectedTabId}:${selectedTabJob.currentPhase || selectedTabJob.status || 'running'}:${selectedTabJob.remaining}`
+                    });
                 }
             } else {
                 setSendSequenceButtonMode(false);
-                setStatusIndicatorContent(`Running on ${runningCount} tab${runningCount === 1 ? '' : 's'}`);
-                statusIndicator.style.background = 'var(--status-bg)';
-                statusIndicator.style.color = 'var(--status-text)';
+                dismissedPopupStatusKey = '';
+                showPopupStatus(`Running on ${runningCount} tab${runningCount === 1 ? '' : 's'}`, {
+                    kind: 'info',
+                    source: 'queue',
+                    duration: 0,
+                    key: `queue:all:${runningCount}`
+                });
             }
-
-            statusIndicator.style.display = 'block';
         });
-    }
-
-    function setStatusIndicatorContent(text) {
-        statusIndicator.replaceChildren();
-        statusIndicator.appendChild(document.createTextNode(text || ''));
     }
 
     async function getSelectedTabIdForStatus() {
@@ -1393,14 +1572,7 @@ document.addEventListener('DOMContentLoaded', function () {
             info.className = 'instance-info';
 
             const tabTitle = titleMap[tabId] || 'ChatGPT';
-            const status = job.isPaused ? 'Paused' : 'Running';
-            const totalMessages = Number(job.totalMessages || 0);
-            const completedCount = Number(job.completedCount || 0);
-            const progress = totalMessages > 0 ? ` | Done: ${completedCount}/${totalMessages}` : '';
-            const nextPreview = job.nextMessagePreview ? ` | Next: ${job.nextMessagePreview}` : '';
-            const errorPreview = job.lastError ? ` | Error: ${job.lastError}` : '';
-
-            info.textContent = `${tabTitle} | ${status}${progress} | Remaining: ${job.remaining}${nextPreview}${errorPreview}`;
+            info.textContent = formatPopupRunningInstanceText(tabTitle, job);
 
             const controls = document.createElement('div');
             controls.style.display = 'flex';
@@ -1422,7 +1594,7 @@ document.addEventListener('DOMContentLoaded', function () {
                         if (response && response.ok) {
                             showTempStatus(`Retry requested for "${tabTitle}".`);
                         } else {
-                            alert(response?.error || 'Could not retry paused queue.');
+                            showErrorStatus(response?.error || 'Could not retry paused queue.');
                         }
 
                         refreshRunningJobsStatus();
@@ -1518,7 +1690,7 @@ The sequence should do the following: `;
                 await copyTextToClipboard(promptText);
                 showTempStatus('Prompt copied to clipboard.');
             } catch {
-                alert('Copy failed. Please try again.');
+                showErrorStatus('Copy failed. Please try again.', 'copy-prompt-error');
             }
         });
     }
@@ -1628,7 +1800,10 @@ The sequence should do the following: `;
             const importedSequence = parseImportedSequence(importedText);
 
             if (!importedSequence || importedSequence.messages.length === 0) {
-                alert('Import failed. Clipboard must contain a JSON object with name/messages, a JSON array of strings, or one message per line.');
+                showErrorStatus(
+                    'Import failed. Clipboard must contain a JSON object with name/messages, a JSON array of strings, or one message per line.',
+                    'import-sequence-error'
+                );
                 return;
             }
 
