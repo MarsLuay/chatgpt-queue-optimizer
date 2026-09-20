@@ -93,6 +93,7 @@ const {
     refreshChatGPTTab,
     waitForTabToRecover,
     waitForTabResponse,
+    classifyQueueFailure,
     QUEUE_SETTINGS_DEFAULTS,
     jobs
 } = require('../background.js');
@@ -891,6 +892,9 @@ test('ChatGPTAdapter detects delivery timeout distinct from generic errors', () 
     assert.equal(state1.hasError, true);
     assert.equal(state1.matchedError, 'Message delivery timed out. Please try again.');
     assert.equal(state1.generating, false);
+    const timeoutClass = classifyQueueFailure('wait', state1.matchedError, { state: state1 });
+    assert.equal(timeoutClass.class, 'timeout');
+    assert.equal(timeoutClass.retryable, true);
 
     // 2. Delivery timeout inside the latest turn
     const { doc: doc2 } = createTestDoc({
@@ -1301,6 +1305,57 @@ test('Durable state and settings preserve deliveryTimeoutAttempts and defaults',
     assert.equal(restored.length, 1);
     assert.equal(restored[0].deliveryTimeoutAttempts, 2);
 
+    jobs.clear();
+});
+
+test('waitForTabResponse keeps Deep Research finite unless unlimited retry is enabled', async () => {
+    const tabId = 702;
+    mockTabs.set(tabId, {
+        id: tabId,
+        url: 'https://chatgpt.com/c/deep-research-wait',
+        onMessage: (message) => {
+            if (message.type === 'CHECK_GENERATION_STATE') {
+                return {
+                    state: {
+                        generating: false,
+                        deepResearchActive: true,
+                        researchStatusPreview: 'Deep research is searching sources',
+                        hasError: false,
+                        hasTryAgainButton: false
+                    }
+                };
+            }
+            return { ok: true };
+        }
+    });
+
+    jobs.set(tabId, {
+        tabId,
+        isRunning: true,
+        isPaused: false,
+        isStopped: false,
+        currentPhase: 'waiting'
+    });
+
+    const waitResult = await waitForTabResponse(tabId, {
+        commandNumber: 1,
+        totalMessages: 1,
+        queueSettings: {
+            queueUnlimitedRetryWait: false,
+            queueDeepResearchAware: true
+        },
+        maxWaitMs: 80,
+        deepResearchMaxWaitMs: 180,
+        deepResearchStaleMs: 1000,
+        checkIntervalMs: 20
+    });
+
+    assert.equal(waitResult.ok, false);
+    assert.match(waitResult.error, /Deep Research|timed out/i);
+    assert.equal(waitResult.details.sawDeepResearch, true);
+
+    const classified = classifyQueueFailure('wait', waitResult.error, waitResult.details);
+    assert.equal(classified.retryable, true);
     jobs.clear();
 });
 

@@ -10,6 +10,29 @@ const QUEUE_SETTINGS_DEFAULTS = {
     queueDeliveryTimeoutRefresh: true
 };
 const UNLIMITED_RETRY_DELAY_MS = 15000;
+/** @type {QueueRetryPolicy} */
+const QUEUE_RETRY_POLICY = {
+    maxAutomaticAttempts: 3,
+    backoffBaseMs: 2000,
+    backoffFactor: 2,
+    backoffMaxMs: 30000,
+    unlimitedDelayMs: UNLIMITED_RETRY_DELAY_MS,
+    sleepSliceMs: 250
+};
+/** @type {QueueWaitPolicy} */
+const QUEUE_WAIT_POLICY = {
+    responseMaxWaitMs: 10 * 60 * 1000,
+    deepResearchMaxWaitMs: 45 * 60 * 1000,
+    deepResearchStaleMs: 5 * 60 * 1000,
+    checkIntervalMs: 1000
+};
+const RETRYABLE_FAILURE_CLASSES = new Set([
+    'transient',
+    'generation-error',
+    'retry-visible',
+    'timeout',
+    'stalled-research'
+]);
 const QUEUE_WAKE_ALARM_NAME = 'queue-wake';
 const QUEUE_WAKE_ALARM_PERIOD_MINUTES = 0.5;
 const QUEUE_STATE_COALESCE_DELAY_MS = 50;
@@ -480,6 +503,17 @@ function restoreDurableJobs(durableJobs) {
             currentPhase: rawJob.currentPhase || (rawJob.waitForIdleBeforeSend ? 'waiting-for-idle' : (currentMessage ? 'waiting' : 'queued')),
             waitForIdleBeforeSend: rawJob.waitForIdleBeforeSend === true,
             deliveryTimeoutAttempts: Number(rawJob.deliveryTimeoutAttempts || 0),
+            retryAttemptCount: Number(rawJob.retryAttemptCount || 0),
+            lastRetryableReason: String(rawJob.lastRetryableReason || ''),
+            retryClass: String(rawJob.retryClass || ''),
+            retryMode: rawJob.retryMode === 'unlimited' ? 'unlimited' : (rawJob.retryMode === 'finite' ? 'finite' : ''),
+            nextRetryDelayMs: Number(rawJob.nextRetryDelayMs || 0),
+            nextRetryAt: Number(rawJob.nextRetryAt || 0),
+            retryExhausted: rawJob.retryExhausted === true,
+            waitStartedAt: Number(rawJob.waitStartedAt || 0),
+            lastResearchProgressAt: Number(rawJob.lastResearchProgressAt || 0),
+            sawDeepResearch: rawJob.sawDeepResearch === true,
+            sawGenerating: rawJob.sawGenerating === true,
             startedAt: Number(rawJob.startedAt || Date.now()),
             updatedAt: Number(rawJob.updatedAt || Date.now())
         };
@@ -490,7 +524,7 @@ function restoreDurableJobs(durableJobs) {
             job.currentCommandNumber = Number(job.completedCount || 0) + 1;
         }
 
-        if (job.currentPhase === 'sending' || job.currentPhase === 'retry-wait') {
+        if (job.currentPhase === 'sending') {
             logQueueEvent(tabId, 'warn', 'Recovered a command that was not confirmed submitted; retrying it.', {
                 phase: job.currentPhase,
                 commandNumber: job.currentCommandNumber || 0,
@@ -501,6 +535,7 @@ function restoreDurableJobs(durableJobs) {
             job.currentMessage = null;
             job.currentCommandNumber = 0;
             job.currentPhase = 'queued';
+            resetWaitTracking(job);
         }
 
         jobs.set(tabId, job);
@@ -682,6 +717,17 @@ function handleStartSequence(request, sendResponse) {
             currentPhase: waitForIdleBeforeStart ? 'waiting-for-idle' : 'queued',
             waitForIdleBeforeSend: waitForIdleBeforeStart,
             deliveryTimeoutAttempts: 0,
+            retryAttemptCount: 0,
+            lastRetryableReason: '',
+            retryClass: '',
+            retryMode: '',
+            nextRetryDelayMs: 0,
+            nextRetryAt: 0,
+            retryExhausted: false,
+            waitStartedAt: 0,
+            lastResearchProgressAt: 0,
+            sawDeepResearch: false,
+            sawGenerating: false,
             startedAt: Date.now(),
             updatedAt: Date.now()
         });
@@ -791,6 +837,17 @@ async function startNewJobFromEnqueueResult(tabId, message, waitForIdleBeforeSta
         currentPhase: waitForIdleBeforeStart ? 'waiting-for-idle' : 'queued',
         waitForIdleBeforeSend: waitForIdleBeforeStart,
         deliveryTimeoutAttempts: 0,
+        retryAttemptCount: 0,
+        lastRetryableReason: '',
+        retryClass: '',
+        retryMode: '',
+        nextRetryDelayMs: 0,
+        nextRetryAt: 0,
+        retryExhausted: false,
+        waitStartedAt: 0,
+        lastResearchProgressAt: 0,
+        sawDeepResearch: false,
+        sawGenerating: false,
         startedAt: Date.now(),
         updatedAt: Date.now()
     });
@@ -953,6 +1010,8 @@ function handleRetryPausedJob(request, sendResponse) {
     job.lastError = '';
     job.currentPhase = 'queued';
     job.updatedAt = Date.now();
+    resetCommandRetryState(job);
+    resetWaitTracking(job);
 
     logQueueEvent(tabId, 'info', 'Retrying paused queue.', {
         completedCount: job.completedCount || 0,
@@ -1024,6 +1083,12 @@ async function processQueue(tabId) {
         while (job.isRunning && !job.isPaused && !job.isStopped) {
             if (job.currentMessage && job.currentPhase === 'waiting') {
                 const result = await handleProcessWaiting(tabId, job);
+                if (result.action === 'return') return;
+                if (result.action === 'continue') continue;
+            }
+
+            if (job.currentMessage && job.currentPhase === 'retry-wait') {
+                const result = await handleProcessRetryWait(tabId, job);
                 if (result.action === 'return') return;
                 if (result.action === 'continue') continue;
             }
@@ -1148,8 +1213,10 @@ async function handleProcessWaiting(tabId, job) {
             return { action: 'continue' };
         }
 
-        pauseJob(tabId, waitResult.error || 'ChatGPT response failed.', {
+        pauseJob(tabId, job.lastError || waitResult.error || 'ChatGPT response failed.', {
             phase: 'wait',
+            retryClass: job.retryClass || '',
+            retryAttemptCount: Number(job.retryAttemptCount || 0),
             diagnostics: waitResult.details || {}
         });
         return { action: 'return' };
@@ -1176,6 +1243,27 @@ function handleProcessRecovered(tabId, job) {
     job.currentMessage = null;
     job.currentCommandNumber = 0;
     job.currentPhase = 'queued';
+    job.updatedAt = Date.now();
+    updateRunningJobsStorage({ force: true });
+    return { action: 'continue' };
+}
+
+async function handleProcessRetryWait(tabId, job) {
+    const remainingMs = Math.max(0, Number(job.nextRetryAt || 0) - Date.now());
+    const interrupted = await interruptibleSleep(tabId, job, remainingMs);
+
+    if (interrupted || !jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+        return { action: 'return' };
+    }
+
+    if (job.currentMessage) {
+        job.queue.unshift(job.currentMessage);
+        job.currentMessage = null;
+    }
+
+    job.currentCommandNumber = 0;
+    job.currentPhase = 'queued';
+    job.nextRetryAt = 0;
     job.updatedAt = Date.now();
     updateRunningJobsStorage({ force: true });
     return { action: 'continue' };
@@ -1236,6 +1324,7 @@ async function handleProcessSending(tabId, job) {
     job.lastError = '';
     job.currentPhase = 'sending';
     job.updatedAt = Date.now();
+    resetWaitTracking(job);
     const totalMessages = getTotalMessages(job);
     const queueSettings = await getQueueSettings();
 
@@ -1267,8 +1356,10 @@ async function handleProcessSending(tabId, job) {
             return { action: 'continue' };
         }
 
-        pauseJob(tabId, sendResult.error || 'Could not send message to ChatGPT.', {
+        pauseJob(tabId, job.lastError || sendResult.error || 'Could not send message to ChatGPT.', {
             phase: 'send',
+            retryClass: job.retryClass || '',
+            retryAttemptCount: Number(job.retryAttemptCount || 0),
             diagnostics: sendResult.details || {}
         });
         return { action: 'return' };
@@ -1321,8 +1412,10 @@ async function handleProcessSending(tabId, job) {
             return { action: 'continue' };
         }
 
-        pauseJob(tabId, waitResult.error || 'ChatGPT response failed.', {
+        pauseJob(tabId, job.lastError || waitResult.error || 'ChatGPT response failed.', {
             phase: 'wait',
+            retryClass: job.retryClass || '',
+            retryAttemptCount: Number(job.retryAttemptCount || 0),
             diagnostics: waitResult.details || {}
         });
         return { action: 'return' };
@@ -1352,6 +1445,8 @@ function completeCurrentCommand(tabId, job, totalMessages, diagnostics = {}) {
     job.currentPhase = 'queued';
     job.deliveryTimeoutAttempts = 0;
     job.updatedAt = Date.now();
+    resetCommandRetryState(job);
+    resetWaitTracking(job);
     updateRunningJobsStorage({ force: true });
 }
 
@@ -1373,6 +1468,7 @@ function pauseJob(tabId, reason, details = {}) {
     job.lastError = job.pausedReason;
     job.currentPhase = 'paused';
     job.updatedAt = Date.now();
+    resetWaitTracking(job);
 
     logQueueEvent(tabId, 'error', 'Queue paused.', {
         reason: job.pausedReason,
@@ -1395,14 +1491,110 @@ function pauseJob(tabId, reason, details = {}) {
     });
 }
 
-async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnostics = {}) {
-    if (!job || job.isStopped || job.isPaused || !job.isRunning) {
-        return false;
+function resetCommandRetryState(job) {
+    if (!job) return;
+    job.retryAttemptCount = 0;
+    job.lastRetryableReason = '';
+    job.retryClass = '';
+    job.retryMode = '';
+    job.nextRetryDelayMs = 0;
+    job.nextRetryAt = 0;
+    job.retryExhausted = false;
+}
+
+function resetWaitTracking(job) {
+    if (!job) return;
+    job.waitStartedAt = 0;
+    job.lastResearchProgressAt = 0;
+    job.sawDeepResearch = false;
+    job.sawGenerating = false;
+}
+
+function getRetryBackoffDelayMs(attemptCount, unlimited = false) {
+    if (unlimited) {
+        return Math.max(1, Number(QUEUE_RETRY_POLICY.unlimitedDelayMs) || UNLIMITED_RETRY_DELAY_MS);
     }
 
-    const queueSettings = await getQueueSettings();
+    const exponent = Math.max(0, Number(attemptCount) || 0);
+    const delay = Number(QUEUE_RETRY_POLICY.backoffBaseMs) * Math.pow(Number(QUEUE_RETRY_POLICY.backoffFactor) || 2, exponent);
+    const maxDelay = Number(QUEUE_RETRY_POLICY.backoffMaxMs) || delay;
+    return Math.max(1, Math.min(maxDelay, delay));
+}
 
-    if (!queueSettings.queueUnlimitedRetryWait) {
+/**
+ * @param {string} phase
+ * @param {string} [reason]
+ * @param {Record<string, any>} [diagnostics]
+ * @returns {{ class: QueueFailureClass, retryable: boolean, reason: string }}
+ */
+function classifyQueueFailure(phase, reason, diagnostics = {}) {
+    const details = diagnostics && typeof diagnostics === 'object' ? diagnostics : {};
+    const state = details.state && typeof details.state === 'object' ? details.state : {};
+    const message = String(reason || details.error || '');
+    const forcedClass = String(details.failureClass || '');
+
+    let failureClass = forcedClass;
+    if (!failureClass) {
+        if (details.stopped === true || /queue was stopped/i.test(message)) {
+            failureClass = 'user-stop';
+        } else if (details.compatibilityFailure || /compatibility failure/i.test(message)) {
+            failureClass = 'compatibility';
+        } else if (details.stalledResearch === true || /stalled deep research/i.test(message)) {
+            failureClass = 'stalled-research';
+        } else if (state.hasTryAgainButton) {
+            failureClass = 'retry-visible';
+        } else if (state.hasDeliveryTimedOut || /delivery time/i.test(message)) {
+            failureClass = 'timeout';
+        } else if (state.hasError || /chatgpt showed an error|error or retry state/i.test(message)) {
+            failureClass = 'generation-error';
+        } else if (/timed out waiting/i.test(message)) {
+            failureClass = 'timeout';
+        } else if (/could not read|could not inspect|could not send/i.test(message)) {
+            failureClass = 'transient';
+        } else if (/queue was paused/i.test(message)) {
+            failureClass = 'non-retryable';
+        } else if (phase === 'send' || phase === 'wait') {
+            failureClass = 'transient';
+        } else {
+            failureClass = 'non-retryable';
+        }
+    }
+
+    if ((failureClass === 'generation-error' || failureClass === 'retry-visible') && state.hasTryAgainButton) {
+        failureClass = 'retry-visible';
+    }
+
+    const retryable = RETRYABLE_FAILURE_CLASSES.has(failureClass);
+    return {
+        class: failureClass,
+        retryable,
+        reason: message || 'Queue command failed.'
+    };
+}
+
+function getRetryExhaustionReason(job, lastReason) {
+    const attempts = Number(job?.retryAttemptCount || 0);
+    const reason = lastReason || job?.lastRetryableReason || job?.lastError || 'ChatGPT response failed.';
+    return `Automatic retry exhausted after ${attempts} attempt${attempts === 1 ? '' : 's'}: ${reason}`;
+}
+
+async function interruptibleSleep(tabId, job, ms) {
+    const duration = Math.max(0, Number(ms) || 0);
+    const deadline = Date.now() + duration;
+    const sliceMs = Math.max(5, Number(QUEUE_RETRY_POLICY.sleepSliceMs) || 250);
+
+    while (Date.now() < deadline) {
+        if (!jobs.has(tabId) || !job || job.isStopped || job.isPaused || !job.isRunning) {
+            return true;
+        }
+        await sleep(Math.min(sliceMs, deadline - Date.now()));
+    }
+
+    return !jobs.has(tabId) || !job || job.isStopped || job.isPaused || !job.isRunning;
+}
+
+async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnostics = {}) {
+    if (!job || job.isStopped || job.isPaused || !job.isRunning) {
         return false;
     }
 
@@ -1410,15 +1602,58 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
         return false;
     }
 
-    job.lastError = reason || 'Queue command failed.';
+    const classification = classifyQueueFailure(phase, reason, diagnostics);
+    job.retryClass = classification.class;
+    job.lastRetryableReason = classification.reason;
+
+    if (!classification.retryable) {
+        job.lastError = classification.reason;
+        job.updatedAt = Date.now();
+        return false;
+    }
+
+    const queueSettings = await getQueueSettings();
+    const unlimited = queueSettings.queueUnlimitedRetryWait === true;
+    const maxAttempts = unlimited ? Number.POSITIVE_INFINITY : Number(QUEUE_RETRY_POLICY.maxAutomaticAttempts);
+    const attemptCount = Number(job.retryAttemptCount || 0);
+
+    if (attemptCount >= maxAttempts) {
+        job.retryExhausted = true;
+        job.retryMode = unlimited ? 'unlimited' : 'finite';
+        job.lastError = getRetryExhaustionReason(job, classification.reason);
+        job.updatedAt = Date.now();
+        logQueueEvent(tabId, 'error', job.lastError, {
+            phase,
+            retryClass: classification.class,
+            retryAttemptCount: attemptCount,
+            retryMode: job.retryMode,
+            commandNumber: job.currentCommandNumber || 0,
+            completedCount: job.completedCount || 0,
+            totalMessages: getTotalMessages(job),
+            diagnostics
+        });
+        return false;
+    }
+
+    const delayMs = getRetryBackoffDelayMs(attemptCount, unlimited);
+    job.retryAttemptCount = attemptCount + 1;
+    job.retryMode = unlimited ? 'unlimited' : 'finite';
+    job.retryExhausted = false;
+    job.nextRetryDelayMs = delayMs;
+    job.nextRetryAt = Date.now() + delayMs;
+    job.lastError = classification.reason;
     job.currentPhase = 'retry-wait';
     job.updatedAt = Date.now();
+    resetWaitTracking(job);
     updateRunningJobsStorage({ force: true });
 
-    logQueueEvent(tabId, 'warn', `Unlimited retry mode will retry command ${job.currentCommandNumber || '?'}/${getTotalMessages(job)}.`, {
+    logQueueEvent(tabId, 'warn', `${unlimited ? 'Unlimited' : 'Automatic'} retry ${job.retryAttemptCount}${unlimited ? '' : `/${maxAttempts}`} will retry command ${job.currentCommandNumber || '?'}/${getTotalMessages(job)}.`, {
         phase,
-        reason: job.lastError,
-        retryInSeconds: Math.round(UNLIMITED_RETRY_DELAY_MS / 1000),
+        reason: classification.reason,
+        retryClass: classification.class,
+        retryMode: job.retryMode,
+        retryAttemptCount: job.retryAttemptCount,
+        retryInSeconds: Math.round(delayMs / 1000),
         commandNumber: job.currentCommandNumber || 0,
         completedCount: job.completedCount || 0,
         totalMessages: getTotalMessages(job),
@@ -1426,9 +1661,8 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
         diagnostics
     });
 
-    await sleep(UNLIMITED_RETRY_DELAY_MS);
-
-    if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+    const interrupted = await interruptibleSleep(tabId, job, delayMs);
+    if (interrupted || !jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
         return false;
     }
 
@@ -1436,6 +1670,7 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
     job.currentMessage = null;
     job.currentCommandNumber = 0;
     job.currentPhase = 'queued';
+    job.nextRetryAt = 0;
     job.updatedAt = Date.now();
     updateRunningJobsStorage({ force: true });
 
@@ -1936,18 +2171,67 @@ async function sendPromptToSpecificTab(tabId, text) {
 }
 
 async function waitForTabResponse(tabId, context = {}) {
-    const startedAt = Date.now();
     const queueSettings = {
         ...QUEUE_SETTINGS_DEFAULTS,
         ...context.queueSettings
     };
-    const maxWaitMs = queueSettings.queueUnlimitedRetryWait
-        ? Number.POSITIVE_INFINITY
-        : 10 * 60 * 1000;
-    let sawGenerating = false;
-    let sawDeepResearch = false;
+    const liveJob = jobs.get(tabId);
+    const now = Date.now();
+    if (liveJob && !Number(liveJob.waitStartedAt || 0)) {
+        liveJob.waitStartedAt = now;
+        liveJob.updatedAt = now;
+        updateRunningJobsStorage();
+    }
+
+    const startedAt = Number(liveJob?.waitStartedAt) || now;
+    const unlimited = queueSettings.queueUnlimitedRetryWait === true;
+    const ordinaryMaxWaitMs = Number(context.maxWaitMs) > 0
+        ? Number(context.maxWaitMs)
+        : QUEUE_WAIT_POLICY.responseMaxWaitMs;
+    const deepResearchMaxWaitMs = Number(context.deepResearchMaxWaitMs) > 0
+        ? Number(context.deepResearchMaxWaitMs)
+        : QUEUE_WAIT_POLICY.deepResearchMaxWaitMs;
+    const deepResearchStaleMs = Number(context.deepResearchStaleMs) > 0
+        ? Number(context.deepResearchStaleMs)
+        : QUEUE_WAIT_POLICY.deepResearchStaleMs;
+    const checkIntervalMs = Number(context.checkIntervalMs) > 0
+        ? Number(context.checkIntervalMs)
+        : QUEUE_WAIT_POLICY.checkIntervalMs;
+    let sawGenerating = liveJob?.sawGenerating === true;
+    let sawDeepResearch = liveJob?.sawDeepResearch === true;
+    let lastResearchPreview = '';
     let lastProgressLogAt = startedAt;
     const waitLabel = getWaitContextLabel(context);
+
+    const persistWaitSignals = () => {
+        const current = jobs.get(tabId);
+        if (!current) return;
+        current.sawGenerating = sawGenerating;
+        current.sawDeepResearch = sawDeepResearch;
+        current.updatedAt = Date.now();
+        updateRunningJobsStorage();
+    };
+
+    const resolveMaxWaitMs = () => {
+        if (unlimited) return Number.POSITIVE_INFINITY;
+        if (queueSettings.queueDeepResearchAware && sawDeepResearch) {
+            return deepResearchMaxWaitMs;
+        }
+        return ordinaryMaxWaitMs;
+    };
+
+    const buildWaitDetails = (extra = {}) => {
+        const current = jobs.get(tabId);
+        return {
+            elapsedMs: Date.now() - startedAt,
+            sawGenerating,
+            sawDeepResearch,
+            settings: queueSettings,
+            waitStartedAt: startedAt,
+            lastResearchProgressAt: Number(current?.lastResearchProgressAt || 0),
+            ...extra
+        };
+    };
 
     return new Promise((resolveRaw) => {
         let settled = false;
@@ -1960,6 +2244,7 @@ async function waitForTabResponse(tabId, context = {}) {
             if (checkInterval) {
                 clearInterval(checkInterval);
             }
+            persistWaitSignals();
             resolveRaw(value);
         };
         checkInterval = setInterval(() => {
@@ -1974,44 +2259,49 @@ async function waitForTabResponse(tabId, context = {}) {
                 resolve({
                     ok: false,
                     error: 'Queue was stopped.',
-                    details: {
-                        elapsedMs: Date.now() - startedAt,
-                        sawGenerating,
-                        sawDeepResearch,
-                        settings: queueSettings
-                    }
+                    details: buildWaitDetails({ failureClass: 'user-stop' })
                 });
                 return;
             }
 
             if (job.isPaused || !job.isRunning) {
-                clearInterval(checkInterval);
                 resolve({
                     ok: false,
                     error: 'Queue was paused.',
-                    details: {
-                        elapsedMs: Date.now() - startedAt,
-                        sawGenerating,
-                        sawDeepResearch,
-                        settings: queueSettings
-                    }
+                    details: buildWaitDetails({ failureClass: 'non-retryable' })
                 });
                 return;
             }
 
-            if (Date.now() - startedAt > maxWaitMs && !(queueSettings.queueDeepResearchAware && sawDeepResearch)) {
-                clearInterval(checkInterval);
+            const maxWaitMs = resolveMaxWaitMs();
+            if (Date.now() - startedAt > maxWaitMs) {
+                const researchTimeout = queueSettings.queueDeepResearchAware && sawDeepResearch;
                 resolve({
                     ok: false,
-                    error: 'Timed out waiting for ChatGPT response.',
-                    details: {
-                        elapsedMs: Date.now() - startedAt,
-                        sawGenerating,
-                        sawDeepResearch,
-                        settings: queueSettings
-                    }
+                    error: researchTimeout
+                        ? 'Timed out waiting for Deep Research to finish.'
+                        : 'Timed out waiting for ChatGPT response.',
+                    details: buildWaitDetails({
+                        failureClass: 'timeout',
+                        timedOut: true
+                    })
                 });
                 return;
+            }
+
+            if (!unlimited && queueSettings.queueDeepResearchAware && sawDeepResearch) {
+                const lastProgressAt = Number(job.lastResearchProgressAt || startedAt);
+                if (Date.now() - lastProgressAt > deepResearchStaleMs) {
+                    resolve({
+                        ok: false,
+                        error: 'Deep Research stalled without progress.',
+                        details: buildWaitDetails({
+                            failureClass: 'stalled-research',
+                            stalledResearch: true
+                        })
+                    });
+                    return;
+                }
             }
 
             try {
@@ -2032,13 +2322,10 @@ async function waitForTabResponse(tabId, context = {}) {
                             ok: false,
                             isDeliveryTimeout: true,
                             error: state.matchedError || 'Message delivery timed out. Please try again.',
-                            details: {
-                                elapsedMs: Date.now() - startedAt,
-                                sawGenerating,
-                                sawDeepResearch,
-                                settings: queueSettings,
+                            details: buildWaitDetails({
+                                failureClass: 'timeout',
                                 state
-                            }
+                            })
                         });
                         return;
                     }
@@ -2049,18 +2336,16 @@ async function waitForTabResponse(tabId, context = {}) {
                             ok: false,
                             isDeliveryTimeout: false,
                             error: 'ChatGPT showed an error or retry state.',
-                            details: {
-                                elapsedMs: Date.now() - startedAt,
-                                sawGenerating,
-                                sawDeepResearch,
-                                settings: queueSettings,
+                            details: buildWaitDetails({
+                                failureClass: state.hasTryAgainButton ? 'retry-visible' : 'generation-error',
                                 state
-                            }
+                            })
                         });
                         return;
                     }
 
                 const deepResearchActive = queueSettings.queueDeepResearchAware && !!state.deepResearchActive;
+                const researchPreview = String(state.researchStatusPreview || '');
 
                 if (deepResearchActive && !sawDeepResearch) {
                     logQueueEvent(tabId, 'info', `Deep research activity detected for ${waitLabel}.`, {
@@ -2068,12 +2353,14 @@ async function waitForTabResponse(tabId, context = {}) {
                         totalMessages: context.totalMessages || 0,
                         elapsedMs: Date.now() - startedAt,
                         matchedResearchMarker: state.matchedResearchMarker || '',
-                        researchStatusPreview: state.researchStatusPreview || ''
+                        researchStatusPreview: researchPreview
                     });
+                    lastResearchPreview = researchPreview;
+                    job.lastResearchProgressAt = Date.now();
                 }
 
                 if (state.generating || deepResearchActive) {
-                    if (!sawGenerating) {
+                    if (!sawGenerating && state.generating) {
                         logQueueEvent(tabId, 'info', `ChatGPT is responding for ${waitLabel}.`, {
                             commandNumber: context.commandNumber || 0,
                             totalMessages: context.totalMessages || 0,
@@ -2084,6 +2371,15 @@ async function waitForTabResponse(tabId, context = {}) {
 
                     sawGenerating = sawGenerating || !!state.generating;
                     sawDeepResearch = sawDeepResearch || deepResearchActive;
+                    job.sawGenerating = sawGenerating;
+                    job.sawDeepResearch = sawDeepResearch;
+
+                    if (state.generating || researchPreview !== lastResearchPreview) {
+                        job.lastResearchProgressAt = Date.now();
+                        lastResearchPreview = researchPreview;
+                    }
+
+                    persistWaitSignals();
 
                     if (Date.now() - lastProgressLogAt > 30000) {
                         logQueueEvent(tabId, 'info', `Still waiting for ${waitLabel}.`, {
@@ -2181,13 +2477,10 @@ async function waitForTabResponse(tabId, context = {}) {
                     resolve({
                         ok: false,
                         error: executionError.message || 'Could not read ChatGPT tab.',
-                        details: {
-                            elapsedMs: Date.now() - startedAt,
-                            sawGenerating,
-                            sawDeepResearch,
-                            settings: queueSettings,
+                        details: buildWaitDetails({
+                            failureClass: 'transient',
                             error: serializeError(executionError)
-                        }
+                        })
                     });
                 });
             } catch (error) {
@@ -2195,16 +2488,13 @@ async function waitForTabResponse(tabId, context = {}) {
                 resolve({
                     ok: false,
                     error: error?.message || 'Could not inspect ChatGPT response state.',
-                    details: {
-                        elapsedMs: Date.now() - startedAt,
-                        sawGenerating,
-                        sawDeepResearch,
-                        settings: queueSettings,
+                    details: buildWaitDetails({
+                        failureClass: 'transient',
                         error: serializeError(error)
-                    }
+                    })
                 });
             }
-        }, 1000);
+        }, checkIntervalMs);
     });
 }
 
@@ -2236,7 +2526,7 @@ function getRunningJobsSnapshot() {
             conversationType,
             targetKey,
             remaining: getRemainingCount(job),
-            pending: job.queue.length,
+            pending: Array.isArray(job.queue) ? job.queue.length : 0,
             isRunning: job.isRunning,
             isPaused: job.isPaused,
             isStopped: job.isStopped,
@@ -2245,7 +2535,7 @@ function getRunningJobsSnapshot() {
             lastError: job.lastError || '',
             currentMessage: job.currentMessage || '',
             currentMessagePreview: previewText(job.currentMessage || ''),
-            nextMessagePreview: previewText(job.queue[0] || ''),
+            nextMessagePreview: previewText((Array.isArray(job.queue) ? job.queue[0] : '') || ''),
             runId: job.runId || '',
             totalMessages: getTotalMessages(job),
             completedCount: job.completedCount || 0,
@@ -2253,6 +2543,17 @@ function getRunningJobsSnapshot() {
             currentPhase: job.currentPhase || '',
             waitForIdleBeforeSend: job.waitForIdleBeforeSend === true,
             deliveryTimeoutAttempts: Number(job.deliveryTimeoutAttempts || 0),
+            retryAttemptCount: Number(job.retryAttemptCount || 0),
+            lastRetryableReason: job.lastRetryableReason || '',
+            retryClass: job.retryClass || '',
+            retryMode: job.retryMode || '',
+            nextRetryDelayMs: Number(job.nextRetryDelayMs || 0),
+            nextRetryAt: Number(job.nextRetryAt || 0),
+            retryExhausted: job.retryExhausted === true,
+            waitStartedAt: Number(job.waitStartedAt || 0),
+            lastResearchProgressAt: Number(job.lastResearchProgressAt || 0),
+            sawDeepResearch: job.sawDeepResearch === true,
+            sawGenerating: job.sawGenerating === true,
             startedAt: job.startedAt,
             updatedAt: job.updatedAt
         };
@@ -2262,7 +2563,8 @@ function getRunningJobsSnapshot() {
 }
 
 function getRemainingCount(job) {
-    return job.queue.length + (job.currentMessage ? 1 : 0);
+    const queued = Array.isArray(job?.queue) ? job.queue.length : 0;
+    return queued + (job?.currentMessage ? 1 : 0);
 }
 
 function getTotalMessages(job) {
@@ -2397,6 +2699,17 @@ function getDurableJobsState() {
             currentPhase: job.currentPhase || 'queued',
             waitForIdleBeforeSend: job.waitForIdleBeforeSend === true,
             deliveryTimeoutAttempts: Number(job.deliveryTimeoutAttempts || 0),
+            retryAttemptCount: Number(job.retryAttemptCount || 0),
+            lastRetryableReason: job.lastRetryableReason || '',
+            retryClass: job.retryClass || '',
+            retryMode: job.retryMode || '',
+            nextRetryDelayMs: Number(job.nextRetryDelayMs || 0),
+            nextRetryAt: Number(job.nextRetryAt || 0),
+            retryExhausted: job.retryExhausted === true,
+            waitStartedAt: Number(job.waitStartedAt || 0),
+            lastResearchProgressAt: Number(job.lastResearchProgressAt || 0),
+            sawDeepResearch: job.sawDeepResearch === true,
+            sawGenerating: job.sawGenerating === true,
             startedAt: job.startedAt,
             updatedAt: job.updatedAt
         };
@@ -3309,7 +3622,15 @@ if (typeof module !== 'undefined' && module.exports) {
         refreshChatGPTTab,
         waitForTabToRecover,
         waitForTabResponse,
+        retryCurrentCommandIfEnabled,
+        classifyQueueFailure,
+        getRetryBackoffDelayMs,
+        handleRetryPausedJob,
+        completeCurrentCommand,
         QUEUE_SETTINGS_DEFAULTS,
+        QUEUE_RETRY_POLICY,
+        QUEUE_WAIT_POLICY,
+        UNLIMITED_RETRY_DELAY_MS,
         MAX_QUEUE_DEBUG_LOG_ENTRIES,
         jobs,
         SCHEDULED_MESSAGES_KEY,
