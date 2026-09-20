@@ -235,7 +235,7 @@ test('Gemini enqueue binds provider/tab/conversation identity', async () => {
         source: 'test'
     }, null, (res) => { enqueueResponse = res; });
 
-    await new Promise(r => setTimeout(r, 10));
+    await new Promise(r => { setTimeout(r, 10); });
 
     assert.ok(enqueueResponse && enqueueResponse.ok);
     const job = jobs.get(tabId);
@@ -269,7 +269,7 @@ test('Gemini FIFO enqueue preserves order across multiple messages', async () =>
         messages: ['first', 'second', 'third']
     }, (res) => { startResponse = res; });
 
-    await new Promise(r => setTimeout(r, 20));
+    await new Promise(r => { setTimeout(r, 20); });
 
     assert.ok(startResponse && startResponse.ok);
     const job = jobs.get(tabId);

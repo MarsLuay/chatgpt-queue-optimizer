@@ -106,6 +106,11 @@
       }
     }
 
+    /**
+     * @param {ContentScriptMessage} message
+     * @param {chrome.runtime.MessageSender} sender
+     * @param {(response?: ContentScriptResponse) => void} sendResponse
+     */
     handleMessage(message, sender, sendResponse) {
       switch (message.type) {
         case 'TOGGLE_OPTIMIZER':
