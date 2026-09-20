@@ -18,7 +18,6 @@
             '[data-testid*="composer"]',
             '[data-testid*="prompt"]',
             '[id*="prompt"]',
-            '[role="textbox"]',
             'form'
         ],
         messageContext: CHATGPT_MESSAGE_CONTEXT_SELECTORS,
@@ -29,6 +28,8 @@
             '[aria-label*="Copy"]'
         ],
         weakComposerSelectors: [
+            'textarea',
+            '[contenteditable="true"][role="textbox"]',
             'div[contenteditable="true"]',
             '[contenteditable="true"]'
         ],
@@ -556,6 +557,7 @@
             const requiredFailures = [];
             if (!root.element) requiredFailures.push('mainRoot');
             if (!composer.element) requiredFailures.push('composer');
+            if (!sendAction.element) requiredFailures.push('sendButton');
 
             return {
                 provider: this.id,
@@ -567,7 +569,9 @@
                     count: discovery.nodes.length,
                     selector: discovery.selector,
                     signalKey: discovery.signalKey,
-                    state: isEmptyConversation ? 'empty-conversation' : (discovery.nodes.length > 0 ? 'matched' : 'not-found')
+                    state: requiredFailures.length > 0
+                        ? 'required-signals-missing'
+                        : (isEmptyConversation ? 'empty-conversation' : (discovery.nodes.length > 0 ? 'matched' : 'not-found'))
                 },
                 requiredFailures
             };

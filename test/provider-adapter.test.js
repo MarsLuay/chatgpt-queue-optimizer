@@ -655,6 +655,17 @@ test('ChatGPT compatibility surface resolves canonical controls and rejects unsc
         extraNodes: [new MockTestElement('div', { contenteditable: 'true' })]
     });
     assert.equal(chatgpt.getComposerMatch(missingCanonical).element, null);
+
+    const { doc: unscopedTextarea } = createTestDoc({
+        extraNodes: [new MockTestElement('textarea')]
+    });
+    assert.equal(chatgpt.getComposerMatch(unscopedTextarea).element, null);
+
+    const form = new MockTestElement('form');
+    const fallbackTextarea = new MockTestElement('textarea');
+    form.appendChild(fallbackTextarea);
+    const { doc: scopedTextarea } = createTestDoc({ extraNodes: [form] });
+    assert.equal(chatgpt.getComposerMatch(scopedTextarea).element, fallbackTextarea);
 });
 
 test('ChatGPT compatibility diagnostics distinguish empty conversations from missing controls', () => {
@@ -673,10 +684,15 @@ test('ChatGPT compatibility diagnostics distinguish empty conversations from mis
     assert.equal(JSON.stringify(empty).includes('prompt text'), false);
 
     const missing = chatgpt.getCompatibilityDiagnostics(createTestDoc({}).doc);
-    assert.equal(missing.messages.state, 'not-found');
+    assert.equal(missing.messages.state, 'required-signals-missing');
     assert.equal(missing.composer.matched, false);
     assert.equal(missing.sendAction.matched, false);
-    assert.deepEqual(missing.requiredFailures, ['composer']);
+    assert.deepEqual(missing.requiredFailures, ['composer', 'sendButton']);
+
+    const composerOnly = new MockTestElement('textarea', { id: 'prompt-textarea' });
+    const missingSend = chatgpt.getCompatibilityDiagnostics(createTestDoc({ extraNodes: [composerOnly] }).doc);
+    assert.equal(missingSend.messages.state, 'required-signals-missing');
+    assert.deepEqual(missingSend.requiredFailures, ['sendButton']);
 });
 
 test('ChatGPT message and generation diagnostics report matched canonical signals', () => {
@@ -749,7 +765,10 @@ test('Queued ChatGPT send uses the canonical composer and reports compatibility 
         unrelatedDoc.activeElement = null;
         const unrelated = new MockTestElement('div', { contenteditable: 'true' });
         unrelated.textContent = 'draft';
+        const unrelatedTextarea = new MockTestElement('textarea');
+        unrelatedTextarea.value = 'keep this draft';
         unrelatedDoc.appendChild(unrelated);
+        unrelatedDoc.appendChild(unrelatedTextarea);
         global.document = unrelatedDoc;
 
         const failed = await sendPromptToSpecificTab(901, 'must not send');
@@ -757,6 +776,7 @@ test('Queued ChatGPT send uses the canonical composer and reports compatibility 
         assert.match(failed.error, /compatibility failure: required composer signal/);
         assert.equal(failed.details.compatibilityFailure, 'composer');
         assert.equal(unrelated.textContent, 'draft');
+        assert.equal(unrelatedTextarea.value, 'keep this draft');
     } finally {
         chrome.scripting.executeScript = originalExecuteScript;
         if (originalDocument === undefined) delete global.document;
