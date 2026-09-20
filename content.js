@@ -552,6 +552,7 @@
       this.state.inlineQueueInFlight = true;
       this.state.lastQueuedAt = Date.now();
       this.state.lastQueuedText = text;
+      const queuedText = text;
 
       if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
         try {
@@ -583,7 +584,17 @@
             if (diagnostic) {
               diagnostic.enqueueResult = 'success';
             }
-            this.clearComposer(composer);
+
+            // Only clear the text that was captured for this enqueue. If the
+            // user edited the composer while the background acknowledged the
+            // queue request, keep the newer draft instead of clearing it.
+            const currentText = this.getComposerText(composer);
+            if (currentText === queuedText) {
+              this.clearComposer(composer);
+            } else if (diagnostic) {
+              diagnostic.composerDraftPreserved = true;
+            }
+
             this.showInlineQueueToast('Queued to send after the current response.');
           });
         } catch (err) {

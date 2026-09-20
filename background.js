@@ -2485,6 +2485,91 @@ async function sendPromptToSpecificTab(tabId, text) {
                     };
                 }
 
+                function getComposerText(element) {
+                    if (!element) return '';
+
+                    const tagName = (element.tagName || '').toLowerCase();
+                    if (tagName === 'textarea') {
+                        return String(element.value || '');
+                    }
+
+                    const directText = element.innerText || element.textContent || '';
+                    if (directText) return String(directText);
+
+                    // Lightweight test DOMs do not always maintain a parent's
+                    // textContent after appendChild. Reading child text here
+                    // also matches the browser's contenteditable text.
+                    return Array.from(element.children || [])
+                        .map(child => child.innerText || child.textContent || '')
+                        .join('');
+                }
+
+                function normalizeComposerText(value) {
+                    return String(value || '').replace(/\u200b/g, '').trim();
+                }
+
+                function setComposerText(element, value) {
+                    const nextText = String(value || '');
+                    const tagName = (element.tagName || '').toLowerCase();
+                    element.focus();
+
+                    if (tagName === 'textarea') {
+                        element.value = nextText;
+                    } else {
+                        if (typeof element.replaceChildren === 'function') {
+                            element.replaceChildren();
+                        } else if (Array.isArray(element.children)) {
+                            element.children.length = 0;
+                        }
+                        element.innerText = '';
+                        element.textContent = '';
+                        if (element.classList && typeof element.classList.remove === 'function') {
+                            element.classList.remove('ql-blank');
+                        }
+                        if (nextText) {
+                            const paragraph = document.createElement('p');
+                            paragraph.innerText = nextText;
+                            paragraph.textContent = nextText;
+                            element.appendChild(paragraph);
+                        }
+                    }
+
+                    if (typeof InputEvent === 'function') {
+                        element.dispatchEvent(new InputEvent('input', {
+                            bubbles: true,
+                            inputType: nextText ? 'insertText' : 'deleteContentBackward',
+                            data: nextText || null
+                        }));
+                    }
+                }
+
+                function restoreComposerIfUnchanged(element, originalText, injectedText) {
+                    const currentText = getComposerText(element);
+                    if (normalizeComposerText(currentText) !== normalizeComposerText(injectedText)) {
+                        return {
+                            restored: false,
+                            draftPreserved: true,
+                            currentTextLength: currentText.length
+                        };
+                    }
+
+                    try {
+                        setComposerText(element, originalText);
+                        return {
+                            restored: true,
+                            draftPreserved: false,
+                            currentTextLength: originalText.length
+                        };
+                    } catch {
+                        return {
+                            restored: false,
+                            draftPreserved: false,
+                            restoreFailed: true,
+                            currentTextLength: currentText.length
+                        };
+                    }
+                }
+
                 const inputMatch = findMatch('composer', isComposerCandidate);
                 const input = inputMatch.element;
 
@@ -2494,67 +2579,92 @@ async function sendPromptToSpecificTab(tabId, text) {
                     });
                 }
 
-                input.focus();
-                const tagName = (input.tagName || '').toLowerCase();
-                if (tagName === 'textarea') {
-                    input.value = String(msg || '');
-                } else {
-                    input.textContent = '';
-                    if (input.classList && typeof input.classList.remove === 'function') {
-                        input.classList.remove('ql-blank');
-                    }
-                    const paragraph = document.createElement('p');
-                    paragraph.innerText = msg;
-                    input.appendChild(paragraph);
-                }
-
-                if (typeof InputEvent === 'function') {
-                    input.dispatchEvent(new InputEvent('input', {
-                        bubbles: true,
-                        inputType: 'insertText',
-                        data: msg
-                    }));
-                }
-
-                await sleepInPage(700);
-
-                const sendButtonMatch = findMatch('sendButton', isSendActionCandidate);
-                const sendButton = sendButtonMatch.element;
-
-                if (!sendButton) {
-                    return compatibilityFailure('sendButton', 'required send action signal was not found.', {
+                const originalComposerText = getComposerText(input);
+                if (normalizeComposerText(originalComposerText)) {
+                    return compatibilityFailure('composer', 'canonical composer contains pending user content; queued send deferred to preserve the draft.', {
                         composerSelector: inputMatch.selector,
                         composerSignal: inputMatch.signalKey,
-                        composer: describeElement(input)
-                    });
-                }
-
-                if (sendButton.disabled || sendButton.getAttribute('aria-disabled') === 'true') {
-                    return compatibilityFailure('sendButton', 'send action signal is disabled.', {
-                        composerSelector: inputMatch.selector,
-                        composerSignal: inputMatch.signalKey,
-                        sendButtonSelector: sendButtonMatch.selector,
-                        sendButtonSignal: sendButtonMatch.signalKey,
                         composer: describeElement(input),
-                        sendButton: describeElement(sendButton)
+                        composerConflict: true,
+                        deferred: true,
+                        pendingTextLength: originalComposerText.length
                     });
                 }
 
-                sendButton.click();
+                const queuedText = String(msg || '');
+                let composerWriteStarted = false;
 
-                return {
-                    ok: true,
-                    details: {
+                try {
+                    composerWriteStarted = true;
+                    setComposerText(input, queuedText);
+                    await sleepInPage(700);
+
+                    const currentComposerText = getComposerText(input);
+                    if (normalizeComposerText(currentComposerText) !== normalizeComposerText(queuedText)) {
+                        return compatibilityFailure('composer', 'canonical composer changed while the queued message was pending; send deferred to preserve the draft.', {
+                            composerSelector: inputMatch.selector,
+                            composerSignal: inputMatch.signalKey,
+                            composer: describeElement(input),
+                            composerConflict: true,
+                            deferred: true,
+                            pendingTextLength: currentComposerText.length,
+                            draftPreserved: true
+                        });
+                    }
+
+                    const sendButtonMatch = findMatch('sendButton', isSendActionCandidate);
+                    const sendButton = sendButtonMatch.element;
+
+                    if (!sendButton) {
+                        const restoration = restoreComposerIfUnchanged(input, originalComposerText, queuedText);
+                        return compatibilityFailure('sendButton', 'required send action signal was not found.', {
+                            composerSelector: inputMatch.selector,
+                            composerSignal: inputMatch.signalKey,
+                            composer: describeElement(input),
+                            ...restoration
+                        });
+                    }
+
+                    if (sendButton.disabled || sendButton.getAttribute('aria-disabled') === 'true') {
+                        const restoration = restoreComposerIfUnchanged(input, originalComposerText, queuedText);
+                        return compatibilityFailure('sendButton', 'send action signal is disabled.', {
+                            composerSelector: inputMatch.selector,
+                            composerSignal: inputMatch.signalKey,
+                            sendButtonSelector: sendButtonMatch.selector,
+                            sendButtonSignal: sendButtonMatch.signalKey,
+                            composer: describeElement(input),
+                            sendButton: describeElement(sendButton),
+                            ...restoration
+                        });
+                    }
+
+                    sendButton.click();
+
+                    return {
+                        ok: true,
+                        details: {
+                            composerSelector: inputMatch.selector,
+                            composerSignal: inputMatch.signalKey,
+                            sendButtonSelector: sendButtonMatch.selector,
+                            sendButtonSignal: sendButtonMatch.signalKey,
+                            messageLength: queuedText.length,
+                            url: location.href,
+                            title: document.title,
+                            provider: providerName || ''
+                        }
+                    };
+                } catch (error) {
+                    const restoration = composerWriteStarted
+                        ? restoreComposerIfUnchanged(input, originalComposerText, queuedText)
+                        : { restored: false, draftPreserved: false };
+                    return compatibilityFailure('submission', 'queued message submission failed; the composer draft was preserved when it was safe to restore.', {
                         composerSelector: inputMatch.selector,
                         composerSignal: inputMatch.signalKey,
-                        sendButtonSelector: sendButtonMatch.selector,
-                        sendButtonSignal: sendButtonMatch.signalKey,
-                        messageLength: String(msg || '').length,
-                        url: location.href,
-                        title: document.title,
-                        provider: providerName || ''
-                    }
-                };
+                        composer: describeElement(input),
+                        error: error?.message || 'Unknown submission error',
+                        ...restoration
+                    });
+                }
             },
             args: [text, compatibilityContract, providerName]
         });
