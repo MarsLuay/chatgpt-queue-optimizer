@@ -528,6 +528,8 @@
         hasTryAgainButton: false,
         errorSnippet: '',
         matchedError: '',
+        statusUnknown: true,
+        compatibilityState: 'unknown',
         url: typeof location !== 'undefined' ? location.href : '',
         title: typeof document !== 'undefined' ? document.title : ''
       };

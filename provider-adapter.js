@@ -322,6 +322,38 @@
             };
         }
 
+        nodeContains(ancestor, node) {
+            if (!ancestor || !node) {
+                return false;
+            }
+            if (ancestor === node) {
+                return true;
+            }
+            let current = node;
+            while (current) {
+                if (current === ancestor) {
+                    return true;
+                }
+                current = current.parentElement || current.parentNode || null;
+            }
+            return false;
+        }
+
+        isActiveResponseNode(node, turns, latestTurn) {
+            if (!node) {
+                return false;
+            }
+            for (const turn of turns) {
+                if (turn === latestTurn) {
+                    continue;
+                }
+                if (this.nodeContains(turn, node)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         isComposerElement(element, _details = {}) {
             const tagName = (element?.tagName || '').toLowerCase();
             return tagName === 'textarea' || element?.getAttribute?.('contenteditable') === 'true';
@@ -1004,6 +1036,17 @@
         }
 
         getGenerationState(doc = (typeof document !== 'undefined' ? document : null)) {
+            const emptySignals = {
+                stopButton: null,
+                streaming: null,
+                status: null,
+                spinner: null,
+                research: null,
+                error: null,
+                retry: null,
+                scope: 'active-response',
+                compatibility: 'unknown'
+            };
             if (!doc) {
                 return {
                     generating: false,
@@ -1014,17 +1057,25 @@
                     matchedResearchMarker: null,
                     researchStatusPreview: null,
                     hasError: false,
+                    hasDeliveryTimedOut: false,
                     hasTryAgainButton: false,
                     errorSnippet: '',
                     matchedError: '',
+                    statusUnknown: true,
+                    compatibilityState: 'unknown',
+                    matchedSignals: emptySignals,
                     url: '',
                     title: ''
                 };
             }
 
-            const buttons = Array.from(doc.querySelectorAll('button'));
+            const turns = this.getConversationTurns(doc);
+            const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
+            const inActiveSurface = (node) => this.isActiveResponseNode(node, turns, latestTurn);
+
+            const buttons = Array.from(doc.querySelectorAll('button')).filter(inActiveSurface);
             const stopSelectorMatch = this.getSelectorMatch(doc, 'stopButton', (button) => {
-                return !button.disabled && button.getAttribute('aria-disabled') !== 'true';
+                return inActiveSurface(button) && !button.disabled && button.getAttribute('aria-disabled') !== 'true';
             });
             const semanticStopButton = buttons.find(button => {
                 if (button.disabled || button.getAttribute('aria-disabled') === 'true') {
@@ -1048,33 +1099,21 @@
             const stopButton = stopSelectorMatch.element || semanticStopButton;
             const hasActiveStopButton = !!stopButton;
 
-            const streamingMatch = this.getSelectorMatch(doc, 'streaming');
-            const resultStreaming = streamingMatch.element;
-            const hasResultStreaming = !!resultStreaming;
+            const streamingMatches = this.getSelectorNodes(doc, 'streaming', inActiveSurface);
+            const streamingMatch = streamingMatches[0] || { element: null, selector: '' };
+            const hasResultStreaming = !!streamingMatch.element;
 
-            const statusMatches = this.getSelectorNodes(doc, 'status', (node) => node.getAttribute('aria-live') !== 'off');
-            const statusNodes = statusMatches.map(match => match.element);
+            const statusMatches = this.getSelectorNodes(doc, 'status', (node) => {
+                return inActiveSurface(node) && node.getAttribute('aria-live') !== 'off';
+            });
+            const visibleActiveNodes = statusMatches
+                .map(match => match.element)
+                .filter(node => !node.hidden && node.getAttribute('aria-hidden') !== 'true');
 
-            const turns = this.getConversationTurns(doc);
-            const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
-
-            const latestTurnActiveMatch = latestTurn
-                ? this.getSelectorNodes(latestTurn, 'status', (node) => node.getAttribute('aria-live') !== 'off')[0] ||
-                    this.getSelectorNodes(latestTurn, 'spinner')[0]
-                : null;
-            const latestTurnActiveElement = latestTurnActiveMatch?.element || null;
-
-            const activeNodes = [...statusNodes];
-            if (latestTurnActiveElement && !activeNodes.includes(latestTurnActiveElement)) {
-                activeNodes.push(latestTurnActiveElement);
-            }
-
-            const visibleActiveNodes = activeNodes.filter(node => !node.hidden && node.getAttribute('aria-hidden') !== 'true');
-            const spinnerNodes = this.getSelectorNodes(doc, 'spinner', (node) => !node.hidden && node.getAttribute('aria-hidden') !== 'true');
-            const latestTurnSpinner = latestTurn
-                ? this.getSelectorNodes(latestTurn, 'spinner', (node) => !node.hidden && node.getAttribute('aria-hidden') !== 'true')
-                : [];
-            const hasActiveSpinner = spinnerNodes.length > 0 || latestTurnSpinner.length > 0;
+            const spinnerMatches = this.getSelectorNodes(doc, 'spinner', (node) => {
+                return inActiveSurface(node) && !node.hidden && node.getAttribute('aria-hidden') !== 'true';
+            });
+            const hasActiveSpinner = spinnerMatches.length > 0;
 
             const statusText = visibleActiveNodes
                 .map(node => node.innerText || node.textContent || '')
@@ -1090,28 +1129,21 @@
                 activeTextLower.includes('deep research') ||
                 activeTextLower.includes('researching');
 
-            const alertMatches = this.getSelectorNodes(doc, 'errorAlerts');
-            const alertNodes = alertMatches.map(match => match.element);
-            const alertText = alertNodes.map(node => node.innerText || node.textContent || '').join(' ').toLowerCase();
-            const latestTurnText = latestTurn ? (latestTurn.innerText || latestTurn.textContent || '').toLowerCase() : '';
-            const errorSearchText = `${alertText} ${latestTurnText}`.trim();
+            const alertMatches = this.getSelectorNodes(doc, 'errorAlerts', inActiveSurface);
+            const errorSearchText = alertMatches
+                .map(match => match.element.innerText || match.element.textContent || '')
+                .join(' ')
+                .toLowerCase()
+                .replace(/\s+/g, ' ')
+                .trim();
 
             const matchedDeliveryTimeout = this.compatibilitySignals.deliveryTimeoutMarkers.find(marker => errorSearchText.includes(marker)) || '';
             const hasDeliveryTimedOut = !!matchedDeliveryTimeout;
-
             const matchedGeneralError = this.compatibilitySignals.errorMarkers.find(marker => errorSearchText.includes(marker)) || '';
-
             const matchedError = matchedDeliveryTimeout
                 ? 'Message delivery timed out. Please try again.'
                 : matchedGeneralError;
-
-            const errorSnippetTarget = matchedDeliveryTimeout || matchedGeneralError;
-            const errorSnippet = errorSnippetTarget
-                ? errorSearchText
-                    .slice(Math.max(0, errorSearchText.indexOf(errorSnippetTarget) - 60), errorSearchText.indexOf(errorSnippetTarget) + 160)
-                    .replace(/\s+/g, ' ')
-                    .trim()
-                : '';
+            const errorSnippet = matchedError || '';
 
             const retryMatch = this.getRetryButtonMatch(doc);
             const hasTryAgainButton = !!retryMatch.element;
@@ -1120,6 +1152,8 @@
             const isWorking = hasActiveStopButton || hasResultStreaming || hasActiveToolOrResearch;
             const generating = !hasKnownError && isWorking;
             const deepResearchActive = !hasKnownError && isWorking && isDeepResearch;
+            const statusUnknown = !hasKnownError && !hasTryAgainButton && !isWorking;
+            const compatibilityState = (hasKnownError || hasTryAgainButton) ? 'error' : (isWorking ? 'active' : 'unknown');
 
             const url = typeof location !== 'undefined' ? location.href : (doc.defaultView?.location?.href || '');
             const title = typeof document !== 'undefined' ? document.title : (doc.title || '');
@@ -1130,21 +1164,25 @@
                 hasResultStreaming,
                 hasActiveToolOrResearch,
                 deepResearchActive,
-                matchedResearchMarker,
-                researchStatusPreview: statusText,
+                matchedResearchMarker: matchedResearchMarker || null,
+                researchStatusPreview: statusText || null,
                 hasError: hasKnownError,
                 hasDeliveryTimedOut,
                 hasTryAgainButton,
                 errorSnippet,
                 matchedError,
+                statusUnknown,
+                compatibilityState,
                 matchedSignals: {
                     stopButton: stopSelectorMatch.selector || (semanticStopButton ? 'stopButton.semantic' : null),
                     streaming: streamingMatch.selector || null,
                     status: statusMatches[0]?.selector || null,
-                    spinner: spinnerNodes[0]?.selector || latestTurnSpinner[0]?.selector || null,
+                    spinner: spinnerMatches[0]?.selector || null,
                     research: matchedResearchMarker ? `researchMarkers:${matchedResearchMarker}` : null,
-                    error: alertMatches[0]?.selector || null,
-                    retry: retryMatch.signalKey || null
+                    error: alertMatches[0]?.selector || (hasTryAgainButton ? retryMatch.selector || retryMatch.signalKey : null),
+                    retry: retryMatch.element ? (retryMatch.selector || retryMatch.signalKey) : null,
+                    scope: 'active-response',
+                    compatibility: compatibilityState
                 },
                 url,
                 title
@@ -1207,7 +1245,9 @@
             }
 
             const allButtons = Array.from(doc.querySelectorAll('button'));
-            const fallback = allButtons.reverse().find(isRetryOrRegenerate);
+            const fallback = allButtons.reverse().find(btn => {
+                return isRetryOrRegenerate(btn) && this.isActiveResponseNode(btn, turns, latestTurn);
+            });
             return fallback
                 ? { element: fallback, selector: 'retryButton.semantic', signalKey: 'retryButton' }
                 : empty;
@@ -1257,10 +1297,16 @@
             }
 
             const text = (latestTurn.innerText || latestTurn.textContent || '').trim();
-            const textLower = text.toLowerCase();
+            const alertMatches = this.getSelectorNodes(latestTurn, 'errorAlerts');
+            const alertText = alertMatches
+                .map(match => match.element.innerText || match.element.textContent || '')
+                .join(' ')
+                .toLowerCase()
+                .replace(/\s+/g, ' ')
+                .trim();
 
-            const hasDeliveryTimeout = this.compatibilitySignals.deliveryTimeoutMarkers.some(marker => textLower.includes(marker));
-            const hasGeneralError = this.compatibilitySignals.errorMarkers.some(marker => textLower.includes(marker));
+            const hasDeliveryTimeout = this.compatibilitySignals.deliveryTimeoutMarkers.some(marker => alertText.includes(marker));
+            const hasGeneralError = this.compatibilitySignals.errorMarkers.some(marker => alertText.includes(marker));
             const hasError = hasDeliveryTimeout || hasGeneralError;
 
             const retryBtn = this.getRetryButton(latestTurn);

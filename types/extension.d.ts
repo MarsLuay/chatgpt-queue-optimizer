@@ -323,6 +323,9 @@ interface GenerationState {
     hasTryAgainButton?: boolean;
     errorSnippet?: string;
     matchedError?: string;
+    statusUnknown?: boolean;
+    compatibilityState?: 'active' | 'error' | 'unknown' | string;
+    matchedSignals?: Record<string, string | null | undefined>;
     url?: string;
     title?: string;
     [key: string]: unknown;
