@@ -4,9 +4,21 @@ type QueueJobPhase =
     | 'waiting'
     | 'waiting-for-idle'
     | 'sending'
+    | 'awaiting-submission-ack'
+    | 'awaiting-response'
+    | 'terminal'
     | 'retry-wait'
     | 'paused'
     | 'complete'
+    | string;
+
+type QueueDeliveryState =
+    | 'pre-click'
+    | 'unknown-acceptance'
+    | 'confirmed-submission'
+    | 'active-response'
+    | 'terminal-awaiting-bookkeeping'
+    | ''
     | string;
 
 type QueueFailureClass =
@@ -18,6 +30,9 @@ type QueueFailureClass =
     | 'compatibility'
     | 'user-stop'
     | 'non-retryable'
+    | 'submission-unconfirmed'
+    | 'waiting-for-user'
+    | 'interrupted'
     | string;
 
 type QueueRetryMode = 'finite' | 'unlimited' | '' | string;
@@ -52,6 +67,10 @@ interface QueueWaitPolicy {
     deepResearchMaxWaitMs: number;
     deepResearchStaleMs: number;
     checkIntervalMs: number;
+    submissionAckTimeoutMs?: number;
+    submissionAckPollMs?: number;
+    terminalConfirmSamples?: number;
+    interCommandDelayMs?: number;
 }
 
 interface QueueJob {
@@ -86,6 +105,14 @@ interface QueueJob {
     lastResearchProgressAt?: number;
     sawDeepResearch?: boolean;
     sawGenerating?: boolean;
+    deliveryState?: QueueDeliveryState;
+    commandId?: string;
+    commandFingerprint?: string;
+    submittedUserTurnId?: string | null;
+    assistantTurnId?: string | null;
+    submissionAckSource?: string;
+    terminalAckSource?: string;
+    lastResponsePhase?: string;
     startedAt: number;
     updatedAt: number;
 }
@@ -122,6 +149,14 @@ interface DurableQueueJob {
     lastResearchProgressAt?: number;
     sawDeepResearch?: boolean;
     sawGenerating?: boolean;
+    deliveryState?: QueueDeliveryState;
+    commandId?: string;
+    commandFingerprint?: string;
+    submittedUserTurnId?: string | null;
+    assistantTurnId?: string | null;
+    submissionAckSource?: string;
+    terminalAckSource?: string;
+    lastResponsePhase?: string;
     startedAt: number;
     updatedAt: number;
 }
@@ -163,6 +198,14 @@ interface RunningJobSnapshot {
     lastResearchProgressAt?: number;
     sawDeepResearch?: boolean;
     sawGenerating?: boolean;
+    deliveryState?: QueueDeliveryState;
+    commandId?: string;
+    commandFingerprint?: string;
+    submittedUserTurnId?: string | null;
+    assistantTurnId?: string | null;
+    submissionAckSource?: string;
+    terminalAckSource?: string;
+    lastResponsePhase?: string;
     startedAt: number;
     updatedAt: number;
 }
@@ -293,6 +336,11 @@ interface ProviderAdapterContract {
     getCompatibilityContract?: (...args: any[]) => any;
     getConversationIdentity?: (...args: any[]) => ConversationIdentity;
     getGenerationState?: (...args: any[]) => GenerationState;
+    getCommandTurnSnapshot?: (...args: any[]) => any;
+    getCommandResponseState?: (...args: any[]) => any;
+    fingerprintCommandText?: (...args: any[]) => string;
+    normalizeCommandText?: (...args: any[]) => string;
+    supportsCommandTurnAck?: boolean;
     getComposerFromEventTarget?: (...args: any[]) => any;
     getComposerMatchFromEventTarget?: (...args: any[]) => any;
     getSendActionFromEventTarget?: (...args: any[]) => any;
