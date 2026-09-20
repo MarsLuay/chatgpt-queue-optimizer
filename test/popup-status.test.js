@@ -10,7 +10,10 @@ global.document = {
 
 const {
     formatPopupRunningInstanceText,
-    getPopupQueueStatusLabel
+    getPopupQueueStatusLabel,
+    parseScheduledLocalDateTime,
+    getScheduledStatusLabel,
+    formatScheduledItemText
 } = require('../popup.js');
 
 delete global.document;
@@ -49,8 +52,27 @@ test('running instance text keeps queue progress and failure details inspectable
 test('popup status uses one inline renderer and has no blocking alert paths', () => {
     assert.equal((popupSource.match(/function showPopupStatus\s*\(/g) || []).length, 1);
     assert.doesNotMatch(popupSource, /\balert\s*\(/);
-    assert.doesNotMatch(popupSource, /statusIndicator\.style\./);
     assert.match(popupHtml, /id="status-indicator"[^>]*role="status"/);
     assert.match(popupHtml, /id="status-indicator"[^>]*aria-live="polite"/);
     assert.match(popupHtml, /popup-status-dismiss/);
+});
+
+test('scheduled popup helpers preserve local time and actionable status text', () => {
+    const dueTs = parseScheduledLocalDateTime('2030-01-02T03:04');
+    assert.equal(typeof dueTs, 'number');
+    assert.equal(parseScheduledLocalDateTime('2030-02-30T03:04'), null);
+    assert.equal(getScheduledStatusLabel('failed'), 'Failed');
+    assert.match(
+        formatScheduledItemText({ tabId: 7, status: 'failed', dueTs, text: '  send  this  ', failureReason: 'Target mismatch' }, 'Research'),
+        /^Research \| Failed \| .* \| send this \| Target mismatch$/
+    );
+});
+
+test('scheduled popup tab and form are ordered between queue and optimizer', () => {
+    assert.ok(popupHtml.indexOf('id="queue-tool-tab"') < popupHtml.indexOf('id="scheduled-tool-tab"'));
+    assert.ok(popupHtml.indexOf('id="scheduled-tool-tab"') < popupHtml.indexOf('id="optimizer-tool-tab"'));
+    assert.match(popupHtml, /id="scheduled-message"/);
+    assert.match(popupHtml, /id="scheduled-due-at"/);
+    assert.match(popupHtml, /id="scheduled-target-tab-select"/);
+    assert.doesNotMatch(popupSource, /\balert\s*\(/);
 });

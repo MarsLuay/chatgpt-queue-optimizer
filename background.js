@@ -14,7 +14,10 @@ const QUEUE_STATE_COALESCE_DELAY_MS = 50;
 const QUEUE_LOG_COALESCE_DELAY_MS = 50;
 const SCHEDULED_MESSAGES_KEY = 'scheduledMessages';
 const SCHEDULED_ALARM_PREFIX = 'scheduled-msg:';
-const SCHEDULED_DUE_SKEW_MS = 1000;
+// Chrome alarms may fire late, but a scheduled message must never be delivered early.
+const SCHEDULED_DUE_SKEW_MS = 0;
+
+let scheduledStorageWrite = Promise.resolve();
 
 if (typeof importScripts === 'function') {
     importScripts('utils.js', 'provider-adapter.js');
@@ -815,6 +818,23 @@ async function enqueueMessageInternal({
     }
 
     const existingJob = jobs.get(normalizedTabId);
+
+    const existingJobHasIdentity = existingJob && (
+        existingJob.provider ||
+        existingJob.conversationId ||
+        existingJob.conversationType ||
+        existingJob.targetKey
+    );
+
+    if (existingJob && existingJobHasIdentity && conversationIdentity && !identitiesMatchForSchedule(
+        buildScheduledConversationIdentity(existingJob),
+        conversationIdentity
+    )) {
+        return {
+            ok: false,
+            error: 'The target conversation changed while the scheduled message was waiting. It was not added to another chat.'
+        };
+    }
 
     if (existingJob && existingJob.isPaused) {
         return enqueueToPausedJobResult(normalizedTabId, existingJob, normalizedMessage, addToEnd, source);
@@ -2739,6 +2759,15 @@ function clearScheduledAlarm(id) {
     chrome.alarms.clear(scheduledAlarmName(id));
 }
 
+function withScheduledStorageLock(operation) {
+    const next = scheduledStorageWrite
+        .catch(() => {})
+        .then(operation);
+
+    scheduledStorageWrite = next.catch(() => {});
+    return next;
+}
+
 function createScheduledAlarm(item) {
     if (!chrome.alarms || typeof chrome.alarms.create !== 'function' || !item?.id) return;
     const when = Math.max(Number(item.dueTs) || Date.now(), Date.now());
@@ -2746,19 +2775,21 @@ function createScheduledAlarm(item) {
 }
 
 async function persistScheduledItem(nextItem) {
-    const items = await readScheduledMessages();
-    const index = items.findIndex((item) => item.id === nextItem.id);
-    if (index >= 0) {
-        items[index] = nextItem;
-    } else {
-        items.push(nextItem);
-    }
-    await writeScheduledMessages(items);
-    notifyRuntime({
-        action: 'scheduledMessagesUpdated',
-        item: nextItem
+    return withScheduledStorageLock(async () => {
+        const items = await readScheduledMessages();
+        const index = items.findIndex((item) => item.id === nextItem.id);
+        if (index >= 0) {
+            items[index] = nextItem;
+        } else {
+            items.push(nextItem);
+        }
+        await writeScheduledMessages(items);
+        notifyRuntime({
+            action: 'scheduledMessagesUpdated',
+            item: nextItem
+        });
+        return nextItem;
     });
-    return nextItem;
 }
 
 function buildScheduledConversationIdentity(item) {
@@ -2782,7 +2813,7 @@ function identitiesMatchForSchedule(stored, current) {
         return false;
     }
 
-    if (currentType === 'unsupported') {
+    if (currentType === 'unsupported' || storedType === 'unsupported') {
         return false;
     }
 
@@ -2794,11 +2825,15 @@ function identitiesMatchForSchedule(stored, current) {
         return currentType === 'new' || currentType === 'existing';
     }
 
-    if (storedKey && currentKey && storedKey !== 'chatgpt:unknown' && storedKey !== `${stored.provider}:unknown`) {
+    if (storedType === 'unknown' || currentType === 'unknown') {
+        return false;
+    }
+
+    if (storedKey && currentKey) {
         return storedKey === currentKey;
     }
 
-    return true;
+    return false;
 }
 
 async function createScheduledMessage({ text, dueTs, tabId, conversationIdentity = null }) {
@@ -2830,9 +2865,28 @@ async function createScheduledMessage({ text, dueTs, tabId, conversationIdentity
         return { ok: false, error: 'Select a ChatGPT, Gemini, or Claude tab before scheduling.' };
     }
 
-    const identity = conversationIdentity || await resolveTabConversationIdentity(normalizedTabId);
+    const currentIdentity = await resolveTabConversationIdentity(normalizedTabId);
+    const currentConversationType = currentIdentity?.type || currentIdentity?.conversationType;
+    if (!currentIdentity || !['existing', 'new'].includes(currentConversationType)) {
+        return {
+            ok: false,
+            error: 'Could not confirm the selected conversation. Reload the target tab and try again; no other chat was selected.'
+        };
+    }
+
+    if (
+        conversationIdentity &&
+        !identitiesMatchForSchedule(conversationIdentity, currentIdentity)
+    ) {
+        return {
+            ok: false,
+            error: 'The selected conversation changed before scheduling. Choose the target again; no other chat was selected.'
+        };
+    }
+
+    const identity = conversationIdentity || currentIdentity;
     const provider = identity?.provider || 'chatgpt';
-    const conversationType = identity?.type || 'unknown';
+    const conversationType = identity?.type || identity?.conversationType || 'unknown';
     const conversationId = identity?.conversationId || null;
     const targetKey = identity?.key || (conversationId ? `${provider}:c:${conversationId}` : `${provider}:${conversationType}`);
     const now = Date.now();
@@ -2867,74 +2921,94 @@ async function createScheduledMessage({ text, dueTs, tabId, conversationIdentity
 
 async function cancelScheduledMessage(id) {
     const scheduledId = String(id || '');
-    const items = await readScheduledMessages();
-    const item = items.find((entry) => entry.id === scheduledId);
+    return withScheduledStorageLock(async () => {
+        const items = await readScheduledMessages();
+        const item = items.find((entry) => entry.id === scheduledId);
 
-    if (!item) {
-        return { ok: false, error: 'Scheduled message not found.' };
-    }
+        if (!item) {
+            return { ok: false, error: 'Scheduled message not found.' };
+        }
 
-    if (item.status === 'completed') {
-        return { ok: false, error: 'Completed scheduled messages cannot be cancelled.' };
-    }
+        if (item.status === 'completed') {
+            return { ok: false, error: 'Completed scheduled messages cannot be cancelled.' };
+        }
 
-    item.status = 'cancelled';
-    item.updatedAt = Date.now();
-    item.failureReason = '';
-    clearScheduledAlarm(item.id);
-    await writeScheduledMessages(items);
-    notifyRuntime({ action: 'scheduledMessagesUpdated', item });
+        if (item.status === 'firing') {
+            return { ok: false, error: 'Scheduled message delivery is already in progress.' };
+        }
 
-    return { ok: true, item };
+        item.status = 'cancelled';
+        item.updatedAt = Date.now();
+        item.failureReason = '';
+        clearScheduledAlarm(item.id);
+        await writeScheduledMessages(items);
+        notifyRuntime({ action: 'scheduledMessagesUpdated', item });
+
+        return { ok: true, item };
+    });
 }
 
 async function deleteScheduledMessage(id) {
     const scheduledId = String(id || '');
-    const items = await readScheduledMessages();
-    const nextItems = items.filter((entry) => entry.id !== scheduledId);
+    return withScheduledStorageLock(async () => {
+        const items = await readScheduledMessages();
+        const item = items.find((entry) => entry.id === scheduledId);
 
-    if (nextItems.length === items.length) {
-        return { ok: false, error: 'Scheduled message not found.' };
-    }
+        if (!item) {
+            return { ok: false, error: 'Scheduled message not found.' };
+        }
 
-    clearScheduledAlarm(scheduledId);
-    await writeScheduledMessages(nextItems);
-    notifyRuntime({ action: 'scheduledMessagesUpdated', deletedId: scheduledId });
+        if (item.status === 'firing') {
+            return { ok: false, error: 'Scheduled message delivery is already in progress.' };
+        }
 
-    return { ok: true, deletedId: scheduledId };
+        const nextItems = items.filter((entry) => entry.id !== scheduledId);
+        clearScheduledAlarm(scheduledId);
+        await writeScheduledMessages(nextItems);
+        notifyRuntime({ action: 'scheduledMessagesUpdated', deletedId: scheduledId });
+
+        return { ok: true, deletedId: scheduledId };
+    });
 }
 
 async function retryScheduledMessage(id, dueTs = null) {
     const scheduledId = String(id || '');
-    const items = await readScheduledMessages();
-    const item = items.find((entry) => entry.id === scheduledId);
+    const result = await withScheduledStorageLock(async () => {
+        const items = await readScheduledMessages();
+        const item = items.find((entry) => entry.id === scheduledId);
 
-    if (!item) {
-        return { ok: false, error: 'Scheduled message not found.' };
+        if (!item) {
+            return { ok: false, error: 'Scheduled message not found.' };
+        }
+
+        if (item.status === 'completed') {
+            return { ok: false, error: 'Completed scheduled messages cannot be retried.' };
+        }
+
+        if (item.status === 'firing') {
+            return { ok: false, error: 'Scheduled message delivery is already in progress.' };
+        }
+
+        const nextDueTs = dueTs == null ? Date.now() : Number(dueTs);
+        if (!Number.isFinite(nextDueTs) || nextDueTs <= 0) {
+            return { ok: false, error: 'A valid due date/time is required to retry.' };
+        }
+
+        item.status = 'pending';
+        item.dueTs = nextDueTs;
+        item.failureReason = '';
+        item.updatedAt = Date.now();
+        await writeScheduledMessages(items);
+        createScheduledAlarm(item);
+        notifyRuntime({ action: 'scheduledMessagesUpdated', item });
+        return { ok: true, item };
+    });
+
+    if (result.ok && result.item.dueTs <= Date.now() + SCHEDULED_DUE_SKEW_MS) {
+        await processDueScheduledMessages('retry', result.item.id);
     }
 
-    if (item.status === 'completed') {
-        return { ok: false, error: 'Completed scheduled messages cannot be retried.' };
-    }
-
-    const nextDueTs = dueTs == null ? Date.now() : Number(dueTs);
-    if (!Number.isFinite(nextDueTs) || nextDueTs <= 0) {
-        return { ok: false, error: 'A valid due date/time is required to retry.' };
-    }
-
-    item.status = 'pending';
-    item.dueTs = nextDueTs;
-    item.failureReason = '';
-    item.updatedAt = Date.now();
-    await writeScheduledMessages(items);
-    createScheduledAlarm(item);
-    notifyRuntime({ action: 'scheduledMessagesUpdated', item });
-
-    if (nextDueTs <= Date.now() + SCHEDULED_DUE_SKEW_MS) {
-        await processDueScheduledMessages('retry', item.id);
-    }
-
-    return { ok: true, item };
+    return result;
 }
 
 async function markScheduledFailed(item, reason) {
@@ -2974,32 +3048,41 @@ async function markScheduledCompleted(item, enqueueResult = {}) {
 }
 
 async function claimScheduledMessageForFire(id, now = Date.now()) {
-    const items = await readScheduledMessages();
-    const item = items.find((entry) => entry.id === id);
+    return withScheduledStorageLock(async () => {
+        const items = await readScheduledMessages();
+        const item = items.find((entry) => entry.id === id);
 
-    if (!item) {
-        return null;
-    }
+        if (!item) {
+            return null;
+        }
 
-    if (item.status !== 'pending') {
-        return null;
-    }
+        if (item.status !== 'pending') {
+            return null;
+        }
 
-    if (Number(item.dueTs) > now + SCHEDULED_DUE_SKEW_MS) {
-        return null;
-    }
+        if (Number(item.dueTs) > now + SCHEDULED_DUE_SKEW_MS) {
+            return null;
+        }
 
-    item.status = 'firing';
-    item.updatedAt = now;
-    item.fireAttemptedAt = now;
-    await writeScheduledMessages(items);
-    return { ...item };
+        item.status = 'firing';
+        item.updatedAt = now;
+        item.fireAttemptedAt = now;
+        await writeScheduledMessages(items);
+        return { ...item };
+    });
 }
 
 async function validateScheduledTarget(item) {
     const tabId = Number(item.tabId || 0);
     if (!tabId) {
         return { ok: false, reason: 'Scheduled item is missing a target tab.' };
+    }
+
+    if (!['existing', 'new'].includes(item.conversationType) || !item.provider) {
+        return {
+            ok: false,
+            reason: 'Scheduled message has no confirmed conversation identity. It was not sent to another chat.'
+        };
     }
 
     let tab;
@@ -3053,6 +3136,19 @@ async function fireScheduledMessage(item) {
 
 async function processDueScheduledMessages(source = 'manual', onlyId = null, now = Date.now()) {
     const items = await readScheduledMessages();
+    const selectedItem = onlyId ? items.find((item) => item.id === onlyId) : null;
+
+    if (
+        selectedItem &&
+        selectedItem.status === 'pending' &&
+        Number(selectedItem.dueTs) > now + SCHEDULED_DUE_SKEW_MS
+    ) {
+        // A one-shot alarm can be delivered early by a test/browser shim. Keep the
+        // item pending and replace the consumed alarm instead of sending early.
+        createScheduledAlarm(selectedItem);
+        return [];
+    }
+
     const dueItems = items.filter((item) => {
         if (onlyId && item.id !== onlyId) return false;
         if (item.status !== 'pending') return false;

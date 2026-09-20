@@ -167,15 +167,28 @@ test('scheduled items are restored in due order and alarms are recreated after r
     assert.equal(alarms.has('scheduled-msg:firing'), false);
 });
 
-test('duplicate alarm claims are idempotent', async () => {
+test('duplicate alarm claims are idempotent, including concurrent claims', async () => {
     storage.scheduledMessages = [pendingItem('once')];
 
-    const first = await api.claimScheduledMessageForFire('once');
-    const second = await api.claimScheduledMessageForFire('once');
+    const [first, second] = await Promise.all([
+        api.claimScheduledMessageForFire('once'),
+        api.claimScheduledMessageForFire('once')
+    ]);
 
-    assert.equal(first.id, 'once');
-    assert.equal(second, null);
+    assert.equal([first, second].filter(Boolean).length, 1);
     assert.equal((await api.readScheduledMessages())[0].status, 'firing');
+});
+
+test('an early one-shot alarm is rescheduled without delivering early', async () => {
+    const dueTs = Date.now() + 60_000;
+    storage.scheduledMessages = [pendingItem('not-yet', dueTs)];
+    alarms.set('scheduled-msg:not-yet', { when: dueTs });
+
+    const result = await api.processDueScheduledMessages('alarm', 'not-yet', dueTs - 1);
+
+    assert.deepEqual(result, []);
+    assert.equal((await api.readScheduledMessages())[0].status, 'pending');
+    assert.deepEqual(alarms.get('scheduled-msg:not-yet'), { when: dueTs });
 });
 
 test('due messages enter the existing busy queue once and become completed', async () => {
@@ -218,6 +231,80 @@ test('changed conversation fails closed without sending to another chat', async 
     assert.equal(item.status, 'failed');
     assert.match(item.failureReason, /not sent to another chat/);
     assert.equal(api.jobs.size, 0);
+});
+
+test('scheduling rejects a stale identity instead of recording another chat', async () => {
+    addTab(7, {
+        provider: 'chatgpt',
+        type: 'existing',
+        conversationId: 'different-conversation',
+        key: 'chatgpt:c:different-conversation'
+    });
+
+    const result = await api.createScheduledMessage({
+        text: 'do not move this',
+        dueTs: Date.now() + 60_000,
+        tabId: 7,
+        conversationIdentity: identity
+    });
+
+    assert.equal(result.ok, false);
+    assert.match(result.error, /changed before scheduling/);
+    assert.equal(storage.scheduledMessages, undefined);
+});
+
+test('busy queue identity mismatch fails closed without appending', async () => {
+    addTab(7);
+    storage.scheduledMessages = [pendingItem('busy-mismatch')];
+    api.jobs.set(7, {
+        tabId: 7,
+        provider: 'chatgpt',
+        conversationId: 'different-conversation',
+        conversationType: 'existing',
+        targetKey: 'chatgpt:c:different-conversation',
+        queue: ['existing'],
+        currentMessage: null,
+        isRunning: false,
+        isPaused: true,
+        completedCount: 0,
+        totalMessages: 1,
+        updatedAt: Date.now()
+    });
+
+    const result = await api.processDueScheduledMessages('alarm', null, Date.now());
+    const item = (await api.readScheduledMessages())[0];
+
+    assert.equal(result[0].status, 'failed');
+    assert.equal(item.status, 'failed');
+    assert.deepEqual(api.jobs.get(7).queue, ['existing']);
+});
+
+test('multiple due items enter a busy queue in due order', async () => {
+    addTab(7);
+    const now = Date.now();
+    storage.scheduledMessages = [
+        pendingItem('later', now - 50),
+        pendingItem('earlier', now - 100)
+    ];
+    api.jobs.set(7, {
+        tabId: 7,
+        provider: identity.provider,
+        conversationId: identity.conversationId,
+        conversationType: identity.type,
+        targetKey: identity.key,
+        queue: ['existing'],
+        currentMessage: null,
+        isRunning: false,
+        isPaused: true,
+        completedCount: 0,
+        totalMessages: 1,
+        updatedAt: now
+    });
+
+    const result = await api.processDueScheduledMessages('alarm', null, now);
+
+    assert.deepEqual(result.map((item) => item.id), ['earlier', 'later']);
+    assert.deepEqual(api.jobs.get(7).queue, ['existing', 'message-earlier', 'message-later']);
 });
 
 test('cancel and delete clear scheduled delivery state', async () => {
