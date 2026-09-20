@@ -91,6 +91,11 @@
             'response interrupted',
             'generation stopped',
             'you stopped this response'
+        ],
+        conversationCapacityMarkers: [
+            "you've reached the maximum length for this conversation",
+            'maximum length for this conversation',
+            'keep talking by starting a new chat'
         ]
     };
 
@@ -472,9 +477,36 @@
                 hasTryAgainButton: false,
                 errorSnippet: '',
                 matchedError: '',
+                conversationCapacityReached: false,
+                requiresNewConversation: false,
                 url: '',
                 title: ''
             };
+        }
+
+        getNewConversationUrl() {
+            return '';
+        }
+
+        startNewConversation() {
+            const url = this.getNewConversationUrl();
+            return {
+                ok: !!url,
+                url,
+                method: url ? 'route' : 'unsupported'
+            };
+        }
+
+        isFreshConversationIdentity(identity, previousConversationId = null) {
+            return false;
+        }
+
+        matchConversationCapacity(text) {
+            return '';
+        }
+
+        buildContinuationHandoffMessage(context = {}) {
+            return '';
         }
 
         getRetryButton(doc) {
@@ -802,6 +834,19 @@
             const waitingForUser = (this.compatibilitySignals.waitingForUserMarkers || []).some(marker => statusText.includes(marker));
             const interrupted = (this.compatibilitySignals.interruptedMarkers || []).some(marker => statusText.includes(marker));
 
+            if (generation.conversationCapacityReached || generation.requiresNewConversation) {
+                return {
+                    phase: 'error',
+                    userTurnId,
+                    assistantTurnId: followingAssistant?.turnId || null,
+                    conversationId,
+                    generating: false,
+                    deepResearchActive: false,
+                    hasCompletedAssistant: false,
+                    source: 'conversation-max-length'
+                };
+            }
+
             if (generation.hasError || generation.hasTryAgainButton || generation.hasDeliveryTimedOut) {
                 return {
                     phase: 'error',
@@ -1030,6 +1075,64 @@
             };
         }
 
+        getNewConversationUrl() {
+            return 'https://chatgpt.com/';
+        }
+
+        startNewConversation() {
+            return {
+                ok: true,
+                url: this.getNewConversationUrl(),
+                method: 'route'
+            };
+        }
+
+        isFreshConversationIdentity(identity, previousConversationId = null) {
+            if (!identity || identity.provider !== 'chatgpt') {
+                return false;
+            }
+            if (identity.type === 'unsupported' || identity.type === 'unknown') {
+                return false;
+            }
+            if (identity.type === 'existing' && identity.conversationId && identity.conversationId !== previousConversationId) {
+                return true;
+            }
+            // A new-chat route is a fresh target only after leaving a known exhausted conversation.
+            return identity.type === 'new' && !!previousConversationId;
+        }
+
+        matchConversationCapacity(text) {
+            const haystack = String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+            if (!haystack) {
+                return '';
+            }
+            return (this.compatibilitySignals.conversationCapacityMarkers || []).find(marker => haystack.includes(marker)) || '';
+        }
+
+        buildContinuationHandoffMessage(context = {}) {
+            const runId = String(context.runId || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+            const commandNumber = Number(context.currentCommandNumber || 0);
+            const completedCount = Number(context.completedCount || 0);
+            const remainingCount = Number(context.remainingCount || 0);
+            const generation = Number(context.conversationGeneration || 0);
+            const pendingLength = Number(context.pendingMessageLength || 0);
+            const parts = [
+                'Continuation handoff for an automated ChatGPT Queue Optimizer run.',
+                'The previous conversation reached ChatGPT maximum length.',
+                `Logical run id: ${runId || 'unknown'}.`,
+                `Conversation segment: ${generation}.`,
+                `Completed original commands: ${completedCount}.`,
+                `Current original command number: ${commandNumber}.`,
+                `Remaining original commands after this one: ${remainingCount}.`,
+                pendingLength > 0
+                    ? `The next original queued command is pending (length ${pendingLength}) and must be treated as the next user task.`
+                    : 'Resume the remaining original queued commands in order.',
+                'Do not treat this handoff as one of the original queued commands.',
+                'Preserve prior workflow constraints and continue in FIFO order.'
+            ];
+            return parts.join(' ').slice(0, 1200);
+        }
+
         getCurrentSurface(doc = (typeof document !== 'undefined' ? document : null), locationOrUrl = null) {
             const loc = locationOrUrl ||
                 doc?.defaultView?.location ||
@@ -1118,6 +1221,8 @@
                     hasTryAgainButton: false,
                     errorSnippet: '',
                     matchedError: '',
+                    conversationCapacityReached: false,
+                    requiresNewConversation: false,
                     statusUnknown: true,
                     compatibilityState: 'unknown',
                     matchedSignals: emptySignals,
@@ -1196,16 +1301,20 @@
 
             const matchedDeliveryTimeout = this.compatibilitySignals.deliveryTimeoutMarkers.find(marker => errorSearchText.includes(marker)) || '';
             const hasDeliveryTimedOut = !!matchedDeliveryTimeout;
-            const matchedGeneralError = this.compatibilitySignals.errorMarkers.find(marker => errorSearchText.includes(marker)) || '';
-            const matchedError = matchedDeliveryTimeout
-                ? 'Message delivery timed out. Please try again.'
-                : matchedGeneralError;
+            const matchedCapacity = this.matchConversationCapacity(`${errorSearchText} ${activeTextLower}`);
+            const conversationCapacityReached = !!matchedCapacity;
+            const matchedGeneralError = conversationCapacityReached
+                ? ''
+                : (this.compatibilitySignals.errorMarkers.find(marker => errorSearchText.includes(marker)) || '');
+            const matchedError = conversationCapacityReached
+                ? 'conversation-max-length'
+                : (matchedDeliveryTimeout ? 'Message delivery timed out. Please try again.' : matchedGeneralError);
             const errorSnippet = matchedError || '';
 
             const retryMatch = this.getRetryButtonMatch(doc);
-            const hasTryAgainButton = !!retryMatch.element;
+            const hasTryAgainButton = conversationCapacityReached ? false : !!retryMatch.element;
 
-            const hasKnownError = !!matchedError || hasDeliveryTimedOut;
+            const hasKnownError = !!matchedError || hasDeliveryTimedOut || conversationCapacityReached;
             const isWorking = hasActiveStopButton || hasResultStreaming || hasActiveToolOrResearch;
             const generating = !hasKnownError && isWorking;
             const deepResearchActive = !hasKnownError && isWorking && isDeepResearch;
@@ -1226,6 +1335,8 @@
                 hasError: hasKnownError,
                 hasDeliveryTimedOut,
                 hasTryAgainButton,
+                conversationCapacityReached,
+                requiresNewConversation: conversationCapacityReached,
                 errorSnippet,
                 matchedError,
                 statusUnknown,
@@ -1236,8 +1347,10 @@
                     status: statusMatches[0]?.selector || null,
                     spinner: spinnerMatches[0]?.selector || null,
                     research: matchedResearchMarker ? `researchMarkers:${matchedResearchMarker}` : null,
-                    error: alertMatches[0]?.selector || (hasTryAgainButton ? retryMatch.selector || retryMatch.signalKey : null),
-                    retry: retryMatch.element ? (retryMatch.selector || retryMatch.signalKey) : null,
+                    error: conversationCapacityReached
+                        ? (alertMatches[0]?.selector || statusMatches[0]?.selector || 'conversationCapacityMarkers')
+                        : (alertMatches[0]?.selector || (hasTryAgainButton ? retryMatch.selector || retryMatch.signalKey : null)),
+                    retry: hasTryAgainButton ? (retryMatch.selector || retryMatch.signalKey) : null,
                     scope: 'active-response',
                     compatibility: compatibilityState
                 },

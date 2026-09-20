@@ -24,6 +24,10 @@ function getPopupQueueStatusLabel(job = {}) {
         return 'Retrying';
     }
 
+    if (['rollover-in-progress', 'rollover', 'conversation-rollover'].includes(phase) || job.rolloverInProgress) {
+        return 'New conversation';
+    }
+
     if (job.waitForIdleBeforeSend || ['waiting-for-idle', 'wait-for-idle', 'waiting_idle'].includes(phase)) {
         return 'Waiting for idle';
     }

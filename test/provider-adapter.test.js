@@ -1787,3 +1787,91 @@ test('ChatGPT command response state treats idle gaps as transient until the bou
     assert.equal(active.phase, 'active');
 });
 
+test('ChatGPT generation state detects maximum-length on the active surface only', () => {
+    const chatgpt = getProvider('chatgpt');
+    const exact = "You've reached the maximum length for this conversation, but you can keep talking by starting a new chat.";
+
+    const staleUser = new MockTestElement('article', {
+        'data-testid': 'conversation-turn-1',
+        'data-message-author-role': 'user'
+    }, 'Quote the warning: you have reached the maximum length for this conversation');
+    const staleAssistant = new MockTestElement('article', {
+        'data-testid': 'conversation-turn-2',
+        'data-message-author-role': 'assistant'
+    }, exact);
+    staleAssistant.appendChild(new MockTestElement('div', { role: 'alert' }, exact));
+    const idleLatest = new MockTestElement('article', {
+        'data-testid': 'conversation-turn-3',
+        'data-message-author-role': 'assistant'
+    }, 'Later successful answer that only mentions starting a new chat in passing.');
+    const { doc: staleDoc } = createTestDoc({ turns: [staleUser, staleAssistant, idleLatest] });
+    const staleState = chatgpt.getGenerationState(staleDoc);
+    assert.equal(staleState.conversationCapacityReached, false);
+    assert.equal(staleState.requiresNewConversation, false);
+    assert.equal(staleState.hasError, false);
+    assert.equal(staleState.matchedError, '');
+
+    const liveTurn = new MockTestElement('article', {
+        'data-testid': 'conversation-turn-4',
+        'data-message-author-role': 'assistant'
+    }, 'Partial answer');
+    liveTurn.appendChild(new MockTestElement('div', { role: 'alert' }, exact));
+    const { doc: liveDoc } = createTestDoc({ turns: [staleUser, liveTurn] });
+    const liveState = chatgpt.getGenerationState(liveDoc);
+    assert.equal(liveState.conversationCapacityReached, true);
+    assert.equal(liveState.requiresNewConversation, true);
+    assert.equal(liveState.hasError, true);
+    assert.equal(liveState.generating, false);
+    assert.equal(liveState.matchedError, 'conversation-max-length');
+    assert.equal(liveState.errorSnippet, 'conversation-max-length');
+    assert.equal(JSON.stringify(liveState).includes('topic #33'), false);
+
+    const statusTurn = new MockTestElement('article', {
+        'data-testid': 'conversation-turn-5',
+        'data-message-author-role': 'assistant'
+    }, 'Partial');
+    statusTurn.appendChild(new MockTestElement('div', { role: 'status' }, exact));
+    const { doc: statusDoc } = createTestDoc({ turns: [statusTurn] });
+    const statusState = chatgpt.getGenerationState(statusDoc);
+    assert.equal(statusState.conversationCapacityReached, true);
+    assert.equal(statusState.matchedError, 'conversation-max-length');
+
+    const responseState = chatgpt.getCommandResponseState(liveDoc, {});
+    assert.equal(responseState.source, 'conversation-max-length');
+    assert.equal(responseState.phase, 'error');
+
+    assert.equal(chatgpt.getNewConversationUrl(), 'https://chatgpt.com/');
+    assert.equal(chatgpt.startNewConversation().method, 'route');
+    assert.equal(chatgpt.isFreshConversationIdentity({
+        provider: 'chatgpt',
+        type: 'new',
+        conversationId: null,
+        key: 'chatgpt:new'
+    }, 'old-chat'), true);
+    assert.equal(chatgpt.isFreshConversationIdentity({
+        provider: 'chatgpt',
+        type: 'existing',
+        conversationId: 'old-chat',
+        key: 'chatgpt:c:old-chat'
+    }, 'old-chat'), false);
+    assert.equal(chatgpt.isFreshConversationIdentity({
+        provider: 'chatgpt',
+        type: 'existing',
+        conversationId: 'new-chat',
+        key: 'chatgpt:c:new-chat'
+    }, 'old-chat'), true);
+
+    const handoff = chatgpt.buildContinuationHandoffMessage({
+        runId: 'run-51',
+        currentCommandNumber: 12,
+        completedCount: 11,
+        remainingCount: 40,
+        conversationGeneration: 2,
+        pendingMessageLength: 88
+    });
+    assert.match(handoff, /Continuation handoff/);
+    assert.match(handoff, /run-51/);
+    assert.equal(handoff.includes('Apply the same process to topic #33'), false);
+    assert.ok(handoff.length <= 1200);
+});
+

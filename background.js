@@ -121,6 +121,31 @@ async function validateJobTargetConversation(tabId, job) {
         job.provider = currentIdentity.provider || 'chatgpt';
     }
 
+    if (job.rolloverInProgress) {
+        const adapter = getActiveProviderAdapter(currentIdentity.provider || job.provider || 'chatgpt') || getActiveProviderAdapter('chatgpt');
+        const fromId = job.rolloverFromConversationId || null;
+        if (adapter && typeof adapter.isFreshConversationIdentity === 'function' && adapter.isFreshConversationIdentity(currentIdentity, fromId)) {
+            if (!job.rolloverRebindApplied) {
+                applyAuthorizedConversationRebind(job, currentIdentity);
+                await updateRunningJobsStorage({ force: true });
+            } else if (job.conversationType === 'new' && currentIdentity.type === 'existing' && currentIdentity.conversationId) {
+                job.conversationId = currentIdentity.conversationId;
+                job.conversationType = 'existing';
+                job.targetKey = currentIdentity.key;
+                job.rolloverToConversationId = currentIdentity.conversationId;
+                job.updatedAt = Date.now();
+                await updateRunningJobsStorage({ force: true });
+            }
+            return { ok: true, currentIdentity, rolloverRebind: true };
+        }
+        return {
+            ok: false,
+            awaitingRollover: true,
+            reason: 'Rollover in progress; waiting for a verified new ChatGPT conversation before queue delivery resumes.',
+            currentIdentity
+        };
+    }
+
     if (currentIdentity.provider && job.provider && currentIdentity.provider !== 'unknown' && currentIdentity.provider !== job.provider) {
         return {
             ok: false,
@@ -192,6 +217,316 @@ async function validateJobTargetConversation(tabId, job) {
     }
 
     return { ok: true, currentIdentity };
+}
+
+function emptyRolloverFields() {
+    return {
+        rolloverInProgress: false,
+        rolloverStage: '',
+        rolloverReason: '',
+        rolloverFromConversationId: null,
+        rolloverToConversationId: null,
+        rolloverNavigationStarted: false,
+        rolloverRebindApplied: false,
+        handoffSubmitted: false,
+        handoffEstablished: false,
+        handoffFingerprint: '',
+        conversationGeneration: 0
+    };
+}
+
+function copyRolloverFields(source = {}) {
+    return {
+        rolloverInProgress: source.rolloverInProgress === true,
+        rolloverStage: String(source.rolloverStage || ''),
+        rolloverReason: String(source.rolloverReason || ''),
+        rolloverFromConversationId: source.rolloverFromConversationId || null,
+        rolloverToConversationId: source.rolloverToConversationId || null,
+        rolloverNavigationStarted: source.rolloverNavigationStarted === true,
+        rolloverRebindApplied: source.rolloverRebindApplied === true,
+        handoffSubmitted: source.handoffSubmitted === true,
+        handoffEstablished: source.handoffEstablished === true,
+        handoffFingerprint: String(source.handoffFingerprint || ''),
+        conversationGeneration: Number(source.conversationGeneration || 0)
+    };
+}
+
+function isConversationCapacityFailure(result) {
+    if (!result) return false;
+    const details = result.details && typeof result.details === 'object' ? result.details : {};
+    const state = details.state && typeof details.state === 'object' ? details.state : {};
+    if (details.failureClass === 'conversation-max-length') return true;
+    if (details.conversationCapacityReached === true || details.requiresNewConversation === true) return true;
+    if (state.conversationCapacityReached === true || state.requiresNewConversation === true) return true;
+    if (result.responseState?.source === 'conversation-max-length' || details.responseState?.source === 'conversation-max-length') {
+        return true;
+    }
+    return /conversation-max-length|maximum length for this conversation/i.test(String(result.error || details.error || ''));
+}
+
+function applyAuthorizedConversationRebind(job, identity) {
+    if (!job || !identity) return job;
+    job.provider = identity.provider || job.provider || 'chatgpt';
+    job.conversationId = identity.conversationId || null;
+    job.conversationType = identity.type || (identity.conversationId ? 'existing' : 'new');
+    job.targetKey = identity.key || (job.conversationId
+        ? `${job.provider}:c:${job.conversationId}`
+        : `${job.provider}:${job.conversationType}`);
+    job.rolloverToConversationId = job.conversationId;
+    if (!job.rolloverRebindApplied) {
+        job.conversationGeneration = Number(job.conversationGeneration || 0) + 1;
+        job.rolloverRebindApplied = true;
+    }
+    job.rolloverStage = 'identity-confirmed';
+    job.updatedAt = Date.now();
+    return job;
+}
+
+function isVerifiedFreshConversation(adapter, identity, fromConversationId, navigationStarted) {
+    if (adapter && typeof adapter.isFreshConversationIdentity === 'function' && adapter.isFreshConversationIdentity(identity, fromConversationId)) {
+        return true;
+    }
+    return navigationStarted === true && identity?.provider === 'chatgpt' && identity?.type === 'new';
+}
+
+async function confirmFreshConversationIdentity(tabId, job, adapter, fromConversationId) {
+    const deadline = Date.now() + 20000;
+    const pollMs = Math.max(20, Number(QUEUE_WAIT_POLICY.submissionAckPollMs) || 50);
+
+    while (Date.now() <= deadline) {
+        if (!jobs.has(tabId) || !job || job.isStopped || job.isPaused || !job.isRunning) {
+            return { ok: false, interrupted: true, identity: null };
+        }
+        const identity = await resolveTabConversationIdentity(tabId);
+        if (isVerifiedFreshConversation(adapter, identity, fromConversationId, job.rolloverNavigationStarted)) {
+            return { ok: true, identity };
+        }
+        await sleep(pollMs);
+    }
+
+    return { ok: false, interrupted: false, identity: await resolveTabConversationIdentity(tabId) };
+}
+
+async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
+    if (!job || job.isStopped || job.isPaused || !job.isRunning) {
+        return { action: 'return' };
+    }
+
+    const adapter = getActiveProviderAdapter(job.provider || 'chatgpt') || getActiveProviderAdapter('chatgpt');
+    const startPlan = adapter && typeof adapter.startNewConversation === 'function'
+        ? adapter.startNewConversation()
+        : { ok: false, url: '', method: 'unsupported' };
+    const newConversationUrl = startPlan?.url || (typeof adapter?.getNewConversationUrl === 'function' ? adapter.getNewConversationUrl() : '');
+
+    if (!adapter || typeof adapter.isFreshConversationIdentity !== 'function' || !newConversationUrl) {
+        pauseJob(tabId, 'Conversation reached maximum length, but automatic rollover is unavailable for this provider.', {
+            phase: 'rollover',
+            failureClass: 'conversation-max-length'
+        });
+        return { action: 'return' };
+    }
+
+    if (!job.rolloverInProgress) {
+        job.rolloverInProgress = true;
+        job.rolloverStage = 'detected';
+        job.rolloverReason = 'conversation-max-length';
+        job.rolloverFromConversationId = job.conversationId || job.rolloverFromConversationId || null;
+        job.rolloverToConversationId = null;
+        job.rolloverNavigationStarted = false;
+        job.rolloverRebindApplied = false;
+        job.handoffSubmitted = false;
+        job.handoffEstablished = false;
+        job.handoffFingerprint = '';
+        job.currentPhase = 'rollover-in-progress';
+        job.retryClass = 'conversation-max-length';
+        job.updatedAt = Date.now();
+        await updateRunningJobsStorage({ force: true });
+        logQueueEvent(tabId, 'warn', 'Conversation capacity reached; starting automatic rollover.', {
+            event: 'conversation-capacity-reached',
+            runId: job.runId || '',
+            fromConversationId: job.rolloverFromConversationId,
+            conversationGeneration: Number(job.conversationGeneration || 0),
+            commandNumber: job.currentCommandNumber || 0,
+            completedCount: Number(job.completedCount || 0),
+            remaining: getRemainingCount(job),
+            currentMessageLength: String(job.currentMessage || '').length
+        });
+    } else {
+        job.currentPhase = 'rollover-in-progress';
+        job.retryClass = 'conversation-max-length';
+    }
+
+    resetCommandDeliveryState(job);
+    resetCommandRetryState(job);
+    resetWaitTracking(job);
+    await updateRunningJobsStorage({ force: true });
+
+    const fromConversationId = job.rolloverFromConversationId || null;
+    const identityStages = new Set(['identity-confirmed', 'handoff-sending', 'handoff-waiting', 'handoff-established', 'resumed']);
+
+    if (!identityStages.has(job.rolloverStage) || !job.rolloverRebindApplied) {
+        const currentIdentity = await resolveTabConversationIdentity(tabId);
+        const alreadyFresh = isVerifiedFreshConversation(adapter, currentIdentity, fromConversationId, job.rolloverNavigationStarted);
+
+        if (!alreadyFresh) {
+            if (!job.rolloverNavigationStarted) {
+                job.rolloverNavigationStarted = true;
+                job.rolloverStage = 'navigating';
+                job.updatedAt = Date.now();
+                await updateRunningJobsStorage({ force: true });
+                logQueueEvent(tabId, 'info', 'Opening a fresh ChatGPT conversation for rollover.', {
+                    event: 'rollover-started',
+                    runId: job.runId || '',
+                    fromConversationId,
+                    method: startPlan.method || 'route',
+                    conversationGeneration: Number(job.conversationGeneration || 0)
+                });
+                await updateTabUrl(tabId, newConversationUrl);
+            }
+
+            job.rolloverStage = 'awaiting-new-identity';
+            job.updatedAt = Date.now();
+            await updateRunningJobsStorage({ force: true });
+
+            const confirmed = await confirmFreshConversationIdentity(tabId, job, adapter, fromConversationId);
+            if (confirmed.interrupted || !jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+                return { action: 'return' };
+            }
+            if (!confirmed.ok) {
+                pauseJob(tabId, 'Could not confirm a fresh ChatGPT conversation after maximum-length rollover.', {
+                    phase: 'rollover',
+                    failureClass: 'conversation-max-length'
+                });
+                return { action: 'return' };
+            }
+            applyAuthorizedConversationRebind(job, confirmed.identity);
+        } else if (!job.rolloverRebindApplied) {
+            applyAuthorizedConversationRebind(job, currentIdentity);
+        }
+
+        await updateRunningJobsStorage({ force: true });
+        logQueueEvent(tabId, 'success', 'Fresh ChatGPT conversation confirmed for rollover.', {
+            event: 'new-conversation-confirmed',
+            runId: job.runId || '',
+            fromConversationId,
+            toConversationId: job.conversationId,
+            conversationType: job.conversationType,
+            conversationGeneration: Number(job.conversationGeneration || 0)
+        });
+    }
+
+    if (!job.handoffEstablished) {
+        const remainingAfterCurrent = Math.max(0, (Array.isArray(job.queue) ? job.queue.length : 0));
+        const handoffText = adapter.buildContinuationHandoffMessage({
+            runId: job.runId,
+            currentCommandNumber: job.currentCommandNumber,
+            completedCount: job.completedCount,
+            remainingCount: remainingAfterCurrent,
+            conversationGeneration: job.conversationGeneration,
+            pendingMessageLength: String(job.currentMessage || job.queue?.[0] || '').length
+        });
+        job.handoffFingerprint = job.handoffFingerprint || fingerprintCommandTextForJob(handoffText);
+
+        if (!job.handoffSubmitted) {
+            const inspect = await inspectTabCommandTurns(tabId, {
+                expectedText: handoffText,
+                expectedFingerprint: job.handoffFingerprint
+            });
+            const alreadyPresent = !!(inspect?.snapshot?.matchedUserTurnId ||
+                (inspect?.snapshot?.userTurns || []).some(turn => turn.matchedExpected));
+
+            job.rolloverStage = 'handoff-sending';
+            job.updatedAt = Date.now();
+            await updateRunningJobsStorage({ force: true });
+
+            if (!alreadyPresent) {
+                const sendResult = await sendPromptToSpecificTab(tabId, handoffText);
+                if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+                    return { action: 'return' };
+                }
+                if (!sendResult.ok) {
+                    pauseJob(tabId, sendResult.error || 'Could not establish continuation handoff in the new conversation.', {
+                        phase: 'rollover-handoff',
+                        failureClass: sendResult.details?.failureClass || 'conversation-max-length'
+                    });
+                    return { action: 'return' };
+                }
+            }
+
+            job.handoffSubmitted = true;
+            job.rolloverStage = 'handoff-waiting';
+            job.updatedAt = Date.now();
+            resetCommandDeliveryState(job);
+            resetWaitTracking(job);
+            await updateRunningJobsStorage({ force: true });
+        }
+
+        const queueSettings = await getQueueSettings();
+        const handoffWait = await waitForTabResponse(tabId, {
+            waitForExistingGeneration: true,
+            commandNumber: 0,
+            totalMessages: getTotalMessages(job),
+            queueSettings,
+            maxWaitMs: Math.min(Number(QUEUE_WAIT_POLICY.responseMaxWaitMs) || 60000, 60000),
+            checkIntervalMs: Number(QUEUE_WAIT_POLICY.checkIntervalMs) || 1000
+        });
+        if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+            return { action: 'return' };
+        }
+        if (!handoffWait.ok && !isConversationCapacityFailure(handoffWait)) {
+            pauseJob(tabId, handoffWait.error || 'Continuation handoff did not complete in the new conversation.', {
+                phase: 'rollover-handoff',
+                failureClass: handoffWait.details?.failureClass || 'conversation-max-length'
+            });
+            return { action: 'return' };
+        }
+
+        job.handoffEstablished = true;
+        job.rolloverStage = 'handoff-established';
+        job.updatedAt = Date.now();
+        await updateRunningJobsStorage({ force: true });
+        logQueueEvent(tabId, 'success', 'Continuation handoff established in the new conversation.', {
+            event: 'handoff-established',
+            runId: job.runId || '',
+            conversationGeneration: Number(job.conversationGeneration || 0),
+            handoffLength: String(handoffText || '').length,
+            completedCount: Number(job.completedCount || 0)
+        });
+    }
+
+    const preservedCurrent = job.currentMessage || null;
+    const preservedCommandNumber = Number(job.currentCommandNumber || 0);
+    if (preservedCurrent) {
+        job.queue.unshift(preservedCurrent);
+        job.currentMessage = null;
+        job.currentCommandNumber = 0;
+    }
+
+    resetCommandDeliveryState(job);
+    resetCommandRetryState(job);
+    resetWaitTracking(job);
+    job.rolloverInProgress = false;
+    job.rolloverStage = 'resumed';
+    job.rolloverNavigationStarted = false;
+    job.rolloverRebindApplied = false;
+    job.handoffSubmitted = false;
+    job.handoffEstablished = false;
+    job.handoffFingerprint = '';
+    job.currentPhase = 'queued';
+    job.lastError = '';
+    job.updatedAt = Date.now();
+    await updateRunningJobsStorage({ force: true });
+    logQueueEvent(tabId, 'success', 'Queue resumed after conversation rollover.', {
+        event: 'queue-resumed-after-rollover',
+        runId: job.runId || '',
+        conversationId: job.conversationId,
+        conversationGeneration: Number(job.conversationGeneration || 0),
+        completedCount: Number(job.completedCount || 0),
+        remaining: getRemainingCount(job),
+        nextCommandNumber: preservedCommandNumber || (Number(job.completedCount || 0) + 1)
+    });
+
+    return { action: 'continue' };
 }
 
 let queueStateWrite = Promise.resolve();
@@ -533,6 +868,7 @@ function restoreDurableJobs(durableJobs) {
             submissionAckSource: rawJob.submissionAckSource || '',
             terminalAckSource: rawJob.terminalAckSource || '',
             lastResponsePhase: rawJob.lastResponsePhase || '',
+            ...copyRolloverFields(rawJob),
             startedAt: Number(rawJob.startedAt || Date.now()),
             updatedAt: Number(rawJob.updatedAt || Date.now())
         };
@@ -771,6 +1107,7 @@ function handleStartSequence(request, sendResponse) {
             sawDeepResearch: false,
             sawGenerating: false,
             ...emptyDeliveryFields(),
+            ...emptyRolloverFields(),
             startedAt: Date.now(),
             updatedAt: Date.now()
         });
@@ -892,6 +1229,7 @@ async function startNewJobFromEnqueueResult(tabId, message, waitForIdleBeforeSta
         sawDeepResearch: false,
         sawGenerating: false,
         ...emptyDeliveryFields(),
+        ...emptyRolloverFields(),
         startedAt: Date.now(),
         updatedAt: Date.now()
     });
@@ -1126,6 +1464,12 @@ async function processQueue(tabId) {
 
     try {
         while (job.isRunning && !job.isPaused && !job.isStopped) {
+            if (job.rolloverInProgress || job.currentPhase === 'rollover-in-progress') {
+                const result = await handleConversationCapacityRollover(tabId, job);
+                if (result.action === 'return') return;
+                if (result.action === 'continue') continue;
+            }
+
             if (job.currentMessage && job.currentPhase === 'terminal') {
                 completeCurrentCommand(tabId, job, getTotalMessages(job), collectDeliveryDiagnostics(job, {
                     terminalAckSource: job.terminalAckSource || 'durable-recovery'
@@ -1167,6 +1511,11 @@ async function processQueue(tabId) {
             if (job.waitForIdleBeforeSend) {
                 const validation = await validateJobTargetConversation(tabId, job);
                 if (!validation.ok) {
+                    if (validation.awaitingRollover || job.rolloverInProgress) {
+                        const rolloverResult = await handleConversationCapacityRollover(tabId, job);
+                        if (rolloverResult.action === 'return') return;
+                        if (rolloverResult.action === 'continue') continue;
+                    }
                     logQueueEvent(tabId, 'error', validation.reason, {
                         phase: 'pre-send-validation',
                         mismatch: true
@@ -1181,6 +1530,11 @@ async function processQueue(tabId) {
 
             const validation = await validateJobTargetConversation(tabId, job);
             if (!validation.ok) {
+                if (validation.awaitingRollover || job.rolloverInProgress) {
+                    const rolloverResult = await handleConversationCapacityRollover(tabId, job);
+                    if (rolloverResult.action === 'return') return;
+                    if (rolloverResult.action === 'continue') continue;
+                }
                 logQueueEvent(tabId, 'error', validation.reason, {
                     phase: 'pre-send-validation',
                     mismatch: true
@@ -1250,6 +1604,10 @@ async function handleProcessWaiting(tabId, job) {
     }
 
     if (!waitResult.ok) {
+        if (isConversationCapacityFailure(waitResult)) {
+            return await handleConversationCapacityRollover(tabId, job, waitResult);
+        }
+
         if (waitResult.isDeliveryTimeout && queueSettings.queueDeliveryTimeoutRefresh !== false) {
             const recoveryResult = await recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages, queueSettings);
             if (recoveryResult.action === 'complete') {
@@ -1424,6 +1782,10 @@ async function handleProcessSending(tabId, job) {
     }
 
     if (!sendResult.ok) {
+        if (isConversationCapacityFailure(sendResult)) {
+            return await handleConversationCapacityRollover(tabId, job, sendResult);
+        }
+
         logQueueEvent(tabId, 'error', `Failed to submit command ${job.currentCommandNumber}/${totalMessages}.`, {
             commandNumber: job.currentCommandNumber,
             totalMessages,
@@ -1473,6 +1835,10 @@ async function handleProcessSending(tabId, job) {
     }
 
     if (!waitResult.ok) {
+        if (isConversationCapacityFailure(waitResult)) {
+            return await handleConversationCapacityRollover(tabId, job, waitResult);
+        }
+
         if (waitResult.isDeliveryTimeout && queueSettings.queueDeliveryTimeoutRefresh !== false) {
             const recoveryResult = await recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages, queueSettings);
             if (recoveryResult.action === 'complete') {
@@ -1719,7 +2085,9 @@ function classifyQueueFailure(phase, reason, diagnostics = {}) {
 
     let failureClass = forcedClass;
     if (!failureClass) {
-        if (details.stopped === true || /queue was stopped/i.test(message)) {
+        if (details.conversationCapacityReached === true || details.requiresNewConversation === true || state.conversationCapacityReached === true || state.requiresNewConversation === true || details.responseState?.source === 'conversation-max-length' || /conversation-max-length|maximum length for this conversation/i.test(message)) {
+            failureClass = 'conversation-max-length';
+        } else if (details.stopped === true || /queue was stopped/i.test(message)) {
             failureClass = 'user-stop';
         } else if (details.compatibilityFailure || /compatibility failure/i.test(message)) {
             failureClass = 'compatibility';
@@ -2894,6 +3262,23 @@ async function waitForTabResponse(tabId, context = {}) {
                         return;
                     }
 
+                    if (state.conversationCapacityReached || state.requiresNewConversation || responseState?.source === 'conversation-max-length') {
+                        clearInterval(checkInterval);
+                        resolve({
+                            ok: false,
+                            isDeliveryTimeout: false,
+                            error: 'ChatGPT conversation reached maximum length.',
+                            details: buildWaitDetails({
+                                failureClass: 'conversation-max-length',
+                                conversationCapacityReached: true,
+                                requiresNewConversation: true,
+                                state,
+                                responseState
+                            })
+                        });
+                        return;
+                    }
+
                     if (state.hasError || state.hasTryAgainButton || phase === 'error') {
                         clearInterval(checkInterval);
                         resolve({
@@ -3212,6 +3597,7 @@ function getRunningJobsSnapshot() {
             submissionAckSource: job.submissionAckSource || '',
             terminalAckSource: job.terminalAckSource || '',
             lastResponsePhase: job.lastResponsePhase || '',
+            ...copyRolloverFields(job),
             startedAt: job.startedAt,
             updatedAt: job.updatedAt
         };
@@ -3376,6 +3762,7 @@ function getDurableJobsState() {
             submissionAckSource: job.submissionAckSource || '',
             terminalAckSource: job.terminalAckSource || '',
             lastResponsePhase: job.lastResponsePhase || '',
+            ...copyRolloverFields(job),
             startedAt: job.startedAt,
             updatedAt: job.updatedAt
         };
@@ -3577,6 +3964,13 @@ function getTab(tabId) {
     );
 }
 
+function updateTabUrl(tabId, url) {
+    return extensionApiPromise(
+        (done) => chrome.tabs.update(tabId, { url }, done),
+        () => chrome.tabs.update(tabId, { url })
+    );
+}
+
 function queryTabs(queryInfo) {
     return extensionApiPromise(
         (done) => chrome.tabs.query(queryInfo, done),
@@ -3685,11 +4079,13 @@ function isSensitiveLogKey(key) {
         normalized === 'errorsnippet' ||
         normalized === 'researchstatuspreview' ||
         normalized === 'recoveredturnpreview' ||
-        normalized === 'assistantpreview'
+        normalized === 'assistantpreview' ||
+        normalized === 'handofftext' ||
+        normalized === 'handoff'
     ) {
         return true;
     }
-    return normalized.includes('preview') || normalized.includes('snippet');
+    return normalized.includes('preview') || normalized.includes('snippet') || normalized.includes('handofftext');
 }
 
 function redactSensitiveLogValue(value) {
@@ -4353,6 +4749,9 @@ if (typeof module !== 'undefined' && module.exports) {
         waitForTabResponse,
         retryCurrentCommandIfEnabled,
         classifyQueueFailure,
+        handleConversationCapacityRollover,
+        isConversationCapacityFailure,
+        applyAuthorizedConversationRebind,
         getRetryBackoffDelayMs,
         handleRetryPausedJob,
         completeCurrentCommand,

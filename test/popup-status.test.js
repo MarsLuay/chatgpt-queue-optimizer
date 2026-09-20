@@ -26,6 +26,8 @@ test('popup queue status labels cover exposed queue phases', () => {
     assert.equal(getPopupQueueStatusLabel({ status: 'running', currentPhase: 'waiting' }), 'Waiting');
     assert.equal(getPopupQueueStatusLabel({ status: 'running', currentPhase: 'waiting-for-idle' }), 'Waiting for idle');
     assert.equal(getPopupQueueStatusLabel({ status: 'running', currentPhase: 'retry-wait' }), 'Retrying');
+    assert.equal(getPopupQueueStatusLabel({ status: 'running', currentPhase: 'rollover-in-progress' }), 'New conversation');
+    assert.equal(getPopupQueueStatusLabel({ status: 'running', rolloverInProgress: true }), 'New conversation');
     assert.equal(getPopupQueueStatusLabel({ status: 'paused', isPaused: true }), 'Paused');
     assert.equal(getPopupQueueStatusLabel({ status: 'failed' }), 'Failed');
     assert.equal(getPopupQueueStatusLabel({ status: 'complete' }), 'Complete');
