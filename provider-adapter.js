@@ -229,6 +229,51 @@
         return normalizeCommandText(node?.innerText || node?.textContent || '');
     }
 
+    const ASSISTANT_ERROR_STATUS_ATTRIBUTES = [
+        'data-message-status',
+        'data-message-state',
+        'data-stop-reason',
+        'data-finish-reason',
+        'data-status',
+        'data-state',
+        'data-error'
+    ];
+    const ASSISTANT_ERROR_STATUS_VALUES = new Set([
+        'error',
+        'failed',
+        'failure',
+        'assistant-error',
+        'assistant_error',
+        'error-stop',
+        'error_stop'
+    ]);
+
+    function hasAssistantErrorStop(node) {
+        if (!node || typeof node.getAttribute !== 'function') {
+            return false;
+        }
+
+        const candidates = [node];
+        try {
+            candidates.push(...Array.from(node.querySelectorAll?.(
+                ASSISTANT_ERROR_STATUS_ATTRIBUTES.map(attribute => `[${attribute}]`).join(',')
+            ) || []));
+        } catch {
+            // A provider DOM can change while it is being inspected.
+        }
+
+        return candidates.some(candidate => ASSISTANT_ERROR_STATUS_ATTRIBUTES.some(attribute => {
+            const value = String(candidate.getAttribute?.(attribute) || '').trim().toLowerCase();
+            if (!value) {
+                return false;
+            }
+            if (attribute === 'data-error') {
+                return value === 'true' || value === '1' || value === 'yes' || ASSISTANT_ERROR_STATUS_VALUES.has(value);
+            }
+            return ASSISTANT_ERROR_STATUS_VALUES.has(value);
+        }));
+    }
+
     function getTurnId(node, index, role, fingerprint) {
         return node?.getAttribute?.('data-message-id') ||
             node?.getAttribute?.('data-testid') ||
@@ -792,13 +837,15 @@
 
                 if (role === 'assistant') {
                     const streaming = !!(node.querySelector?.('[data-message-streaming="true"], [data-is-streaming="true"], .result-streaming'));
+                    const errorStop = hasAssistantErrorStop(node);
                     assistantTurns.push({
                         turnId,
                         index,
                         followingUserTurnId: userTurns.length > 0 ? userTurns[userTurns.length - 1].turnId : null,
                         fingerprint,
                         streaming,
-                        hasCompletedText: !streaming && text.length > 0
+                        hasErrorStop: errorStop,
+                        hasCompletedText: !streaming && !errorStop && text.length > 0
                     });
                 }
             });
@@ -844,6 +891,19 @@
                     deepResearchActive: false,
                     hasCompletedAssistant: false,
                     source: 'conversation-max-length'
+                };
+            }
+
+            if (followingAssistant?.hasErrorStop) {
+                return {
+                    phase: 'error',
+                    userTurnId,
+                    assistantTurnId: followingAssistant.turnId,
+                    conversationId,
+                    generating: false,
+                    deepResearchActive: false,
+                    hasCompletedAssistant: false,
+                    source: 'assistant-error-stop'
                 };
             }
 
@@ -1233,6 +1293,7 @@
 
             const turns = this.getConversationTurns(doc);
             const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
+            const assistantErrorStop = getNodeRole(latestTurn) === 'assistant' && hasAssistantErrorStop(latestTurn);
             const inActiveSurface = (node) => this.isActiveResponseNode(node, turns, latestTurn);
 
             const buttons = Array.from(doc.querySelectorAll('button')).filter(inActiveSurface);
@@ -1308,13 +1369,15 @@
                 : (this.compatibilitySignals.errorMarkers.find(marker => errorSearchText.includes(marker)) || '');
             const matchedError = conversationCapacityReached
                 ? 'conversation-max-length'
-                : (matchedDeliveryTimeout ? 'Message delivery timed out. Please try again.' : matchedGeneralError);
+                : (matchedDeliveryTimeout
+                    ? 'Message delivery timed out. Please try again.'
+                    : (assistantErrorStop ? 'assistant-error-stop' : matchedGeneralError));
             const errorSnippet = matchedError || '';
 
             const retryMatch = this.getRetryButtonMatch(doc);
             const hasTryAgainButton = conversationCapacityReached ? false : !!retryMatch.element;
 
-            const hasKnownError = !!matchedError || hasDeliveryTimedOut || conversationCapacityReached;
+            const hasKnownError = !!matchedError || hasDeliveryTimedOut || conversationCapacityReached || assistantErrorStop;
             const isWorking = hasActiveStopButton || hasResultStreaming || hasActiveToolOrResearch;
             const generating = !hasKnownError && isWorking;
             const deepResearchActive = !hasKnownError && isWorking && isDeepResearch;
@@ -1349,7 +1412,9 @@
                     research: matchedResearchMarker ? `researchMarkers:${matchedResearchMarker}` : null,
                     error: conversationCapacityReached
                         ? (alertMatches[0]?.selector || statusMatches[0]?.selector || 'conversationCapacityMarkers')
-                        : (alertMatches[0]?.selector || (hasTryAgainButton ? retryMatch.selector || retryMatch.signalKey : null)),
+                        : (assistantErrorStop
+                            ? 'assistant-error-stop'
+                            : (alertMatches[0]?.selector || (hasTryAgainButton ? retryMatch.selector || retryMatch.signalKey : null))),
                     retry: hasTryAgainButton ? (retryMatch.selector || retryMatch.signalKey) : null,
                     scope: 'active-response',
                     compatibility: compatibilityState
@@ -1477,7 +1542,8 @@
 
             const hasDeliveryTimeout = this.compatibilitySignals.deliveryTimeoutMarkers.some(marker => alertText.includes(marker));
             const hasGeneralError = this.compatibilitySignals.errorMarkers.some(marker => alertText.includes(marker));
-            const hasError = hasDeliveryTimeout || hasGeneralError;
+            const hasErrorStop = hasAssistantErrorStop(latestTurn);
+            const hasError = hasDeliveryTimeout || hasGeneralError || hasErrorStop;
 
             const retryBtn = this.getRetryButton(latestTurn);
             const hasRetry = !!retryBtn;
@@ -1486,6 +1552,7 @@
                 isAssistant: true,
                 text,
                 hasError,
+                hasErrorStop,
                 hasDeliveryTimeout,
                 hasRetry,
                 hasCompletedText: isAssistant && !hasError && !hasRetry && text.length > 0

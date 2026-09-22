@@ -341,6 +341,73 @@ test('finite retry exhausts exactly at the default attempt limit', async () => {
     restoreConsole();
 });
 
+test('assistant error stop settles after bounded retries without dropping queued work', async () => {
+    const restoreConsole = muteConsole();
+    const tabId = 2968;
+    const job = createJob(tabId, {
+        queue: ['y'],
+        currentMessage: 'x',
+        totalMessages: 2,
+        currentPhase: 'awaiting-response',
+        deliveryState: 'confirmed-submission',
+        submittedUserTurnId: 'user-error-stop'
+    });
+    jobs.set(tabId, job);
+
+    await withRetryPolicy({ backoffBaseMs: 1, backoffMaxMs: 2, sleepSliceMs: 1, maxAutomaticAttempts: 2 }, async () => {
+        for (let attempt = 0; attempt < QUEUE_RETRY_POLICY.maxAutomaticAttempts; attempt += 1) {
+            const retried = await retryCurrentCommandIfEnabled(
+                tabId,
+                job,
+                'wait',
+                'ChatGPT showed an error or retry state.',
+                {
+                    failureClass: 'generation-error',
+                    responseState: { source: 'assistant-error-stop' }
+                }
+            );
+            assert.equal(retried, true);
+            assert.equal(job.currentMessage, 'x');
+            assert.deepEqual(job.queue, ['y']);
+        }
+
+        const exhausted = await retryCurrentCommandIfEnabled(
+            tabId,
+            job,
+            'wait',
+            'ChatGPT showed an error or retry state.',
+            {
+                failureClass: 'generation-error',
+                responseState: { source: 'assistant-error-stop' }
+            }
+        );
+
+        assert.equal(exhausted, false);
+        assert.equal(job.retryAttemptCount, 2);
+        assert.equal(job.retryExhausted, true);
+        assert.match(job.lastError, /Automatic retry exhausted after 2 attempts/);
+
+        pauseJob(tabId, job.lastError, {
+            phase: 'wait',
+            retryClass: job.retryClass,
+            retryAttemptCount: job.retryAttemptCount,
+            diagnostics: { responseState: { source: 'assistant-error-stop' } }
+        });
+
+        assert.equal(job.isPaused, true);
+        assert.equal(job.completedCount, 0);
+        assert.equal(job.currentMessage, 'x');
+        assert.deepEqual(job.queue, ['y']);
+
+        const snapshot = getRunningJobsSnapshot()[tabId];
+        assert.equal(snapshot.currentMessage, undefined);
+        assert.equal(snapshot.currentMessageLength, 1);
+    });
+
+    jobs.clear();
+    restoreConsole();
+});
+
 test('unlimited retry continues past the finite limit and stays interruptible', async () => {
     const restoreConsole = muteConsole();
     const tabId = 2903;
