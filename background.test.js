@@ -238,6 +238,38 @@ test('sanitizeLogValue redacts nested conversation fields and keeps structural m
   assert.deepEqual(sanitized.nested.currentMessage, { redacted: true, length: secret.length });
 });
 
+test('sanitizeLogValue redacts assistant error diagnostics beyond prompt previews', () => {
+  const markers = {
+    conversationContent: 'CQO-ISSUE-69-CONVERSATION-CONTENT',
+    credential: 'CQO-ISSUE-69-CREDENTIAL',
+    token: 'CQO-ISSUE-69-TOKEN',
+    privatePath: 'C:\\private\\queue-assistant-error.log',
+    privateUrl: 'https://chatgpt.com/c/private-conversation-69?access_token=CQO-ISSUE-69-TOKEN'
+  };
+  const sanitized = sanitizeLogValue({
+    state: {
+      conversationContent: markers.conversationContent,
+      accessToken: markers.token,
+      privatePath: markers.privatePath,
+      url: markers.privateUrl,
+      title: markers.conversationContent
+    },
+    responseState: {
+      conversationId: 'private-conversation-69',
+      credentials: markers.credential,
+      token: markers.token
+    }
+  });
+
+  const serialized = JSON.stringify(sanitized);
+  for (const marker of Object.values(markers)) {
+    assert.equal(serialized.includes(marker), false, marker);
+  }
+  assert.deepEqual(sanitized.state.accessToken, { redacted: true, length: markers.token.length });
+  assert.deepEqual(sanitized.state.privatePath, { redacted: true, length: markers.privatePath.length });
+  assert.deepEqual(sanitized.responseState.credentials, { redacted: true, length: markers.credential.length });
+});
+
 test('queue debug logs and running snapshots omit raw prompt text', async () => {
   await resetQueueFixture();
   const secret = 'CQO-ISSUE-46-LOG-SECRET-MARKER';

@@ -86,6 +86,7 @@ const {
     restoreDurableJobs,
     getDurableJobsState,
     getRunningJobsSnapshot,
+    flushQueueDebugLogs,
     QUEUE_RETRY_POLICY,
     QUEUE_WAIT_POLICY,
     QUEUE_SETTINGS_DEFAULTS,
@@ -172,13 +173,13 @@ function generationState(overrides = {}) {
     };
 }
 
-function installTab(tabId, getState) {
+function installTab(tabId, getState, getResponseState = () => null) {
     mockTabs.set(tabId, {
         id: tabId,
         url: `https://chatgpt.com/c/issue-29-${tabId}`,
         onMessage: (message) => {
             if (message.type === 'CHECK_GENERATION_STATE') {
-                return { state: getState() };
+                return { state: getState(), responseState: getResponseState() };
             }
             return { ok: true };
         }
@@ -405,6 +406,100 @@ test('assistant error stop settles after bounded retries without dropping queued
     });
 
     jobs.clear();
+    restoreConsole();
+});
+
+test('repeated assistant error stops preserve terminal diagnostics without private data', async () => {
+    const restoreConsole = muteConsole();
+    const tabId = 2969;
+    const promptMarker = 'CQO-ISSUE-69-PRIVATE-PROMPT';
+    const contentMarker = 'CQO-ISSUE-69-CONVERSATION-CONTENT';
+    const credentialMarker = 'CQO-ISSUE-69-CREDENTIAL';
+    const tokenMarker = 'CQO-ISSUE-69-TOKEN';
+    const privatePath = 'C:\\private\\assistant-error.log';
+    const job = createJob(tabId, {
+        queue: ['next-command'],
+        currentMessage: promptMarker,
+        totalMessages: 2,
+        currentPhase: 'awaiting-response',
+        deliveryState: 'confirmed-submission',
+        submittedUserTurnId: 'user-error-stop-69'
+    });
+    jobs.set(tabId, job);
+    installTab(tabId, () => ({
+        ...generationState({
+            hasError: true,
+            matchedError: 'assistant-error-stop',
+            conversationContent: contentMarker,
+            credentials: credentialMarker,
+            accessToken: tokenMarker,
+            privatePath,
+            url: `https://chatgpt.com/c/private-69?token=${tokenMarker}`,
+            title: contentMarker
+        }),
+        prompt: promptMarker
+    }), () => ({
+        phase: 'error',
+        source: 'assistant-error-stop',
+        userTurnId: 'user-error-stop-69'
+    }));
+
+    await withRetryPolicy({ backoffBaseMs: 1, backoffMaxMs: 2, sleepSliceMs: 1, maxAutomaticAttempts: 2 }, async () => {
+        const waitResult = await waitContext(tabId, {
+            commandBinding: { userTurnId: 'user-error-stop-69' }
+        });
+
+        assert.equal(waitResult.ok, false);
+        assert.equal(waitResult.details.failureClass, 'generation-error');
+        assert.equal(waitResult.details.responseState.source, 'assistant-error-stop');
+
+        for (let attempt = 0; attempt < QUEUE_RETRY_POLICY.maxAutomaticAttempts; attempt += 1) {
+            job.currentMessage = promptMarker;
+            job.currentCommandNumber = 1;
+            const retried = await retryCurrentCommandIfEnabled(
+                tabId,
+                job,
+                'wait',
+                waitResult.error,
+                waitResult.details
+            );
+            assert.equal(retried, true);
+            assert.equal(job.currentMessage, promptMarker);
+            assert.deepEqual(job.queue, ['next-command']);
+        }
+
+        const exhausted = await retryCurrentCommandIfEnabled(
+            tabId,
+            job,
+            'wait',
+            waitResult.error,
+            waitResult.details
+        );
+        assert.equal(exhausted, false);
+        assert.equal(job.retryExhausted, true);
+        assert.match(job.lastError, /Automatic retry exhausted after 2 attempts/);
+
+        pauseJob(tabId, job.lastError, {
+            phase: 'wait',
+            retryClass: job.retryClass,
+            retryAttemptCount: job.retryAttemptCount,
+            diagnostics: waitResult.details
+        });
+        await flushQueueDebugLogs();
+
+        assert.equal(job.isPaused, true);
+        assert.equal(job.completedCount, 0);
+        assert.equal(job.currentMessage, promptMarker);
+        assert.deepEqual(job.queue, ['next-command']);
+
+        const serializedLogs = JSON.stringify(mockStorageLocal.queueDebugLogs || []);
+        for (const marker of [promptMarker, contentMarker, credentialMarker, tokenMarker, privatePath]) {
+            assert.equal(serializedLogs.includes(marker), false, marker);
+        }
+    });
+
+    jobs.clear();
+    mockTabs.delete(tabId);
     restoreConsole();
 });
 
