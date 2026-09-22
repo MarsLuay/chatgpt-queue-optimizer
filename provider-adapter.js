@@ -274,6 +274,55 @@
         }));
     }
 
+    const TOOL_TURN_SELECTORS = [
+        '[data-tool-call]',
+        '[data-tool-result]',
+        '[data-tool-state]',
+        '[data-tool-status]',
+        '[data-testid*="tool-call"]',
+        '[data-testid*="tool-result"]'
+    ];
+    const INCOMPLETE_TOOL_STATES = new Set(['active', 'incomplete', 'pending', 'running', 'waiting']);
+
+    function hasIncompleteToolTurn(node) {
+        if (!node || typeof node.getAttribute !== 'function') {
+            return false;
+        }
+
+        const candidates = [node];
+        try {
+            candidates.push(...Array.from(node.querySelectorAll?.(TOOL_TURN_SELECTORS.join(',')) || []));
+        } catch {
+            // A provider DOM can change while it is being inspected.
+        }
+
+        const toolNode = candidates.find(candidate => TOOL_TURN_SELECTORS.some(selector => {
+            try {
+                return candidate.matches?.(selector);
+            } catch {
+                return false;
+            }
+        }));
+        if (!toolNode) {
+            return false;
+        }
+
+        const explicitState = candidates
+            .map(candidate => TOOL_TURN_SELECTORS
+                .flatMap(selector => selector.match(/\[([^=\]]+)/g) || [])
+                .map(attribute => attribute.slice(1))
+                .map(attribute => String(candidate.getAttribute?.(attribute) || '').trim().toLowerCase())
+                .find(Boolean))
+            .find(value => INCOMPLETE_TOOL_STATES.has(value));
+        if (explicitState) {
+            return true;
+        }
+
+        const turnText = getNodeText(node);
+        const toolText = getNodeText(toolNode);
+        return !turnText || turnText === toolText;
+    }
+
     function getTurnId(node, index, role, fingerprint) {
         return node?.getAttribute?.('data-message-id') ||
             node?.getAttribute?.('data-testid') ||
@@ -573,7 +622,7 @@
         /**
          * @param {any} doc
          * @param {{ userTurnId?: string|null, assistantTurnId?: string|null, commandFingerprint?: string, conversationId?: string|null }} [binding]
-         * @returns {{ phase: string, userTurnId: string|null, assistantTurnId: string|null, conversationId: string|null, generating: boolean, deepResearchActive: boolean, hasCompletedAssistant: boolean, source: string }}
+         * @returns {{ phase: string, userTurnId: string|null, assistantTurnId: string|null, conversationId: string|null, generating: boolean, deepResearchActive: boolean, hasCompletedAssistant: boolean, toolTurnIncomplete?: boolean, source: string }}
          */
         getCommandResponseState(doc, binding = {}) {
             const generation = this.getGenerationState(doc);
@@ -845,6 +894,7 @@
                         fingerprint,
                         streaming,
                         hasErrorStop: errorStop,
+                        hasIncompleteToolTurn: hasIncompleteToolTurn(node),
                         hasCompletedText: !streaming && !errorStop && text.length > 0
                     });
                 }
@@ -880,6 +930,7 @@
             const statusText = String(generation.researchStatusPreview || '').toLowerCase();
             const waitingForUser = (this.compatibilitySignals.waitingForUserMarkers || []).some(marker => statusText.includes(marker));
             const interrupted = (this.compatibilitySignals.interruptedMarkers || []).some(marker => statusText.includes(marker));
+            const incompleteToolTurn = followingAssistant?.hasIncompleteToolTurn === true;
 
             if (generation.conversationCapacityReached || generation.requiresNewConversation) {
                 return {
@@ -946,7 +997,7 @@
                 };
             }
 
-            const boundActivity = !!(generation.generating || generation.deepResearchActive || followingAssistant?.streaming);
+            const boundActivity = !!(generation.generating || generation.deepResearchActive || followingAssistant?.streaming || incompleteToolTurn);
             if (boundActivity) {
                 return {
                     phase: 'active',
@@ -956,7 +1007,10 @@
                     generating: !!generation.generating,
                     deepResearchActive: !!generation.deepResearchActive,
                     hasCompletedAssistant: false,
-                    source: generation.deepResearchActive ? 'deep-research' : (followingAssistant?.streaming ? 'streaming' : 'generating')
+                    toolTurnIncomplete: incompleteToolTurn,
+                    source: incompleteToolTurn
+                        ? 'incomplete-tool-turn'
+                        : (generation.deepResearchActive ? 'deep-research' : (followingAssistant?.streaming ? 'streaming' : 'generating'))
                 };
             }
 
