@@ -1787,6 +1787,29 @@ test('ChatGPT command response state treats idle gaps as transient until the bou
     assert.equal(active.phase, 'active');
 });
 
+test('ChatGPT command response state settles an assistant error stop as a retryable error', () => {
+    const chatgpt = getProvider('chatgpt');
+    const user = new MockTestElement('article', {
+        'data-testid': 'conversation-turn-1',
+        'data-message-author-role': 'user',
+        'data-message-id': 'user-68'
+    }, 'u');
+    const assistantError = new MockTestElement('article', {
+        'data-testid': 'conversation-turn-2',
+        'data-message-author-role': 'assistant',
+        'data-message-id': 'assistant-68',
+        'data-message-status': 'error'
+    }, 'x');
+    const { doc } = createTestDoc({ turns: [user, assistantError] });
+
+    const response = chatgpt.getCommandResponseState(doc, { userTurnId: 'user-68' });
+
+    assert.equal(response.phase, 'error');
+    assert.equal(response.source, 'assistant-error-stop');
+    assert.equal(response.hasCompletedAssistant, false);
+    assert.equal(JSON.stringify(response).includes('x'), false);
+});
+
 test('ChatGPT generation state detects maximum-length on the active surface only', () => {
     const chatgpt = getProvider('chatgpt');
     const exact = "You've reached the maximum length for this conversation, but you can keep talking by starting a new chat.";

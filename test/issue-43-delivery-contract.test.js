@@ -546,6 +546,7 @@ test('error retry stop interrupted and waiting-for-user never complete as succes
     const cases = [
         { tabId: 4310, responseState: responseState({ phase: 'error', source: 'generation-error' }), state: generationState({ hasError: true }), class: 'generation-error' },
         { tabId: 4311, responseState: responseState({ phase: 'error', source: 'retry-visible' }), state: generationState({ hasTryAgainButton: true, hasError: true }), class: 'retry-visible' },
+        { tabId: 4315, responseState: responseState({ phase: 'error', source: 'assistant-error-stop' }), state: generationState({ hasError: true, matchedError: 'assistant-error-stop' }), class: 'generation-error' },
         { tabId: 4312, responseState: responseState({ phase: 'interrupted', source: 'interrupted' }), state: generationState(), class: 'interrupted' },
         { tabId: 4313, responseState: responseState({ phase: 'waiting-for-user', source: 'waiting-for-user' }), state: generationState(), class: 'waiting-for-user' }
     ];
