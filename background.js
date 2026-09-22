@@ -4085,7 +4085,34 @@ function isSensitiveLogKey(key) {
     ) {
         return true;
     }
-    return normalized.includes('preview') || normalized.includes('snippet') || normalized.includes('handofftext');
+    if (normalized.includes('preview') || normalized.includes('snippet') || normalized.includes('handofftext')) {
+        return true;
+    }
+
+    return (
+        normalized === 'title' ||
+        normalized === 'url' ||
+        normalized === 'href' ||
+        normalized === 'location' ||
+        normalized.includes('path') ||
+        normalized.includes('filename') ||
+        normalized === 'conversationid' ||
+        normalized === 'conversationkey' ||
+        normalized.includes('conversationcontent') ||
+        normalized.includes('conversationtext') ||
+        normalized.includes('transcript') ||
+        normalized.includes('assistanttext') ||
+        normalized.includes('usertext') ||
+        normalized === 'token' ||
+        normalized.endsWith('token') ||
+        normalized.includes('secret') ||
+        normalized.includes('password') ||
+        normalized.includes('credential') ||
+        normalized.includes('authorization') ||
+        normalized.includes('cookie') ||
+        normalized.includes('apikey') ||
+        normalized.includes('privatekey')
+    );
 }
 
 function redactSensitiveLogValue(value) {
@@ -4126,7 +4153,7 @@ function sanitizeLogValue(value, depth = 0, key = '') {
     }
 
     if (value instanceof Error) {
-        return serializeError(value);
+        return sanitizeLogValue(serializeError(value), depth, key);
     }
 
     if (typeof value === 'string') {
