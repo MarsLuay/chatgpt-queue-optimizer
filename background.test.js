@@ -270,6 +270,38 @@ test('sanitizeLogValue redacts assistant error diagnostics beyond prompt preview
   assert.deepEqual(sanitized.responseState.credentials, { redacted: true, length: markers.credential.length });
 });
 
+test('sanitizeLogValue redacts incomplete tool-turn arguments and payloads', () => {
+  const markers = {
+    toolArguments: 'CQO-ISSUE-70-TOOL-ARGUMENTS',
+    toolInput: 'CQO-ISSUE-70-TOOL-INPUT',
+    toolOutput: 'CQO-ISSUE-70-TOOL-OUTPUT',
+    functionArguments: 'CQO-ISSUE-70-FUNCTION-ARGUMENTS'
+  };
+  const sanitized = sanitizeLogValue({
+    responseState: {
+      phase: 'active',
+      source: 'incomplete-tool-turn',
+      toolTurnIncomplete: true,
+      toolCall: {
+        name: 'private_tool',
+        arguments: markers.toolArguments
+      },
+      toolInput: markers.toolInput,
+      toolOutput: markers.toolOutput,
+      functionArguments: markers.functionArguments
+    }
+  });
+
+  const serialized = JSON.stringify(sanitized);
+  for (const marker of Object.values(markers)) {
+    assert.equal(serialized.includes(marker), false, marker);
+  }
+  assert.deepEqual(sanitized.responseState.toolCall, { redacted: true });
+  assert.deepEqual(sanitized.responseState.toolInput, { redacted: true, length: markers.toolInput.length });
+  assert.deepEqual(sanitized.responseState.toolOutput, { redacted: true, length: markers.toolOutput.length });
+  assert.deepEqual(sanitized.responseState.functionArguments, { redacted: true, length: markers.functionArguments.length });
+});
+
 test('queue debug logs and running snapshots omit raw prompt text', async () => {
   await resetQueueFixture();
   const secret = 'CQO-ISSUE-46-LOG-SECRET-MARKER';

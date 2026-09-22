@@ -1762,6 +1762,33 @@ test('ChatGPT command turn snapshot matches a new user turn without returning pr
     assert.equal(JSON.stringify(terminal).includes('#25 fixture topic'), false);
 });
 
+test('ChatGPT command response state keeps an incomplete tool turn active', () => {
+    const chatgpt = getProvider('chatgpt');
+    const user = new MockTestElement('article', {
+        'data-testid': 'conversation-turn-tool-user',
+        'data-message-author-role': 'user',
+        'data-message-id': 'user-tool-70'
+    }, 'tool turn fixture prompt');
+    const assistant = new MockTestElement('article', {
+        'data-testid': 'conversation-turn-tool-assistant',
+        'data-message-author-role': 'assistant',
+        'data-message-id': 'asst-tool-70'
+    });
+    assistant.appendChild(new MockTestElement('div', {
+        'data-testid': 'tool-call',
+        'data-tool-status': 'running'
+    }, 'CQO-ISSUE-70-PRIVATE-TOOL-ARGUMENTS'));
+    const { doc } = createTestDoc({ turns: [user, assistant] });
+    doc.defaultView = { location: { href: 'https://chatgpt.com/c/issue-70' } };
+
+    const response = chatgpt.getCommandResponseState(doc, { userTurnId: 'user-tool-70' });
+    assert.equal(response.phase, 'active');
+    assert.equal(response.source, 'incomplete-tool-turn');
+    assert.equal(response.toolTurnIncomplete, true);
+    assert.equal(response.hasCompletedAssistant, false);
+    assert.equal(JSON.stringify(response).includes('PRIVATE-TOOL-ARGUMENTS'), false);
+});
+
 test('ChatGPT command response state treats idle gaps as transient until the bound assistant turn completes', () => {
     const chatgpt = getProvider('chatgpt');
     const user = new MockTestElement('article', {

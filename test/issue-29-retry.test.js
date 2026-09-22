@@ -112,6 +112,16 @@ function muteConsole() {
     };
 }
 
+async function waitUntil(predicate, timeoutMs = 4000) {
+    const startedAt = Date.now();
+    while (!predicate()) {
+        if (Date.now() - startedAt > timeoutMs) {
+            assert.fail('Timed out waiting for queue state.');
+        }
+        await new Promise(resolve => { setTimeout(resolve, 10); });
+    }
+}
+
 async function withRetryPolicy(overrides, fn) {
     const original = { ...QUEUE_RETRY_POLICY };
     Object.assign(QUEUE_RETRY_POLICY, overrides);
@@ -500,6 +510,152 @@ test('repeated assistant error stops preserve terminal diagnostics without priva
 
     jobs.clear();
     mockTabs.delete(tabId);
+    restoreConsole();
+});
+
+test('incomplete tool turns recover idempotently and stop after bounded retries', async () => {
+    const restoreConsole = muteConsole();
+    const tabId = 2970;
+    const promptMarker = 'CQO-ISSUE-70-PRIVATE-PROMPT';
+    const toolArgumentMarker = 'CQO-ISSUE-70-PRIVATE-TOOL-ARGUMENTS';
+    const job = createJob(tabId, {
+        queue: ['next-command'],
+        currentMessage: promptMarker,
+        totalMessages: 2,
+        currentPhase: 'awaiting-response',
+        deliveryState: 'confirmed-submission',
+        submittedUserTurnId: 'user-tool-70'
+    });
+    jobs.set(tabId, job);
+
+    let polls = 0;
+    installTab(tabId, () => generationState(), () => {
+        polls += 1;
+        if (polls < 3) {
+            return {
+                phase: 'active',
+                source: 'incomplete-tool-turn',
+                toolTurnIncomplete: true,
+                toolArguments: toolArgumentMarker,
+                userTurnId: 'user-tool-70',
+                assistantTurnId: 'asst-tool-70'
+            };
+        }
+        return {
+            phase: 'terminal',
+            source: 'bound-assistant-turn',
+            userTurnId: 'user-tool-70',
+            assistantTurnId: 'asst-final-70',
+            hasCompletedAssistant: true
+        };
+    });
+
+    const waitPromise = waitForTabResponse(tabId, {
+        commandNumber: 1,
+        totalMessages: 2,
+        maxWaitMs: 500,
+        checkIntervalMs: 10,
+        terminalConfirmSamples: 1,
+        commandBinding: { userTurnId: 'user-tool-70' }
+    });
+    await waitUntil(() => jobs.get(tabId)?.lastResponsePhase === 'incomplete-tool', 1000);
+
+    const durableDuringTool = getDurableJobsState()[tabId];
+    assert.equal(durableDuringTool.deliveryState, 'active-response');
+    assert.equal(durableDuringTool.lastResponsePhase, 'incomplete-tool');
+    assert.equal(durableDuringTool.currentMessage, promptMarker);
+    assert.deepEqual(durableDuringTool.queue, ['next-command']);
+
+    const restored = restoreDurableJobs({ [tabId]: durableDuringTool })[0];
+    assert.equal(restored.currentPhase, 'awaiting-response');
+    assert.equal(restored.deliveryState, 'active-response');
+    assert.equal(restored.currentMessage, promptMarker);
+    assert.deepEqual(restored.queue, ['next-command']);
+
+    const completed = await waitPromise;
+    assert.equal(completed.ok, true);
+    assert.equal(completed.details.assistantTurnId, 'asst-final-70');
+    assert.equal(restored.completedCount, 0);
+    completeCurrentCommand(tabId, restored, 2, completed.details);
+    assert.equal(restored.completedCount, 1);
+    assert.equal(restored.currentMessage, null);
+    assert.deepEqual(restored.queue, ['next-command']);
+
+    const retryTabId = 2971;
+    const retryJob = createJob(retryTabId, {
+        queue: ['after-tool'],
+        currentMessage: promptMarker,
+        totalMessages: 2,
+        currentPhase: 'awaiting-response',
+        deliveryState: 'confirmed-submission',
+        submittedUserTurnId: 'user-tool-70-retry'
+    });
+    jobs.set(retryTabId, retryJob);
+    installTab(retryTabId, () => generationState(), () => ({
+        phase: 'active',
+        source: 'incomplete-tool-turn',
+        toolTurnIncomplete: true,
+        toolArguments: toolArgumentMarker,
+        userTurnId: 'user-tool-70-retry',
+        assistantTurnId: 'asst-tool-70-retry'
+    }));
+
+    await withRetryPolicy({ backoffBaseMs: 1, backoffMaxMs: 2, sleepSliceMs: 1, maxAutomaticAttempts: 2 }, async () => {
+        const waitResult = await waitForTabResponse(retryTabId, {
+            commandNumber: 1,
+            totalMessages: 2,
+            maxWaitMs: 35,
+            checkIntervalMs: 5,
+            terminalConfirmSamples: 1,
+            commandBinding: { userTurnId: 'user-tool-70-retry' }
+        });
+        assert.equal(waitResult.ok, false);
+        assert.equal(waitResult.details.failureClass, 'timeout');
+        assert.equal(waitResult.details.pendingWithoutTerminal, true);
+        assert.equal(waitResult.details.sawGenerating, true);
+
+        for (let attempt = 0; attempt < QUEUE_RETRY_POLICY.maxAutomaticAttempts; attempt += 1) {
+            retryJob.currentMessage = promptMarker;
+            retryJob.currentCommandNumber = 1;
+            assert.equal(await retryCurrentCommandIfEnabled(
+                retryTabId,
+                retryJob,
+                'wait',
+                waitResult.error,
+                waitResult.details
+            ), true);
+            assert.equal(retryJob.currentMessage, promptMarker);
+            assert.deepEqual(retryJob.queue, ['after-tool']);
+        }
+
+        assert.equal(await retryCurrentCommandIfEnabled(
+            retryTabId,
+            retryJob,
+            'wait',
+            waitResult.error,
+            waitResult.details
+        ), false);
+        assert.equal(retryJob.retryExhausted, true);
+        pauseJob(retryTabId, retryJob.lastError, {
+            phase: 'wait',
+            retryClass: retryJob.retryClass,
+            retryAttemptCount: retryJob.retryAttemptCount,
+            diagnostics: waitResult.details
+        });
+        await flushQueueDebugLogs();
+
+        assert.equal(retryJob.isPaused, true);
+        assert.equal(retryJob.completedCount, 0);
+        assert.equal(retryJob.currentMessage, promptMarker);
+        assert.deepEqual(retryJob.queue, ['after-tool']);
+        const serializedLogs = JSON.stringify(mockStorageLocal.queueDebugLogs || []);
+        assert.equal(serializedLogs.includes(promptMarker), false);
+        assert.equal(serializedLogs.includes(toolArgumentMarker), false);
+    });
+
+    jobs.clear();
+    mockTabs.delete(tabId);
+    mockTabs.delete(retryTabId);
     restoreConsole();
 });
 

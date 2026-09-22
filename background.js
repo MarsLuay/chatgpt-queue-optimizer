@@ -53,6 +53,10 @@ const SCHEDULED_ALARM_PREFIX = 'scheduled-msg:';
 // Chrome alarms may fire late, but a scheduled message must never be delivered early.
 const SCHEDULED_DUE_SKEW_MS = 0;
 
+function isIncompleteToolResponse(responseState = {}) {
+    return responseState?.toolTurnIncomplete === true || responseState?.source === 'incomplete-tool-turn';
+}
+
 /** @type {Promise<any>} */
 let scheduledStorageWrite = Promise.resolve();
 
@@ -3337,31 +3341,34 @@ async function waitForTabResponse(tabId, context = {}) {
                     job.lastResearchProgressAt = Date.now();
                 }
 
-                if (state.generating || deepResearchActive || phase === 'active') {
-                    if (!sawGenerating && (state.generating || phase === 'active')) {
+                    const incompleteToolTurn = isIncompleteToolResponse(responseState);
+                    const responseIsActive = state.generating || deepResearchActive || phase === 'active' || incompleteToolTurn;
+
+                    if (responseIsActive) {
+                    if (!sawGenerating && responseIsActive) {
                         logQueueEvent(tabId, 'info', `ChatGPT is responding for ${waitLabel}.`, {
                             commandNumber: context.commandNumber || 0,
                             totalMessages: context.totalMessages || 0,
                             elapsedMs: Date.now() - startedAt,
                             commandId: commandBinding.commandId || job.commandId || '',
                             userTurnId: responseState?.userTurnId || commandBinding.userTurnId || null,
-                            responsePhase: phase || 'active'
+                            responsePhase: incompleteToolTurn ? 'incomplete-tool' : (phase || 'active')
                         });
                     }
 
-                    sawGenerating = sawGenerating || !!state.generating || phase === 'active';
+                    sawGenerating = sawGenerating || !!state.generating || phase === 'active' || incompleteToolTurn;
                     sawDeepResearch = sawDeepResearch || deepResearchActive;
                     job.sawGenerating = sawGenerating;
                     job.sawDeepResearch = sawDeepResearch;
                     job.deliveryState = hasCommandBinding ? 'active-response' : job.deliveryState;
-                    job.lastResponsePhase = phase || 'active';
+                    job.lastResponsePhase = incompleteToolTurn ? 'incomplete-tool' : (phase || 'active');
                     if (responseState?.assistantTurnId) {
                         job.assistantTurnId = responseState.assistantTurnId;
                     }
                     terminalStreak = 0;
                     idleStreak = 0;
 
-                    if (state.generating || researchPreview !== lastResearchPreview || phase === 'active') {
+                    if (state.generating || researchPreview !== lastResearchPreview || phase === 'active' || incompleteToolTurn) {
                         job.lastResearchProgressAt = Date.now();
                         lastResearchPreview = researchPreview;
                     }
@@ -3377,7 +3384,7 @@ async function waitForTabResponse(tabId, context = {}) {
                             deepResearchActive,
                             sawGenerating,
                             sawDeepResearch,
-                            responsePhase: phase || 'active',
+                            responsePhase: incompleteToolTurn ? 'incomplete-tool' : (phase || 'active'),
                             settings: queueSettings
                         });
                         lastProgressLogAt = Date.now();
@@ -3398,7 +3405,7 @@ async function waitForTabResponse(tabId, context = {}) {
                     job.lastResponsePhase = phase;
                 }
 
-                const pageIsIdle = !state.generating && !deepResearchActive && phase !== 'active';
+                const pageIsIdle = !state.generating && !deepResearchActive && phase !== 'active' && !incompleteToolTurn;
 
                 if (context.waitForExistingGeneration) {
                     if (!pageIsIdle) {
@@ -3427,7 +3434,7 @@ async function waitForTabResponse(tabId, context = {}) {
                     return;
                 }
 
-                if (phase === 'transient-idle' || (hasCommandBinding && !phase && pageIsIdle && !sawGenerating && !sawDeepResearch)) {
+                if (!incompleteToolTurn && (phase === 'transient-idle' || (hasCommandBinding && !phase && pageIsIdle && !sawGenerating && !sawDeepResearch))) {
                     terminalStreak = 0;
                     idleStreak = 0;
                     job.lastResponsePhase = phase || 'transient-idle';
@@ -4103,6 +4110,15 @@ function isSensitiveLogKey(key) {
         normalized.includes('transcript') ||
         normalized.includes('assistanttext') ||
         normalized.includes('usertext') ||
+        normalized === 'arguments' ||
+        normalized === 'tool' ||
+        normalized === 'tools' ||
+        normalized === 'toolargs' ||
+        normalized.includes('toolargument') ||
+        normalized.includes('toolcall') ||
+        normalized.includes('toolinput') ||
+        normalized.includes('tooloutput') ||
+        normalized.includes('functionargument') ||
         normalized === 'token' ||
         normalized.endsWith('token') ||
         normalized.includes('secret') ||
