@@ -1426,7 +1426,8 @@ function handleStopSequence(request, sendResponse) {
             completedCount: job.completedCount || 0,
             totalMessages: getTotalMessages(job),
             remaining: getRemainingCount(job),
-            currentCommandNumber: job.currentCommandNumber || 0
+            currentCommandNumber: job.currentCommandNumber || 0,
+            ...getQueueFailureDiagnostics(job, job.currentPhase, {}, 'cancelled')
         });
 
         jobs.delete(tabId);
@@ -1448,7 +1449,8 @@ function handleStopAllSequences(sendResponse) {
             completedCount: job.completedCount || 0,
             totalMessages: getTotalMessages(job),
             remaining: getRemainingCount(job),
-            currentCommandNumber: job.currentCommandNumber || 0
+            currentCommandNumber: job.currentCommandNumber || 0,
+            ...getQueueFailureDiagnostics(job, job.currentPhase, {}, 'cancelled')
         });
         jobs.delete(tabId);
     }
@@ -1794,6 +1796,7 @@ async function handleProcessSending(tabId, job) {
             commandNumber: job.currentCommandNumber,
             totalMessages,
             error: sendResult.error || 'Could not send message to ChatGPT.',
+            ...getQueueFailureDiagnostics(job, 'send', sendResult.details, 'retry-or-pause'),
             diagnostics: collectDeliveryDiagnostics(job, sendResult.details || {})
         });
 
@@ -1896,6 +1899,7 @@ function completeCurrentCommand(tabId, job, totalMessages, diagnostics = {}) {
         commandNumber: job.completedCount,
         totalMessages,
         remaining: Math.max(0, job.queue.length),
+        ...getQueueFailureDiagnostics(job, 'terminal', diagnostics, 'terminal-success'),
         diagnostics: collectDeliveryDiagnostics(job, {
             ...diagnostics,
             terminalAckSource
@@ -1943,7 +1947,8 @@ function pauseJob(tabId, reason, details = {}) {
         totalMessages: getTotalMessages(job),
         remaining: getRemainingCount(job),
         failedMessagePreview: previewText(failedMessage, 160),
-        ...collectDeliveryDiagnostics(job),
+        ...getQueueFailureDiagnostics(job, details.phase || job.currentPhase, details.diagnostics, 'terminal-pause'),
+        ...collectDeliveryDiagnostics(job, details.diagnostics || details),
         ...details
     });
 
@@ -2041,19 +2046,98 @@ function getCommandBinding(job, context = {}) {
     };
 }
 
-function collectDeliveryDiagnostics(job, extra = {}) {
+function boundedDiagnosticValue(value, maxLength = 160) {
+    const normalized = String(value ?? '').replace(/\s+/g, ' ').trim();
+    if (!normalized) {
+        return '';
+    }
+    if (normalized.length <= maxLength) {
+        return normalized;
+    }
+    return `${normalized.slice(0, Math.max(1, maxLength - 1))}…`;
+}
+
+function getDiagnosticTurnIdentity(job, details = {}) {
+    const responseState = details.responseState && typeof details.responseState === 'object'
+        ? details.responseState
+        : {};
+    const userTurnId = boundedDiagnosticValue(
+        details.userTurnId || responseState.userTurnId || job?.submittedUserTurnId || ''
+    );
+    const assistantTurnId = boundedDiagnosticValue(
+        details.assistantTurnId || responseState.assistantTurnId || job?.assistantTurnId || ''
+    );
     return {
-        runId: job?.runId || '',
-        commandId: job?.commandId || '',
-        commandNumber: job?.currentCommandNumber || 0,
-        deliveryState: job?.deliveryState || '',
-        submissionAckSource: job?.submissionAckSource || '',
-        terminalAckSource: job?.terminalAckSource || extra.terminalAckSource || '',
-        userTurnId: job?.submittedUserTurnId || extra.userTurnId || null,
-        assistantTurnId: job?.assistantTurnId || extra.assistantTurnId || null,
-        lastResponsePhase: job?.lastResponsePhase || extra.phase || '',
-        commandFingerprint: job?.commandFingerprint || '',
-        ...extra
+        userTurnId: userTurnId || null,
+        assistantTurnId: assistantTurnId || null
+    };
+}
+
+function collectDeliveryDiagnostics(job, extra = {}) {
+    const turnIdentity = getDiagnosticTurnIdentity(job, extra);
+    return {
+        ...extra,
+        runId: boundedDiagnosticValue(job?.runId || extra.runId || ''),
+        commandId: boundedDiagnosticValue(job?.commandId || extra.commandId || ''),
+        commandNumber: job?.currentCommandNumber || extra.commandNumber || 0,
+        deliveryState: boundedDiagnosticValue(job?.deliveryState || extra.deliveryState || ''),
+        submissionAckSource: boundedDiagnosticValue(job?.submissionAckSource || extra.submissionAckSource || ''),
+        terminalAckSource: boundedDiagnosticValue(job?.terminalAckSource || extra.terminalAckSource || ''),
+        userTurnId: turnIdentity.userTurnId,
+        assistantTurnId: turnIdentity.assistantTurnId,
+        lastResponsePhase: boundedDiagnosticValue(
+            job?.lastResponsePhase || extra.phase || extra.responseState?.phase || ''
+        ),
+        commandFingerprint: boundedDiagnosticValue(job?.commandFingerprint || extra.commandFingerprint || ''),
+        turnIdentity
+    };
+}
+
+function summarizeProviderState(state = {}, responseState = {}) {
+    /** @type {Record<string, any>} */
+    const generation = state && typeof state === 'object' ? state : {};
+    /** @type {Record<string, any>} */
+    const response = responseState && typeof responseState === 'object' ? responseState : {};
+    /** @type {Record<string, any>} */
+    const matchedSignals = generation.matchedSignals && typeof generation.matchedSignals === 'object'
+        ? generation.matchedSignals
+        : {};
+
+    return {
+        phase: String(response.phase || generation.phase || ''),
+        source: String(response.source || ''),
+        generating: response.generating === true || generation.generating === true,
+        deepResearchActive: response.deepResearchActive === true || generation.deepResearchActive === true,
+        hasError: generation.hasError === true || response.phase === 'error',
+        hasTryAgainButton: generation.hasTryAgainButton === true,
+        hasDeliveryTimedOut: generation.hasDeliveryTimedOut === true,
+        conversationCapacityReached: generation.conversationCapacityReached === true,
+        requiresNewConversation: generation.requiresNewConversation === true,
+        compatibilityState: boundedDiagnosticValue(generation.compatibilityState || ''),
+        matchedSignal: boundedDiagnosticValue(
+            matchedSignals.error || generation.matchedError || response.source || ''
+        )
+    };
+}
+
+function getQueueFailureDiagnostics(job, phase, diagnostics = {}, retryDecision = '') {
+    /** @type {Record<string, any>} */
+    const details = diagnostics && typeof diagnostics === 'object' ? diagnostics : {};
+    const turnIdentity = getDiagnosticTurnIdentity(job, details);
+    const failurePhase = boundedDiagnosticValue(phase || details.phase || job?.currentPhase || '');
+    const providerState = summarizeProviderState(details.state, details.responseState);
+    return {
+        provider: boundedDiagnosticValue(job?.provider || 'chatgpt'),
+        stage: failurePhase,
+        queuePhase: boundedDiagnosticValue(job?.currentPhase || ''),
+        failurePhase,
+        turnIdentity,
+        providerState,
+        failureReason: boundedDiagnosticValue(providerState.matchedSignal || providerState.source || ''),
+        retryDecision: boundedDiagnosticValue(retryDecision || ''),
+        retryClass: boundedDiagnosticValue(details.failureClass || job?.retryClass || ''),
+        retryAttemptCount: Number(details.retryAttemptCount ?? job?.retryAttemptCount ?? 0),
+        retryMode: boundedDiagnosticValue(details.retryMode || job?.retryMode || '')
     };
 }
 
@@ -2192,6 +2276,7 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
             commandNumber: job.currentCommandNumber || 0,
             completedCount: job.completedCount || 0,
             totalMessages: getTotalMessages(job),
+            ...getQueueFailureDiagnostics(job, phase, diagnostics, 'terminal-retry-exhausted'),
             diagnostics
         });
         return false;
@@ -2220,6 +2305,7 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
         completedCount: job.completedCount || 0,
         totalMessages: getTotalMessages(job),
         remaining: getRemainingCount(job),
+        ...getQueueFailureDiagnostics(job, phase, diagnostics, 'retry-scheduled'),
         diagnostics
     });
 
@@ -3247,6 +3333,18 @@ async function waitForTabResponse(tabId, context = {}) {
                     const responseState = response?.responseState || null;
                     const phase = String(responseState?.phase || '');
 
+                    if (responseState && typeof responseState === 'object') {
+                        if (responseState.userTurnId && !job.submittedUserTurnId) {
+                            job.submittedUserTurnId = responseState.userTurnId;
+                        }
+                        if (responseState.assistantTurnId) {
+                            job.assistantTurnId = responseState.assistantTurnId;
+                        }
+                    }
+                    if (phase) {
+                        job.lastResponsePhase = phase;
+                    }
+
                     const isDeliveryTimeout = !!state.hasDeliveryTimedOut ||
                         (typeof state.matchedError === 'string' && /delivery time(?:d\s*)?out/i.test(state.matchedError)) ||
                         (typeof state.errorSnippet === 'string' && /delivery time(?:d\s*)?out/i.test(state.errorSnippet));
@@ -3291,6 +3389,7 @@ async function waitForTabResponse(tabId, context = {}) {
                             error: 'ChatGPT showed an error or retry state.',
                             details: buildWaitDetails({
                                 failureClass: state.hasTryAgainButton || responseState?.source === 'retry-visible' ? 'retry-visible' : 'generation-error',
+                                providerState: summarizeProviderState(state, responseState),
                                 state,
                                 responseState
                             })

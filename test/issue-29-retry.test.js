@@ -451,7 +451,8 @@ test('repeated assistant error stops preserve terminal diagnostics without priva
     }), () => ({
         phase: 'error',
         source: 'assistant-error-stop',
-        userTurnId: 'user-error-stop-69'
+        userTurnId: 'user-error-stop-69',
+        assistantTurnId: 'assistant-error-stop-69'
     }));
 
     await withRetryPolicy({ backoffBaseMs: 1, backoffMaxMs: 2, sleepSliceMs: 1, maxAutomaticAttempts: 2 }, async () => {
@@ -462,6 +463,20 @@ test('repeated assistant error stops preserve terminal diagnostics without priva
         assert.equal(waitResult.ok, false);
         assert.equal(waitResult.details.failureClass, 'generation-error');
         assert.equal(waitResult.details.responseState.source, 'assistant-error-stop');
+        assert.deepEqual(waitResult.details.providerState, {
+            phase: 'error',
+            source: 'assistant-error-stop',
+            generating: false,
+            deepResearchActive: false,
+            hasError: true,
+            hasTryAgainButton: false,
+            hasDeliveryTimedOut: false,
+            conversationCapacityReached: false,
+            requiresNewConversation: false,
+            compatibilityState: '',
+            matchedSignal: 'assistant-error-stop'
+        });
+        assert.equal(job.assistantTurnId, 'assistant-error-stop-69');
 
         for (let attempt = 0; attempt < QUEUE_RETRY_POLICY.maxAutomaticAttempts; attempt += 1) {
             job.currentMessage = promptMarker;
@@ -501,6 +516,23 @@ test('repeated assistant error stops preserve terminal diagnostics without priva
         assert.equal(job.completedCount, 0);
         assert.equal(job.currentMessage, promptMarker);
         assert.deepEqual(job.queue, ['next-command']);
+
+        const terminalPauseLog = [...(mockStorageLocal.queueDebugLogs || [])]
+            .reverse()
+            .find((entry) => entry.tabId === tabId && entry.message === 'Queue paused.');
+        assert.equal(terminalPauseLog.details.provider, 'chatgpt');
+        assert.equal(terminalPauseLog.details.queuePhase, 'paused');
+        assert.equal(terminalPauseLog.details.stage, 'wait');
+        assert.equal(terminalPauseLog.details.failurePhase, 'wait');
+        assert.deepEqual(terminalPauseLog.details.turnIdentity, {
+            userTurnId: 'user-error-stop-69',
+            assistantTurnId: 'assistant-error-stop-69'
+        });
+        assert.equal(terminalPauseLog.details.providerState.phase, 'error');
+        assert.equal(terminalPauseLog.details.providerState.source, 'assistant-error-stop');
+        assert.equal(terminalPauseLog.details.failureReason, 'assistant-error-stop');
+        assert.equal(terminalPauseLog.details.retryDecision, 'terminal-pause');
+        assert.equal(terminalPauseLog.details.retryClass, 'generation-error');
 
         const serializedLogs = JSON.stringify(mockStorageLocal.queueDebugLogs || []);
         for (const marker of [promptMarker, contentMarker, credentialMarker, tokenMarker, privatePath]) {
