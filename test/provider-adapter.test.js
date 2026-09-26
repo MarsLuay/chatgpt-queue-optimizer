@@ -1825,7 +1825,7 @@ test('ChatGPT command response state settles an assistant error stop as a retrya
         'data-testid': 'conversation-turn-2',
         'data-message-author-role': 'assistant',
         'data-message-id': 'assistant-68',
-        'data-message-status': 'error'
+        'data-stop-reason': 'error'
     }, 'x');
     const { doc } = createTestDoc({ turns: [user, assistantError] });
 

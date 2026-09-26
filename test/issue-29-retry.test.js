@@ -451,7 +451,8 @@ test('repeated assistant error stops preserve terminal diagnostics without priva
     }), () => ({
         phase: 'error',
         source: 'assistant-error-stop',
-        userTurnId: 'user-error-stop-69'
+        userTurnId: 'user-error-stop-69',
+        assistantTurnId: 'assistant-error-stop-69'
     }));
 
     await withRetryPolicy({ backoffBaseMs: 1, backoffMaxMs: 2, sleepSliceMs: 1, maxAutomaticAttempts: 2 }, async () => {
@@ -473,8 +474,9 @@ test('repeated assistant error stops preserve terminal diagnostics without priva
             conversationCapacityReached: false,
             requiresNewConversation: false,
             compatibilityState: '',
-            matchedSignal: ''
+            matchedSignal: 'assistant-error-stop'
         });
+        assert.equal(job.assistantTurnId, 'assistant-error-stop-69');
 
         for (let attempt = 0; attempt < QUEUE_RETRY_POLICY.maxAutomaticAttempts; attempt += 1) {
             job.currentMessage = promptMarker;
@@ -520,9 +522,15 @@ test('repeated assistant error stops preserve terminal diagnostics without priva
             .find((entry) => entry.tabId === tabId && entry.message === 'Queue paused.');
         assert.equal(terminalPauseLog.details.provider, 'chatgpt');
         assert.equal(terminalPauseLog.details.queuePhase, 'paused');
+        assert.equal(terminalPauseLog.details.stage, 'wait');
         assert.equal(terminalPauseLog.details.failurePhase, 'wait');
+        assert.deepEqual(terminalPauseLog.details.turnIdentity, {
+            userTurnId: 'user-error-stop-69',
+            assistantTurnId: 'assistant-error-stop-69'
+        });
         assert.equal(terminalPauseLog.details.providerState.phase, 'error');
         assert.equal(terminalPauseLog.details.providerState.source, 'assistant-error-stop');
+        assert.equal(terminalPauseLog.details.failureReason, 'assistant-error-stop');
         assert.equal(terminalPauseLog.details.retryDecision, 'terminal-pause');
         assert.equal(terminalPauseLog.details.retryClass, 'generation-error');
 
