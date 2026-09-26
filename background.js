@@ -1947,9 +1947,9 @@ function pauseJob(tabId, reason, details = {}) {
         totalMessages: getTotalMessages(job),
         remaining: getRemainingCount(job),
         failedMessagePreview: previewText(failedMessage, 160),
-        ...collectDeliveryDiagnostics(job),
-        ...details,
-        ...getQueueFailureDiagnostics(job, details.phase || job.currentPhase, details.diagnostics, 'terminal-pause')
+        ...getQueueFailureDiagnostics(job, details.phase || job.currentPhase, details.diagnostics, 'terminal-pause'),
+        ...collectDeliveryDiagnostics(job, details.diagnostics || details),
+        ...details
     });
 
     if (!confirmed) {
@@ -2046,19 +2046,50 @@ function getCommandBinding(job, context = {}) {
     };
 }
 
-function collectDeliveryDiagnostics(job, extra = {}) {
+function boundedDiagnosticValue(value, maxLength = 160) {
+    const normalized = String(value ?? '').replace(/\s+/g, ' ').trim();
+    if (!normalized) {
+        return '';
+    }
+    if (normalized.length <= maxLength) {
+        return normalized;
+    }
+    return `${normalized.slice(0, Math.max(1, maxLength - 1))}…`;
+}
+
+function getDiagnosticTurnIdentity(job, details = {}) {
+    const responseState = details.responseState && typeof details.responseState === 'object'
+        ? details.responseState
+        : {};
+    const userTurnId = boundedDiagnosticValue(
+        details.userTurnId || responseState.userTurnId || job?.submittedUserTurnId || ''
+    );
+    const assistantTurnId = boundedDiagnosticValue(
+        details.assistantTurnId || responseState.assistantTurnId || job?.assistantTurnId || ''
+    );
     return {
-        runId: job?.runId || '',
-        commandId: job?.commandId || '',
-        commandNumber: job?.currentCommandNumber || 0,
-        deliveryState: job?.deliveryState || '',
-        submissionAckSource: job?.submissionAckSource || '',
-        terminalAckSource: job?.terminalAckSource || extra.terminalAckSource || '',
-        userTurnId: job?.submittedUserTurnId || extra.userTurnId || null,
-        assistantTurnId: job?.assistantTurnId || extra.assistantTurnId || null,
-        lastResponsePhase: job?.lastResponsePhase || extra.phase || '',
-        commandFingerprint: job?.commandFingerprint || '',
-        ...extra
+        userTurnId: userTurnId || null,
+        assistantTurnId: assistantTurnId || null
+    };
+}
+
+function collectDeliveryDiagnostics(job, extra = {}) {
+    const turnIdentity = getDiagnosticTurnIdentity(job, extra);
+    return {
+        ...extra,
+        runId: boundedDiagnosticValue(job?.runId || extra.runId || ''),
+        commandId: boundedDiagnosticValue(job?.commandId || extra.commandId || ''),
+        commandNumber: job?.currentCommandNumber || extra.commandNumber || 0,
+        deliveryState: boundedDiagnosticValue(job?.deliveryState || extra.deliveryState || ''),
+        submissionAckSource: boundedDiagnosticValue(job?.submissionAckSource || extra.submissionAckSource || ''),
+        terminalAckSource: boundedDiagnosticValue(job?.terminalAckSource || extra.terminalAckSource || ''),
+        userTurnId: turnIdentity.userTurnId,
+        assistantTurnId: turnIdentity.assistantTurnId,
+        lastResponsePhase: boundedDiagnosticValue(
+            job?.lastResponsePhase || extra.phase || extra.responseState?.phase || ''
+        ),
+        commandFingerprint: boundedDiagnosticValue(job?.commandFingerprint || extra.commandFingerprint || ''),
+        turnIdentity
     };
 }
 
@@ -2082,23 +2113,31 @@ function summarizeProviderState(state = {}, responseState = {}) {
         hasDeliveryTimedOut: generation.hasDeliveryTimedOut === true,
         conversationCapacityReached: generation.conversationCapacityReached === true,
         requiresNewConversation: generation.requiresNewConversation === true,
-        compatibilityState: String(generation.compatibilityState || ''),
-        matchedSignal: String(matchedSignals.error || '')
+        compatibilityState: boundedDiagnosticValue(generation.compatibilityState || ''),
+        matchedSignal: boundedDiagnosticValue(
+            matchedSignals.error || generation.matchedError || response.source || ''
+        )
     };
 }
 
 function getQueueFailureDiagnostics(job, phase, diagnostics = {}, retryDecision = '') {
     /** @type {Record<string, any>} */
     const details = diagnostics && typeof diagnostics === 'object' ? diagnostics : {};
+    const turnIdentity = getDiagnosticTurnIdentity(job, details);
+    const failurePhase = boundedDiagnosticValue(phase || details.phase || job?.currentPhase || '');
+    const providerState = summarizeProviderState(details.state, details.responseState);
     return {
-        provider: String(job?.provider || 'chatgpt'),
-        queuePhase: String(job?.currentPhase || ''),
-        failurePhase: String(phase || ''),
-        providerState: summarizeProviderState(details.state, details.responseState),
-        retryDecision: String(retryDecision || ''),
-        retryClass: String(details.failureClass || job?.retryClass || ''),
+        provider: boundedDiagnosticValue(job?.provider || 'chatgpt'),
+        stage: failurePhase,
+        queuePhase: boundedDiagnosticValue(job?.currentPhase || ''),
+        failurePhase,
+        turnIdentity,
+        providerState,
+        failureReason: boundedDiagnosticValue(providerState.matchedSignal || providerState.source || ''),
+        retryDecision: boundedDiagnosticValue(retryDecision || ''),
+        retryClass: boundedDiagnosticValue(details.failureClass || job?.retryClass || ''),
         retryAttemptCount: Number(details.retryAttemptCount ?? job?.retryAttemptCount ?? 0),
-        retryMode: String(details.retryMode || job?.retryMode || '')
+        retryMode: boundedDiagnosticValue(details.retryMode || job?.retryMode || '')
     };
 }
 
@@ -3293,6 +3332,18 @@ async function waitForTabResponse(tabId, context = {}) {
                     const state = response?.state || {};
                     const responseState = response?.responseState || null;
                     const phase = String(responseState?.phase || '');
+
+                    if (responseState && typeof responseState === 'object') {
+                        if (responseState.userTurnId && !job.submittedUserTurnId) {
+                            job.submittedUserTurnId = responseState.userTurnId;
+                        }
+                        if (responseState.assistantTurnId) {
+                            job.assistantTurnId = responseState.assistantTurnId;
+                        }
+                    }
+                    if (phase) {
+                        job.lastResponsePhase = phase;
+                    }
 
                     const isDeliveryTimeout = !!state.hasDeliveryTimedOut ||
                         (typeof state.matchedError === 'string' && /delivery time(?:d\s*)?out/i.test(state.matchedError)) ||
