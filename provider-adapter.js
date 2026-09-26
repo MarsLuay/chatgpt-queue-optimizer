@@ -847,23 +847,6 @@
             return matches;
         }
 
-        getAssistantTurnErrorSignal(text) {
-            const normalized = normalizeCommandText(text).toLowerCase();
-            if (!normalized) return '';
-
-            const markers = Array.isArray(this.compatibilitySignals?.errorMarkers)
-                ? this.compatibilitySignals.errorMarkers
-                : [];
-            return markers.find((marker) => {
-                const normalizedMarker = normalizeCommandText(marker).toLowerCase();
-                return normalized === normalizedMarker ||
-                    normalized.startsWith(`${normalizedMarker}.`) ||
-                    normalized.startsWith(`${normalizedMarker}!`) ||
-                    normalized.startsWith(`${normalizedMarker}?`) ||
-                    normalized.startsWith(`${normalizedMarker} `);
-            }) || '';
-        }
-
         getCommandTurnSnapshot(doc = (typeof document !== 'undefined' ? document : null), options = {}) {
             const snapshot = emptyCommandTurnSnapshot(this);
             if (!doc) {
@@ -888,9 +871,6 @@
                 const fingerprint = fingerprintCommandText(text);
                 const turnId = getTurnId(node, index, role, fingerprint);
                 const matchedExpected = !!expectedText && text === expectedText;
-                const errorSignal = role === 'assistant'
-                    ? this.getAssistantTurnErrorSignal(text)
-                    : '';
 
                 if (role === 'user' || (!role && matchedExpected)) {
                     userTurns.push({
@@ -988,20 +968,6 @@
                     deepResearchActive: !!generation.deepResearchActive,
                     hasCompletedAssistant: false,
                     source: generation.hasDeliveryTimedOut ? 'delivery-timeout' : (generation.hasTryAgainButton ? 'retry-visible' : 'generation-error')
-                };
-            }
-
-            if (followingAssistant?.errorSignal) {
-                return {
-                    phase: 'error',
-                    userTurnId,
-                    assistantTurnId: followingAssistant.turnId,
-                    conversationId,
-                    generating: false,
-                    deepResearchActive: false,
-                    hasCompletedAssistant: false,
-                    source: 'assistant-error-stop',
-                    errorSignal: followingAssistant.errorSignal
                 };
             }
 
@@ -1630,8 +1596,8 @@
 
             const hasDeliveryTimeout = this.compatibilitySignals.deliveryTimeoutMarkers.some(marker => alertText.includes(marker));
             const hasGeneralError = this.compatibilitySignals.errorMarkers.some(marker => alertText.includes(marker));
-            const errorSignal = this.getAssistantTurnErrorSignal(text);
-            const hasError = hasDeliveryTimeout || hasGeneralError || !!errorSignal;
+            const hasErrorStop = hasAssistantErrorStop(latestTurn);
+            const hasError = hasDeliveryTimeout || hasGeneralError || hasErrorStop;
 
             const retryBtn = this.getRetryButton(latestTurn);
             const hasRetry = !!retryBtn;
@@ -1643,7 +1609,6 @@
                 hasErrorStop,
                 hasDeliveryTimeout,
                 hasRetry,
-                errorSignal,
                 hasCompletedText: isAssistant && !hasError && !hasRetry && text.length > 0
             };
         }

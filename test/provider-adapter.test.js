@@ -1378,62 +1378,6 @@ test('ChatGPTAdapter getLastAssistantTurn verifies completed vs error states', (
     assert.equal(res4.hasCompletedText, false);
 });
 
-test('ChatGPTAdapter treats a bound assistant error stop as an error, not a terminal answer', async () => {
-    const chatgpt = getProvider('chatgpt');
-    const userTurn = new MockElement('article', {
-        'data-testid': 'conversation-turn-67-user',
-        'data-message-id': 'user-67',
-        'data-message-author-role': 'user'
-    }, 'Run the queued task.');
-    const assistantError = new MockElement('article', {
-        'data-testid': 'conversation-turn-67-assistant',
-        'data-message-id': 'assistant-67',
-        'data-message-author-role': 'assistant'
-    }, 'There was an error generating a response. Please try again later.');
-    const { doc } = createTestDoc({ turns: [userTurn, assistantError] });
-
-    const responseState = chatgpt.getCommandResponseState(doc, {
-        userTurnId: 'user-67',
-        commandFingerprint: 'fnv1a:issue-67:len:20'
-    });
-
-    assert.equal(responseState.phase, 'error');
-    assert.equal(responseState.source, 'assistant-error-stop');
-    assert.equal(responseState.assistantTurnId, 'assistant-67');
-    assert.equal(responseState.hasCompletedAssistant, false);
-    assert.equal(JSON.stringify(responseState).includes('Please try again later'), false);
-
-    const tabId = 6701;
-    jobs.set(tabId, {
-        tabId,
-        isRunning: true,
-        isPaused: false,
-        isStopped: false,
-        currentPhase: 'awaiting-response',
-        waitStartedAt: 0
-    });
-    mockTabs.set(tabId, {
-        id: tabId,
-        url: 'https://chatgpt.com/c/issue-67',
-        onMessage: (message) => message.type === 'CHECK_GENERATION_STATE'
-            ? { state: chatgpt.getGenerationState(doc), responseState: chatgpt.getCommandResponseState(doc, message.commandBinding) }
-            : { ok: true }
-    });
-
-    const waitResult = await waitForTabResponse(tabId, {
-        maxWaitMs: 80,
-        checkIntervalMs: 10,
-        commandBinding: { userTurnId: 'user-67', commandFingerprint: 'fnv1a:issue-67:len:20' }
-    });
-    assert.equal(waitResult.ok, false);
-    assert.equal(waitResult.details.failureClass, 'generation-error');
-    assert.equal(waitResult.details.responseState.source, 'assistant-error-stop');
-    assert.equal(JSON.stringify(waitResult.details).includes('Please try again later'), false);
-    assert.equal(classifyQueueFailure('wait', waitResult.error, waitResult.details).retryable, true);
-    jobs.delete(tabId);
-    mockTabs.delete(tabId);
-});
-
 test('waitForTabResponse classifies delivery timeout correctly', async () => {
     const tabId = 401;
     mockTabs.set(tabId, {
