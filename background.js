@@ -1426,7 +1426,8 @@ function handleStopSequence(request, sendResponse) {
             completedCount: job.completedCount || 0,
             totalMessages: getTotalMessages(job),
             remaining: getRemainingCount(job),
-            currentCommandNumber: job.currentCommandNumber || 0
+            currentCommandNumber: job.currentCommandNumber || 0,
+            ...getQueueFailureDiagnostics(job, job.currentPhase, {}, 'cancelled')
         });
 
         jobs.delete(tabId);
@@ -1448,7 +1449,8 @@ function handleStopAllSequences(sendResponse) {
             completedCount: job.completedCount || 0,
             totalMessages: getTotalMessages(job),
             remaining: getRemainingCount(job),
-            currentCommandNumber: job.currentCommandNumber || 0
+            currentCommandNumber: job.currentCommandNumber || 0,
+            ...getQueueFailureDiagnostics(job, job.currentPhase, {}, 'cancelled')
         });
         jobs.delete(tabId);
     }
@@ -1794,6 +1796,7 @@ async function handleProcessSending(tabId, job) {
             commandNumber: job.currentCommandNumber,
             totalMessages,
             error: sendResult.error || 'Could not send message to ChatGPT.',
+            ...getQueueFailureDiagnostics(job, 'send', sendResult.details, 'retry-or-pause'),
             diagnostics: collectDeliveryDiagnostics(job, sendResult.details || {})
         });
 
@@ -1896,6 +1899,7 @@ function completeCurrentCommand(tabId, job, totalMessages, diagnostics = {}) {
         commandNumber: job.completedCount,
         totalMessages,
         remaining: Math.max(0, job.queue.length),
+        ...getQueueFailureDiagnostics(job, 'terminal', diagnostics, 'terminal-success'),
         diagnostics: collectDeliveryDiagnostics(job, {
             ...diagnostics,
             terminalAckSource
@@ -1944,7 +1948,8 @@ function pauseJob(tabId, reason, details = {}) {
         remaining: getRemainingCount(job),
         failedMessagePreview: previewText(failedMessage, 160),
         ...collectDeliveryDiagnostics(job),
-        ...details
+        ...details,
+        ...getQueueFailureDiagnostics(job, details.phase || job.currentPhase, details.diagnostics, 'terminal-pause')
     });
 
     if (!confirmed) {
@@ -2054,6 +2059,46 @@ function collectDeliveryDiagnostics(job, extra = {}) {
         lastResponsePhase: job?.lastResponsePhase || extra.phase || '',
         commandFingerprint: job?.commandFingerprint || '',
         ...extra
+    };
+}
+
+function summarizeProviderState(state = {}, responseState = {}) {
+    /** @type {Record<string, any>} */
+    const generation = state && typeof state === 'object' ? state : {};
+    /** @type {Record<string, any>} */
+    const response = responseState && typeof responseState === 'object' ? responseState : {};
+    /** @type {Record<string, any>} */
+    const matchedSignals = generation.matchedSignals && typeof generation.matchedSignals === 'object'
+        ? generation.matchedSignals
+        : {};
+
+    return {
+        phase: String(response.phase || generation.phase || ''),
+        source: String(response.source || ''),
+        generating: response.generating === true || generation.generating === true,
+        deepResearchActive: response.deepResearchActive === true || generation.deepResearchActive === true,
+        hasError: generation.hasError === true || response.phase === 'error',
+        hasTryAgainButton: generation.hasTryAgainButton === true,
+        hasDeliveryTimedOut: generation.hasDeliveryTimedOut === true,
+        conversationCapacityReached: generation.conversationCapacityReached === true,
+        requiresNewConversation: generation.requiresNewConversation === true,
+        compatibilityState: String(generation.compatibilityState || ''),
+        matchedSignal: String(matchedSignals.error || '')
+    };
+}
+
+function getQueueFailureDiagnostics(job, phase, diagnostics = {}, retryDecision = '') {
+    /** @type {Record<string, any>} */
+    const details = diagnostics && typeof diagnostics === 'object' ? diagnostics : {};
+    return {
+        provider: String(job?.provider || 'chatgpt'),
+        queuePhase: String(job?.currentPhase || ''),
+        failurePhase: String(phase || ''),
+        providerState: summarizeProviderState(details.state, details.responseState),
+        retryDecision: String(retryDecision || ''),
+        retryClass: String(details.failureClass || job?.retryClass || ''),
+        retryAttemptCount: Number(details.retryAttemptCount ?? job?.retryAttemptCount ?? 0),
+        retryMode: String(details.retryMode || job?.retryMode || '')
     };
 }
 
@@ -2192,6 +2237,7 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
             commandNumber: job.currentCommandNumber || 0,
             completedCount: job.completedCount || 0,
             totalMessages: getTotalMessages(job),
+            ...getQueueFailureDiagnostics(job, phase, diagnostics, 'terminal-retry-exhausted'),
             diagnostics
         });
         return false;
@@ -2220,6 +2266,7 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
         completedCount: job.completedCount || 0,
         totalMessages: getTotalMessages(job),
         remaining: getRemainingCount(job),
+        ...getQueueFailureDiagnostics(job, phase, diagnostics, 'retry-scheduled'),
         diagnostics
     });
 
@@ -3291,6 +3338,7 @@ async function waitForTabResponse(tabId, context = {}) {
                             error: 'ChatGPT showed an error or retry state.',
                             details: buildWaitDetails({
                                 failureClass: state.hasTryAgainButton || responseState?.source === 'retry-visible' ? 'retry-visible' : 'generation-error',
+                                providerState: summarizeProviderState(state, responseState),
                                 state,
                                 responseState
                             })
