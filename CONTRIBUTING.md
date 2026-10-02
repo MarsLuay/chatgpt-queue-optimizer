@@ -41,9 +41,9 @@ npm run check
 - `npm test` maps to Node's built-in test runner (`node --test`).
 - `npm run lint` runs ESLint with correctness rules over extension sources, tests, provider adapters, and config files.
 - `npm run typecheck` runs checked JavaScript / JSDoc analysis (`allowJs` + `checkJs`) without converting the extension to TypeScript.
-- `npm run check` is the single local/CI verification command: tests, lint, then typecheck.
+- `npm run check` is the single local verification command: tests, lint, then typecheck.
 
-CI installs with `npm ci` and runs `npm run check`. Keep `package-lock.json` committed.
+Use `npm ci` to install the locked development dependencies. Keep `package-lock.json` committed.
 
 ### Lint and typecheck suppressions
 

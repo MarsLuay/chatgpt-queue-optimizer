@@ -24,7 +24,7 @@ test('package.json exposes lint, typecheck, and combined check scripts', () => {
     assert.match(pkg.scripts.check, /npm run typecheck/);
 });
 
-test('static analysis config covers extension sources, checked JS, and CI', () => {
+test('static analysis config covers extension sources and checked JS', () => {
     const eslintConfig = read('eslint.config.js');
     for (const name of ['background.js', 'content.js', 'popup.js', 'utils.js', 'provider-adapter.js']) {
         assert.match(eslintConfig, new RegExp(name.replace('.', '\\.')));
@@ -45,9 +45,6 @@ test('static analysis config covers extension sources, checked JS, and CI', () =
     assert.match(types, /interface RuntimeMessageRequest/);
     assert.match(types, /interface ProviderAdapterContract/);
 
-    const ci = read('.github/workflows/ci.yml');
-    assert.match(ci, /npm ci/);
-    assert.match(ci, /npm run check/);
     assert.equal(fs.existsSync(path.join(repoRoot, 'package-lock.json')), true);
 
     const contributing = read('CONTRIBUTING.md');
