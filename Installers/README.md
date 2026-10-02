@@ -8,6 +8,8 @@ Installer and packaging tools for ChatGPT Queue + Optimizer.
 - `Install ChatGPT Queue Optimizer.app` - macOS launcher.
 - `install_chatgpt_queue_optimizer.py` - shared Chrome/Firefox installation helper used by the launchers.
 - `package_for_stores.py` - builds upload-ready Chrome Web Store and Firefox AMO archives without installing or launching a browser.
+- `upload_extension.py` - submits a listed Firefox update to AMO and starts an isolated local Firefox test.
+- `../upload.bat` and `../upload.app` - Windows and macOS upload launchers.
 
 ## One-click install
 
@@ -24,6 +26,24 @@ open "Installers/Install ChatGPT Queue Optimizer.app"
 ```
 
 Both launchers ultimately call `install_chatgpt_queue_optimizer.py` against the repository root.
+
+## Submit a Firefox update and test it locally
+
+Run `upload.bat` on Windows or open `upload.app` on macOS. These launchers are separate from the regular installer and:
+
+1. Rebuild the store-ready packages and validate the Firefox add-on ID and version.
+2. Start `web-ext run` with the generated Firefox source in a separate temporary profile. This local test starts before the store submission and works while AMO review is pending; it does not modify your normal Firefox profile or disable signature checks.
+3. Submit the Firefox update to the existing AMO listing using the `listed` channel. The command does not wait for review approval, and it does not change what public users receive until Mozilla approves the update.
+
+The upload prompts for an AMO API key (JWT issuer) and a hidden API secret, not your AMO account password. Create API credentials at <https://addons.mozilla.org/developers/addon/api/key/>. Credentials are kept in process memory and are not written to the repository. You can also provide `WEB_EXT_API_KEY` and `WEB_EXT_API_SECRET` as local environment variables. `web-ext` 10.7.0 is fetched through npm when needed, so Python 3, Node/npm, network access, and an installed Firefox are required.
+
+The temporary test profile closes with its Firefox session. Workflow output is saved to `build/logs/upload.log`, and Firefox diagnostics are in `build/logs/upload-firefox-test.log`. For local-only testing without an AMO submission, run:
+
+```bash
+python Installers/upload_extension.py --local-only
+```
+
+This launcher submits to Firefox AMO only. It builds the Chrome Web Store package but does not submit it to the Chrome Web Store.
 
 ## What the installer does
 

@@ -162,6 +162,20 @@ Outputs:
 
 The Firefox package declares a minimum Firefox version of 140.0.
 
+### Submit and test a Firefox update
+
+Run `upload.bat` on Windows or open `upload.app` on macOS. The launcher rebuilds the store packages, starts a local Firefox test session, then submits the Firefox update to the existing AMO listing. It does not wait for review approval: the temporary local install is available for testing while the public listing remains on its currently approved version.
+
+The launcher asks for an AMO API key and a hidden API secret (not your AMO account password). Create those credentials at [AMO API credentials](https://addons.mozilla.org/developers/addon/api/key/). They are passed to the submission process without being saved to the repository. Alternatively, set `WEB_EXT_API_KEY` and `WEB_EXT_API_SECRET` in the local environment.
+
+The local test runs in a separate temporary Firefox profile, does not change your normal profile or signature settings, and ends when that test Firefox session closes. Workflow output is saved to `build/logs/upload.log`; Firefox test diagnostics are in `build/logs/upload-firefox-test.log`. This launcher submits to Firefox AMO; it builds the Chrome archive but does not upload to the Chrome Web Store.
+
+To launch only the local test without an AMO submission, run:
+
+```bash
+python Installers/upload_extension.py --local-only
+```
+
 ### Local signing keys
 
 `package_for_stores.py` creates store archives and does not require a private signing key. The installer’s local Chrome CRX path may reuse `build/chrome-key.pem`, which is generated or supplied only in the ignored build directory. Keep the reusable source key in a secure location outside the checkout, copy it into that local build path only when needed, and never restore a key file to the repository root.

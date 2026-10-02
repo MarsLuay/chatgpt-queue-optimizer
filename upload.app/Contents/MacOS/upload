@@ -1,0 +1,21 @@
+#!/bin/zsh
+set -u
+
+APP_MACOS_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "${APP_MACOS_DIR}/../../.." && pwd)"
+
+if ! command -v python3 >/dev/null 2>&1; then
+  /usr/bin/osascript -e 'display dialog "Python 3 is required. Install it from python.org, then run upload.app again." with title "ChatGPT Queue + Optimizer" buttons {"OK"} default button "OK"' >/dev/null 2>&1 || true
+  open "https://www.python.org/downloads/macos/"
+  exit 1
+fi
+
+/usr/bin/osascript - "$REPO_ROOT" <<'APPLESCRIPT'
+on run argv
+    set repoRoot to item 1 of argv
+    tell application "Terminal"
+        activate
+        do script "cd " & quoted form of repoRoot & " && python3 Installers/upload_extension.py --repo-dir " & quoted form of repoRoot
+    end tell
+end run
+APPLESCRIPT
