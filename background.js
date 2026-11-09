@@ -2876,17 +2876,58 @@ async function sendPromptToSpecificTab(tabId, text) {
                 function getCandidates(signalKey) {
                     const candidates = [];
                     const seen = new Set();
-                    for (const selector of getSelectorList(signalKey)) {
-                        let elements = [];
-                        try {
-                            elements = Array.from(document.querySelectorAll(selector));
-                        } catch {
-                            elements = [];
+                    const selectorList = getSelectorList(signalKey);
+
+                    if (selectorList.length === 0) {
+                        return candidates;
+                    }
+
+                    try {
+                        const combinedSelector = selectorList.join(',');
+                        const elements = document.querySelectorAll(combinedSelector);
+
+                        if (elements.length > 0) {
+                            let remainingElements = Array.from(elements);
+                            for (const selector of selectorList) {
+                                if (remainingElements.length === 0) break;
+
+                                const matches = [];
+                                const newRemaining = [];
+
+                                for (const el of remainingElements) {
+                                    try {
+                                        if (el.matches(selector)) {
+                                            matches.push(el);
+                                        } else {
+                                            newRemaining.push(el);
+                                        }
+                                    } catch {
+                                        newRemaining.push(el);
+                                    }
+                                }
+
+                                for (const element of matches) {
+                                    if (!seen.has(element)) {
+                                        seen.add(element);
+                                        candidates.push({ element, selector, signalKey });
+                                    }
+                                }
+                                remainingElements = newRemaining;
+                            }
                         }
-                        for (const element of elements) {
-                            if (!seen.has(element)) {
-                                seen.add(element);
-                                candidates.push({ element, selector, signalKey });
+                    } catch {
+                        for (const selector of selectorList) {
+                            let elements = [];
+                            try {
+                                elements = Array.from(document.querySelectorAll(selector));
+                            } catch {
+                                elements = [];
+                            }
+                            for (const element of elements) {
+                                if (!seen.has(element)) {
+                                    seen.add(element);
+                                    candidates.push({ element, selector, signalKey });
+                                }
                             }
                         }
                     }
