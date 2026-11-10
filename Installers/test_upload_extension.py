@@ -63,7 +63,12 @@ class UploadWorkflowTests(unittest.TestCase):
         )
 
         self.assertIn("Installers\\publish_firefox.py", batch_text)
-        self.assertNotIn("\npause\n", batch_text.lower())
+        # Double-clicking the batch file must keep error output visible.
+        self.assertIn("pause >nul", batch_text.lower())
+        self.assertIn('type "%UPLOAD_LOG%"', batch_text)
+        self.assertIn("[ERROR] Firefox publishing failed. Exit code:", batch_text)
+        self.assertIn("[ERROR] Python 3 was not found.", batch_text)
+        self.assertIn("exit /b %UPLOAD_EXIT%", batch_text)
         self.assertIn("Installers/upload_extension.py", app_script.read_text(encoding="utf-8"))
         self.assertEqual(app_info["CFBundleExecutable"], "upload")
         self.assertTrue(app_script.is_file())
