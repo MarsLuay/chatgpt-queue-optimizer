@@ -143,6 +143,10 @@
           sendResponse({ success: true, enabled: this.config.enabled });
           break;
 
+        case 'CAN_DISCARD_INACTIVE_TAB':
+          sendResponse({ safe: this.canDiscardInactiveTab() });
+          break;
+
         case 'GET_STATUS': {
           const messages = this.getMessageNodes();
 
@@ -293,6 +297,28 @@
         this.state.isInitialized = true;
         console.log('CPO: Initialized successfully');
       });
+    }
+
+    canDiscardInactiveTab() {
+      // Fail closed for active responses, drafts, uploads, media and unknown state.
+      if (typeof document === 'undefined' || document.visibilityState !== 'hidden' ||
+          !this.provider?.supportsOptimizer || !this.getCurrentSurface().optimizerEligible ||
+          this.state.inlineQueueInFlight) return false;
+      try {
+        const composer = this.provider.getComposerMatch?.(document)?.element;
+        if (!composer || String(this.provider.getComposerText(composer) || '').trim()) return false;
+        const state = this.provider.getGenerationState?.(document);
+        if (!state || state.generating || state.deepResearchActive ||
+            state.hasActiveStopButton || state.hasResultStreaming ||
+            state.hasActiveToolOrResearch) return false;
+        if (document.querySelector('[role="dialog"], [aria-modal="true"]')) return false;
+        if (Array.from(document.querySelectorAll('input[type="file"]')).some(input => input.files?.length)) return false;
+        if (Array.from(document.querySelectorAll('audio,video')).some(media => media.paused === false)) return false;
+        if (document.querySelector('[data-state="uploading"], [data-testid*="upload-progress"], [aria-label*="Uploading"]')) return false;
+        return true;
+      } catch {
+        return false;
+      }
     }
 
     getCurrentSurface() {

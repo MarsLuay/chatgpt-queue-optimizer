@@ -189,6 +189,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const optimizerWindowSize = document.getElementById('optimizer-window-size');
     const optimizerBatchSize = document.getElementById('optimizer-batch-size');
     const optimizerAutoScroll = document.getElementById('optimizer-auto-scroll');
+    const optimizerIdleMinutes = document.getElementById('optimizer-idle-minutes');
     const optimizerToggle = document.getElementById('optimizer-toggle');
     const optimizerStats = document.getElementById('optimizer-stats');
 
@@ -2209,12 +2210,14 @@ The sequence should do the following: `;
                 enabled: true,
                 windowSize: 50,
                 batchSize: 25,
-                autoScroll: true
+                autoScroll: true,
+                inactiveTabMinutes: 0
             },
             async function (config) {
                 optimizerWindowSize.value = config.windowSize;
                 optimizerBatchSize.value = config.batchSize;
                 optimizerAutoScroll.checked = config.autoScroll;
+                if (optimizerIdleMinutes) optimizerIdleMinutes.value = String(config.inactiveTabMinutes || 0);
 
                 await refreshOptimizerStatus();
             }
@@ -2247,7 +2250,8 @@ The sequence should do the following: `;
             const newConfig = {
                 windowSize: parseInt(optimizerWindowSize.value, 10),
                 batchSize: parseInt(optimizerBatchSize.value, 10),
-                autoScroll: optimizerAutoScroll.checked
+                autoScroll: optimizerAutoScroll.checked,
+                inactiveTabMinutes: Number(optimizerIdleMinutes?.value || 0)
             };
 
             if (!Number.isFinite(newConfig.windowSize)) {
@@ -2401,6 +2405,8 @@ The sequence should do the following: `;
             optimizerStats.appendChild(document.createTextNode(line));
         });
     }
+
+    if (optimizerIdleMinutes) optimizerIdleMinutes.addEventListener('change', scheduleOptimizerAutoSave);
 
     if (optimizerToggle) {
         optimizerToggle.addEventListener('click', async function () {

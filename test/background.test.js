@@ -113,3 +113,23 @@ test('serializeError - truncates very long stack traces using previewText', () =
     assert.ok(serialized.stack.length < 750);
     assert.strictEqual(serialized.stack.endsWith('…'), true);
 });
+
+test('idle-discard candidate requires inactivity, a safe tab and allowed duration', () => {
+    const { isIdleDiscardCandidate } = require('../background.js');
+    const now = 1700000000000;
+    const safe = {
+        id: 7, active: false, pinned: false, audible: false,
+        highlighted: false, incognito: false, discarded: false,
+        autoDiscardable: true, status: 'complete',
+        url: 'https://chatgpt.com/c/example',
+        lastAccessed: now - 31 * 60000
+    };
+    assert.equal(isIdleDiscardCandidate(safe, 30, now), true);
+    assert.equal(isIdleDiscardCandidate(safe, 60, now), false);
+    assert.equal(isIdleDiscardCandidate({ ...safe, active: true }, 15, now), false);
+    assert.equal(isIdleDiscardCandidate({ ...safe, pinned: true }, 15, now), false);
+    assert.equal(isIdleDiscardCandidate({ ...safe, audible: true }, 15, now), false);
+    assert.equal(isIdleDiscardCandidate({ ...safe, lastAccessed: undefined }, 15, now), false);
+    assert.equal(isIdleDiscardCandidate({ ...safe, url: 'https://example.com' }, 15, now), false);
+    assert.equal(isIdleDiscardCandidate(safe, 0, now), false);
+});

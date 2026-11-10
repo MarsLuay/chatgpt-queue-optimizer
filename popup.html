@@ -1144,6 +1144,16 @@
                     </label>
                 </div>
 
+                <div class="optimizer-setting">
+                    <label for="optimizer-idle-minutes">Unload inactive ChatGPT tabs:</label>
+                    <select id="optimizer-idle-minutes">
+                        <option value="0">Never (default)</option>
+                        <option value="15">After 15 minutes</option>
+                        <option value="30">After 30 minutes</option>
+                        <option value="60">After 60 minutes</option>
+                    </select>
+                </div>
+                <div class="optimizer-autosave-note">Inactive-tab unloading is opt-in. Active queues, scheduled messages, drafts, uploads, and responses are protected.</div>
                 <div class="optimizer-autosave-note">Settings auto-save after changes.</div>
 
                 <div class="optimizer-actions optimizer-actions-single">

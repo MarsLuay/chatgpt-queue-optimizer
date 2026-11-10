@@ -53,6 +53,76 @@ const SCHEDULED_ALARM_PREFIX = 'scheduled-msg:';
 // Chrome alarms may fire late, but a scheduled message must never be delivered early.
 const SCHEDULED_DUE_SKEW_MS = 0;
 
+
+const IDLE_DISCARD_ALARM_NAME = 'cpo-idle-tab-discard';
+const IDLE_DISCARD_PERIOD_MINUTES = 1;
+const ALLOWED_IDLE_DISCARD_MINUTES = new Set([15, 30, 60]);
+
+function isIdleDiscardCandidate(tab, minutes, now = Date.now()) {
+    return ALLOWED_IDLE_DISCARD_MINUTES.has(minutes) &&
+        !!tab && Number.isInteger(tab.id) &&
+        tab.active === false && tab.highlighted !== true &&
+        tab.discarded !== true && tab.pinned !== true && tab.audible !== true &&
+        tab.incognito !== true && tab.autoDiscardable !== false &&
+        tab.status === 'complete' &&
+        getActiveProviderAdapter(tab.url || '')?.id === 'chatgpt' &&
+        Number.isFinite(tab.lastAccessed) && tab.lastAccessed > 0 &&
+        now - tab.lastAccessed >= minutes * 60000;
+}
+
+function configureIdleDiscardAlarm(minutes) {
+    if (!chrome.alarms) return;
+    chrome.alarms.clear(IDLE_DISCARD_ALARM_NAME);
+    if (ALLOWED_IDLE_DISCARD_MINUTES.has(Number(minutes))) {
+        chrome.alarms.create(IDLE_DISCARD_ALARM_NAME, { periodInMinutes: IDLE_DISCARD_PERIOD_MINUTES });
+    }
+}
+
+async function discardInactiveChatGPTTabs() {
+    // Settings and queue-state read failures abort this sweep rather than risk work.
+    const settings = await readSyncStorage({ inactiveTabMinutes: 0 });
+    const minutes = Number(settings.inactiveTabMinutes || 0);
+    if (!ALLOWED_IDLE_DISCARD_MINUTES.has(minutes) || typeof chrome.tabs.discard !== 'function') return 0;
+    const [tabs, stored, scheduled] = await Promise.all([
+        queryTabs({}),
+        readLocalStorage([QUEUE_DURABLE_STATE_KEY]),
+        readScheduledMessages()
+    ]);
+    const durable = stored[QUEUE_DURABLE_STATE_KEY] || {};
+    let count = 0;
+    for (const tab of tabs) {
+        if (!isIdleDiscardCandidate(tab, minutes)) continue;
+        if (jobs.has(tab.id) || durable[tab.id]) continue;
+        if (scheduled.some(item => Number(item.tabId) === tab.id &&
+            (item.status === 'pending' || item.status === 'firing'))) continue;
+        try {
+            const before = await getTab(tab.id);
+            if (!isIdleDiscardCandidate(before, minutes)) continue;
+            // A missing, outdated, or unresponsive content script is unsafe.
+            const reply = await sendTabMessage(tab.id, { type: 'CAN_DISCARD_INACTIVE_TAB' });
+            if (!reply?.safe) continue;
+            const [latest, upcoming] = await Promise.all([
+                readLocalStorage([QUEUE_DURABLE_STATE_KEY]),
+                readScheduledMessages()
+            ]);
+            if (jobs.has(tab.id) || latest[QUEUE_DURABLE_STATE_KEY]?.[tab.id] ||
+                upcoming.some(item => Number(item.tabId) === tab.id &&
+                    (item.status === 'pending' || item.status === 'firing'))) continue;
+            const after = await getTab(tab.id);
+            if (!isIdleDiscardCandidate(after, minutes) ||
+                before.lastAccessed !== after.lastAccessed || jobs.has(tab.id)) continue;
+            await extensionApiPromise(
+                done => chrome.tabs.discard(tab.id, done),
+                () => chrome.tabs.discard(tab.id)
+            );
+            count++;
+        } catch {
+            // The tab may have changed state or disappeared during the sweep.
+        }
+    }
+    return count;
+}
+
 function isIncompleteToolResponse(responseState = {}) {
     return responseState?.toolTurnIncomplete === true || responseState?.source === 'incomplete-tool-turn';
 }
@@ -666,6 +736,7 @@ chrome.runtime.onInstalled.addListener(() => {
             windowSize: undefined,
             batchSize: undefined,
             autoScroll: undefined,
+            inactiveTabMinutes: undefined,
             queueUnlimitedRetryWait: undefined,
             queueDeepResearchAware: undefined,
             queueDeliveryTimeoutRefresh: undefined
@@ -687,6 +758,11 @@ chrome.runtime.onInstalled.addListener(() => {
 
             if (typeof data.autoScroll !== 'boolean') {
                 defaults.autoScroll = true;
+            }
+
+            if (!ALLOWED_IDLE_DISCARD_MINUTES.has(Number(data.inactiveTabMinutes)) &&
+                data.inactiveTabMinutes !== 0) {
+                defaults.inactiveTabMinutes = 0;
             }
 
             if (typeof data.queueUnlimitedRetryWait !== 'boolean') {
@@ -725,6 +801,13 @@ if (chrome.alarms && chrome.alarms.onAlarm) {
     chrome.alarms.onAlarm.addListener((alarm) => {
         if (!alarm || !alarm.name) return;
 
+        if (alarm.name === IDLE_DISCARD_ALARM_NAME) {
+            discardInactiveChatGPTTabs().catch(error => {
+                console.warn('Inactive-tab sweep failed:', error);
+            });
+            return;
+        }
+
         if (alarm.name === QUEUE_WAKE_ALARM_NAME) {
             resumeDurableQueues('alarm');
             return;
@@ -738,6 +821,17 @@ if (chrome.alarms && chrome.alarms.onAlarm) {
         }
     });
 }
+
+if (chrome.storage?.onChanged) {
+    chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'sync' && changes.inactiveTabMinutes) {
+            configureIdleDiscardAlarm(changes.inactiveTabMinutes.newValue);
+        }
+    });
+}
+readSyncStorage({ inactiveTabMinutes: 0 })
+    .then(config => configureIdleDiscardAlarm(config.inactiveTabMinutes))
+    .catch(() => configureIdleDiscardAlarm(0));
 
 initializeQueueDiagnostics();
 
@@ -4958,6 +5052,8 @@ if (typeof module !== 'undefined' && module.exports) {
         claimScheduledMessageForFire,
         fireScheduledMessage,
         identitiesMatchForSchedule,
-        sortScheduledMessages
+        sortScheduledMessages,
+        isIdleDiscardCandidate,
+        discardInactiveChatGPTTabs
     };
 }
