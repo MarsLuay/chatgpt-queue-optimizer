@@ -137,6 +137,21 @@ class UploadWorkflowTests(unittest.TestCase):
         self.assertEqual(events, ["package", "local", "credentials", "submit"])
         self.assertTrue(any("temporary Firefox test" in error for error in errors))
 
+    def test_managed_release_allows_amo_submission_when_temporary_firefox_fails(self):
+        events = []
+        root = Path(tempfile.gettempdir())
+        errors = run_upload_workflow(
+            root,
+            package_builder=lambda _root: ("1.0.8", root / "firefox-src", root / "artifacts"),
+            npm_lookup=lambda: "npm",
+            local_launcher=lambda *_args: (events.append("local-failed") or "failed"),
+            credential_reader=lambda: ("issuer", "secret"),
+            amo_submitter=lambda *_args: (events.append("submitted") or True),
+            require_local_test=False,
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(events, ["local-failed", "submitted"])
+
     def test_local_test_still_starts_if_credentials_are_unavailable(self):
         events = []
         root = Path(tempfile.gettempdir())

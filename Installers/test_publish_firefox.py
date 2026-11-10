@@ -56,7 +56,8 @@ class PublishFirefoxTests(unittest.TestCase):
         self.assertEqual(self.execute(), '1.0.8')
         sequence = [c[1:] for c in self.calls]
         self.assertLess(sequence.index(('pull', '--ff-only', 'origin', 'main')), sequence.index(('run', 'check')))
-        self.assertLess(sequence.index(('run', 'check')), sequence.index(('add', '--', 'manifest.json')))
+        self.assertLess(sequence.index(('run', 'check')), sequence.index(('-m', 'unittest', 'discover', '-s', 'Installers', '-p', 'test_*.py')))
+        self.assertLess(sequence.index(('-m', 'unittest', 'discover', '-s', 'Installers', '-p', 'test_*.py')), sequence.index(('add', '--', 'manifest.json')))
         self.assertLess(sequence.index(('add', '--', 'manifest.json')), sequence.index(('push', 'origin', 'main')))
         self.assertEqual(len(self.uploads), 1)
         self.assertEqual(json.loads((self.root / 'manifest.json').read_text())['version'], '1.0.8')

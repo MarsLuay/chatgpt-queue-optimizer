@@ -72,6 +72,8 @@ def managed_publish(
     run(npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund")
     upload_extension.log("Running npm run check before any version change or submission.")
     run(npm, "run", "check")
+    upload_extension.log("Running Python packaging and release regression tests.")
+    run(sys.executable, "-m", "unittest", "discover", "-s", "Installers", "-p", "test_*.py")
 
     # Verify credentials before touching the manifest. Never print the credentials.
     credentials = credentials_reader()
