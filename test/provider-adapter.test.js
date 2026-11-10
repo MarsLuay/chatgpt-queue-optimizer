@@ -2089,3 +2089,47 @@ test('ChatGPT turn discovery retains selector-by-selector fallback', () => {
     };
     assert.deepEqual(adapter.getConversationTurns(doc), [one, two]);
 });
+
+test('ChatGPT turn list cache avoids repeated DOM scans until structural changes', () => {
+    const adapter = new ChatGPTAdapter();
+    const parent = {
+        nodeType: 1,
+        parentElement: null,
+        closest() { return null; }
+    };
+    const first = { nodeType: 1, tagName: 'ARTICLE', parentElement: parent,
+        matches() { return true; }, getAttribute() { return null; } };
+    const second = { nodeType: 1, tagName: 'ARTICLE', parentElement: parent,
+        matches() { return true; }, getAttribute() { return null; } };
+    const all = [first];
+    let fullQueries = 0;
+    const doc = {
+        contains(node) { return all.includes(node); },
+        querySelectorAll() { fullQueries++; return [...all]; }
+    };
+    adapter.setTurnScanCacheEnabled(true);
+    assert.deepEqual(adapter.getConversationTurns(doc), [first]);
+    assert.deepEqual(adapter.getConversationTurns(doc), [first]);
+    assert.equal(fullQueries, 1, 'unchanged history should reuse the turn list');
+    all.push(second);
+    adapter.invalidateTurnScanCache([{ type: 'childList', target: parent, addedNodes: [second], removedNodes: [] }]);
+    assert.deepEqual(adapter.getConversationTurns(doc), [first, second]);
+    assert.equal(fullQueries, 2, 'adding a new conversation turn invalidates the list');
+    adapter.setTurnScanCacheEnabled(false);
+    adapter.getConversationTurns(doc);
+    assert.equal(fullQueries, 3, 'disabling optimizer removes turn-list cache');
+});
+
+test('ChatGPT turn list cache invalidates when a canonical turn marker changes', () => {
+    const adapter = new ChatGPTAdapter();
+    const node = { nodeType: 1, parentElement: null };
+    let queries = 0;
+    const doc = { querySelectorAll() { queries++; return [node]; } };
+    adapter.setTurnScanCacheEnabled(true);
+    adapter.getConversationTurns(doc);
+    adapter.invalidateTurnScanCache([{
+        type: 'attributes', attributeName: 'data-message-author-role', target: node
+    }]);
+    adapter.getConversationTurns(doc);
+    assert.equal(queries, 2);
+});

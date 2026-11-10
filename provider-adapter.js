@@ -712,25 +712,44 @@
             this.compatibilitySignals = CHATGPT_COMPATIBILITY_SIGNALS;
             this._turnScanCacheEnabled = false;
             this._turnScanCache = new WeakMap();
+            this._turnListCache = null;
         }
 
         setTurnScanCacheEnabled(enabled) {
             this._turnScanCacheEnabled = enabled === true;
             this._turnScanCache = new WeakMap();
+            this._turnListCache = null;
         }
 
         invalidateTurnScanCache(mutations) {
             if (!this._turnScanCacheEnabled) return;
+            const turnSelector = '[data-testid*="conversation-turn"], [data-message-author-role], [data-message-id], article';
+            let structureChanged = false;
+            // Deduplicate changed ancestors across large streaming mutation batches.
+            const dirtyNodes = new Set();
             for (const mutation of mutations) {
-                // Delete every ancestor key. The canonical turn may wrap a role node.
                 let node = mutation.target?.nodeType === 3
                     ? mutation.target.parentElement
                     : mutation.target;
-                while (node) {
-                    this._turnScanCache.delete(node);
-                    node = node.parentElement;
+                for (; node; node = node.parentElement) dirtyNodes.add(node);
+
+                if (mutation.type === 'attributes' &&
+                    ['data-testid', 'data-message-author-role', 'data-message-id'].includes(mutation.attributeName)) {
+                    structureChanged = true;
+                }
+                const added = mutation.addedNodes || [];
+                const removed = mutation.removedNodes || [];
+                if (added.length || removed.length) {
+                    const affected = [...added, ...removed];
+                    if (!mutation.target?.closest?.(turnSelector) ||
+                        affected.some(child => child.nodeType === 1 &&
+                            (child.matches?.(turnSelector) || child.querySelector?.(turnSelector)))) {
+                        structureChanged = true;
+                    }
                 }
             }
+            for (const node of dirtyNodes) this._turnScanCache.delete(node);
+            if (structureChanged) this._turnListCache = null;
         }
 
         getCompatibilityContract() {
@@ -848,27 +867,41 @@
         getConversationTurns(doc = (typeof document !== 'undefined' ? document : null)) {
             const selectors = this.compatibilitySignals.turnContext || [];
             if (!doc || selectors.length === 0) return [];
-            // A single selector query returns nodes once, in DOM order. Fall
-            // back to individual selectors if a site-specific selector breaks.
+            // Reconcile periodically as a safety net for DOM changes outside our
+            // observer. Only the cache-enabled optimizer uses this fast path.
+            const now = Date.now();
+            const cache = this._turnListCache;
+            if (this._turnScanCacheEnabled && cache?.doc === doc &&
+                now - cache.createdAt < 8000 &&
+                (cache.nodes.length === 0 || typeof doc.contains !== 'function' ||
+                    (doc.contains(cache.nodes[0]) && doc.contains(cache.nodes[cache.nodes.length - 1])))) {
+                return cache.nodes;
+            }
+            // One DOM-ordered query instead of a separate full traversal for
+            // every selector. Preserve the independent-selector fallback.
+            let nodes;
             try {
-                return Array.from(doc.querySelectorAll(selectors.join(',')));
+                nodes = Array.from(doc.querySelectorAll(selectors.join(',')));
             } catch {
-                const matches = [];
+                nodes = [];
                 const seen = new Set();
                 for (const selector of selectors) {
                     try {
                         for (const element of doc.querySelectorAll(selector)) {
                             if (!seen.has(element)) {
                                 seen.add(element);
-                                matches.push(element);
+                                nodes.push(element);
                             }
                         }
                     } catch {
-                        // An unsupported selector must not break queue processing.
+                        // An unsupported selector must not stop queue processing.
                     }
                 }
-                return matches;
             }
+            if (this._turnScanCacheEnabled) {
+                this._turnListCache = { doc, nodes, createdAt: now };
+            }
+            return nodes;
         }
 
         getAssistantTurnErrorSignal(text) {
