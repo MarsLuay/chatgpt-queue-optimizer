@@ -3,6 +3,12 @@
   display: none !important;
 }
 
+/* Opt-in rendering containment. Do not apply to the newest eight turns. */
+.cpo-conversation-root.cpo-active .cpo-offscreen:not(.cpo-hidden) {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 160px;
+}
+
 /* "Show older" banner */
 .cpo-more-banner {
   display: none;

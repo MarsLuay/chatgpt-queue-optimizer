@@ -106,6 +106,8 @@ Settings auto-save:
 - **Window Size**: number of messages to keep visible, default `50`, allowed range `10-500`.
 - **Batch Size**: number of messages to load at once, default `25`, allowed range `5-100`.
 - **Auto-load on scroll**: loads additional messages as you scroll.
+- **Experimental offscreen rendering**: opt-in CSS containment for older visible turns. Reduces offscreen layout work but does not free ChatGPT's JavaScript data.
+- **Performance statistics**: measures optimizer scan/window timings and skipped streaming-only mutation batches.
 - **Unload inactive ChatGPT tabs**: opt-in 15/30/60-minute tab discarding using the browser's native API. Never discards tabs with active queue jobs, scheduled messages, drafts, uploads, or generation. Unsupported or unknown tab state is left alone.
 - **Toggle**: enables or disables the optimizer.
 

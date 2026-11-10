@@ -1348,3 +1348,50 @@ test('message deduplication is ancestor-based without reading large message stri
   Object.defineProperty(child, 'textContent', { get() { throw Error('Unnecessary text allocation'); } });
   assert.deepEqual(provider.removeDuplicates([child, parent, child, other]), [parent, other]);
 });
+
+test('streaming-only nested DOM changes skip expensive conversation rescans', () => {
+  const { dom, optimizer } = setupTestEnv();
+  optimizer.config.enabled = true;
+  optimizer.state.optimizerBound = true;
+  optimizer.state.lastMessageCount = 12;
+  const turn = dom.document.createElement('article');
+  turn.setAttribute('data-message-author-role', 'assistant');
+  const child = dom.document.createElement('span');
+  turn.appendChild(child);
+  optimizer.handleMutations([{
+    target: turn,
+    addedNodes: [{ nodeType: 3 }],
+    removedNodes: []
+  }]);
+  assert.equal(optimizer.state.perf.mutationSkips, 1);
+  assert.equal(optimizer.refreshTimeout, null);
+  const nextTurn = dom.document.createElement('article');
+  nextTurn.setAttribute('data-message-author-role', 'user');
+  optimizer.handleMutations([{ target: dom.document.body, addedNodes: [nextTurn], removedNodes: [] }]);
+  assert.equal(optimizer.state.perf.mutationRefreshes, 1);
+  clearTimeout(optimizer.refreshTimeout);
+});
+
+test('offscreen rendering is opt-in and cleared on optimizer disable', () => {
+  const { dom, optimizer } = setupTestEnv();
+  optimizer.config.enabled = true;
+  optimizer.config.windowSize = 10;
+  optimizer.config.offscreenRendering = true;
+  const root = dom.document.createElement('main');
+  dom.document.body.appendChild(root);
+  const turns = Array.from({ length: 25 }, () => {
+    const node = dom.document.createElement('article');
+    root.appendChild(node);
+    return node;
+  });
+  optimizer.state.container = root;
+  optimizer.sortMessagesByPosition = nodes => nodes;
+  optimizer.getMessageNodes = () => turns;
+  optimizer.ensureBanner = () => {};
+  optimizer.updateBanner = () => {};
+  optimizer.setupAutoScroll = () => {};
+  optimizer.applyWindowing(turns);
+  assert.equal(turns[15].classList.contains('cpo-offscreen'), true);
+  optimizer.disable();
+  assert.equal(turns[15].classList.contains('cpo-offscreen'), false);
+});

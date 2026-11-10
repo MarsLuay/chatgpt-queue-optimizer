@@ -9,7 +9,8 @@
         enabled: true,
         windowSize: 50,
         batchSize: 25,
-        autoScroll: true
+        autoScroll: true,
+        offscreenRendering: false
       };
 
       this.state = {
@@ -33,7 +34,8 @@
         routeKey: null,
         routeWatcherAttached: false,
         optimizerBound: false,
-        rootObserver: null
+        rootObserver: null,
+        perf: { scans: 0, lastScanMs: 0, lastWindowMs: 0, mutationSkips: 0, mutationRefreshes: 0 }
       };
 
       this._cachedMessages = null;
@@ -161,7 +163,8 @@
               initialized: this.state.isInitialized,
               selector: this._loggedSelector || 'none',
               compatibility: this.getCompatibilityDiagnostics(),
-              enterDiagnostics: this.state.enterDiagnostics || []
+              enterDiagnostics: this.state.enterDiagnostics || [],
+              performance: { ...this.state.perf }
             }
           });
 
@@ -855,6 +858,7 @@
         return [];
       }
 
+      const started = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
       const mainRoot = this.getMainRoot();
       let messages = [];
 
@@ -864,6 +868,8 @@
         messages = this.getFallbackMessages(mainRoot);
       }
 
+      this.state.perf.scans++;
+      this.state.perf.lastScanMs = Math.round(((typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()) - started) * 10) / 10;
       if (messages && messages.length > 0) {
         if (!this._loggedSelector) {
           const compatibility = this.getCompatibilityDiagnostics();
@@ -1017,28 +1023,40 @@
     }
 
     handleMutations(mutations) {
-      if (!this.config.enabled) return;
+      if (!this.config.enabled || !this.state.optimizerBound) return;
 
-      let hasPotentialMessageChange = false;
-
+      // A normal streaming token changes the contents of an existing turn,
+      // but not the number or order of turns. Do not rescan the entire chat.
+      const turnSelector = '[data-testid^="conversation-turn"], [data-message-author-role]';
+      let structuralChange = false;
       for (const mutation of mutations) {
-        if (mutation.addedNodes.length > 0 || mutation.removedNodes.length > 0) {
-          hasPotentialMessageChange = true;
+        if (!mutation.addedNodes?.length && !mutation.removedNodes?.length) continue;
+        const nodes = [...mutation.addedNodes, ...mutation.removedNodes];
+        const bannerOnly = nodes.every(node => node?.nodeType === 1 &&
+          (node.classList?.contains('cpo-more-banner') || node.closest?.('.cpo-more-banner')));
+        if (bannerOnly) continue;
+        const changedTurns = nodes.some(node => node?.nodeType === 1 &&
+          (node.matches?.(turnSelector) || node.querySelector?.(turnSelector)));
+        if (changedTurns || !mutation.target?.closest?.(turnSelector) ||
+            this.state.lastMessageCount === 0) {
+          structuralChange = true;
           break;
         }
       }
 
-      if (!hasPotentialMessageChange) return;
-
+      if (!structuralChange) {
+        this.state.perf.mutationSkips++;
+        return;
+      }
+      this.state.perf.mutationRefreshes++;
       this._cachedMessages = null;
       this._cacheTimestamp = null;
-
       clearTimeout(this.refreshTimeout);
       this.refreshTimeout = setTimeout(() => {
-        const currentMessageCount = this.getMessageNodes().length;
-
-        if (currentMessageCount >= this.state.lastMessageCount || currentMessageCount > 0) {
-          this.state.lastMessageCount = currentMessageCount;
+        if (!this.config.enabled || !this.state.optimizerBound) return;
+        const count = this.getMessageNodes().length;
+        if (count !== this.state.lastMessageCount || count > 0) {
+          this.state.lastMessageCount = count;
           this.refresh();
         }
       }, 700);
@@ -1107,6 +1125,7 @@
       messages = messages || this.getMessageNodes();
       if (messages.length === 0) return;
 
+      const started = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
       messages = this.sortMessagesByPosition(messages);
 
       const totalMessages = messages.length;
@@ -1130,7 +1149,13 @@
         } else {
           this.showMessage(message);
         }
+        if (this.config.offscreenRendering && index >= startIndex && index < totalMessages - 8) {
+          message.classList.add('cpo-offscreen');
+        } else {
+          message.classList.remove('cpo-offscreen');
+        }
       });
+      this.state.perf.lastWindowMs = Math.round(((typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()) - started) * 10) / 10;
 
       this.ensureBanner(messages);
       this.updateBanner();
@@ -1329,6 +1354,7 @@
 
       messages.forEach((message) => {
         message.classList.remove('cpo-hidden');
+        message.classList.remove('cpo-offscreen');
         this.restoreImages(message);
       });
 

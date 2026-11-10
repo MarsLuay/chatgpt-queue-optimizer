@@ -189,6 +189,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const optimizerWindowSize = document.getElementById('optimizer-window-size');
     const optimizerBatchSize = document.getElementById('optimizer-batch-size');
     const optimizerAutoScroll = document.getElementById('optimizer-auto-scroll');
+    const optimizerOffscreen = document.getElementById('optimizer-offscreen');
     const optimizerIdleMinutes = document.getElementById('optimizer-idle-minutes');
     const optimizerToggle = document.getElementById('optimizer-toggle');
     const optimizerStats = document.getElementById('optimizer-stats');
@@ -2211,12 +2212,14 @@ The sequence should do the following: `;
                 windowSize: 50,
                 batchSize: 25,
                 autoScroll: true,
+                offscreenRendering: false,
                 inactiveTabMinutes: 0
             },
             async function (config) {
                 optimizerWindowSize.value = config.windowSize;
                 optimizerBatchSize.value = config.batchSize;
                 optimizerAutoScroll.checked = config.autoScroll;
+                if (optimizerOffscreen) optimizerOffscreen.checked = config.offscreenRendering === true;
                 if (optimizerIdleMinutes) optimizerIdleMinutes.value = String(config.inactiveTabMinutes || 0);
 
                 await refreshOptimizerStatus();
@@ -2251,6 +2254,7 @@ The sequence should do the following: `;
                 windowSize: parseInt(optimizerWindowSize.value, 10),
                 batchSize: parseInt(optimizerBatchSize.value, 10),
                 autoScroll: optimizerAutoScroll.checked,
+                offscreenRendering: optimizerOffscreen?.checked === true,
                 inactiveTabMinutes: Number(optimizerIdleMinutes?.value || 0)
             };
 
@@ -2395,7 +2399,11 @@ The sequence should do the following: `;
             `Hidden: ${response.hiddenCount}`,
             `Visible: ${response.visibleCount}`,
             `Container: ${response.debugInfo?.containerFound ? 'Found' : 'Missing'}`,
-            `Initialized: ${response.debugInfo?.initialized ? 'Yes' : 'No'}`
+            `Initialized: ${response.debugInfo?.initialized ? 'Yes' : 'No'}`,
+            `DOM scans: ${response.debugInfo?.performance?.scans ?? 0}`,
+            `Last scan: ${response.debugInfo?.performance?.lastScanMs ?? 0} ms`,
+            `Last window: ${response.debugInfo?.performance?.lastWindowMs ?? 0} ms`,
+            `Streaming mutation batches skipped: ${response.debugInfo?.performance?.mutationSkips ?? 0}`
         ];
 
         optimizerStats.appendChild(label);
@@ -2407,6 +2415,7 @@ The sequence should do the following: `;
     }
 
     if (optimizerIdleMinutes) optimizerIdleMinutes.addEventListener('change', scheduleOptimizerAutoSave);
+    if (optimizerOffscreen) optimizerOffscreen.addEventListener('change', scheduleOptimizerAutoSave);
 
     if (optimizerToggle) {
         optimizerToggle.addEventListener('click', async function () {
