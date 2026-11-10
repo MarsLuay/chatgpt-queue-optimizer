@@ -710,6 +710,27 @@
                 selectors: CHATGPT_SELECTORS
             });
             this.compatibilitySignals = CHATGPT_COMPATIBILITY_SIGNALS;
+            this._turnScanCacheEnabled = false;
+            this._turnScanCache = new WeakMap();
+        }
+
+        setTurnScanCacheEnabled(enabled) {
+            this._turnScanCacheEnabled = enabled === true;
+            this._turnScanCache = new WeakMap();
+        }
+
+        invalidateTurnScanCache(mutations) {
+            if (!this._turnScanCacheEnabled) return;
+            for (const mutation of mutations) {
+                // Delete every ancestor key. The canonical turn may wrap a role node.
+                let node = mutation.target?.nodeType === 1
+                    ? mutation.target
+                    : mutation.target?.parentElement;
+                while (node) {
+                    this._turnScanCache.delete(node);
+                    node = node.parentElement;
+                }
+            }
         }
 
         getCompatibilityContract() {
@@ -877,20 +898,40 @@
             snapshot.conversationKey = identity?.key || '';
 
             const expectedText = normalizeCommandText(options.expectedText || '');
-            const expectedFingerprint = options.expectedFingerprint || (expectedText ? fingerprintCommandText(expectedText) : '');
+            const expectedTextFingerprint = expectedText ? fingerprintCommandText(expectedText) : '';
+            const expectedFingerprint = options.expectedFingerprint || expectedTextFingerprint;
             const turns = this.getConversationTurns(doc);
             const userTurns = [];
             const assistantTurns = [];
 
             turns.forEach((node, index) => {
                 const role = getNodeRole(node);
-                const text = getNodeText(node);
-                const fingerprint = fingerprintCommandText(text);
+                // Cache only the completed history, never the last two turns.
+                // Store fingerprints, not the potentially multi-megabyte text.
+                const cacheable = this._turnScanCacheEnabled && index < turns.length - 2;
+                const existing = cacheable ? this._turnScanCache.get(node) : null;
+                const memo = existing?.role === role ? existing : null;
+                let text = null;
+                let fingerprint;
+                let hasText;
+                let errorSignal;
+                if (memo) {
+                    fingerprint = memo.fingerprint;
+                    hasText = memo.hasText;
+                    errorSignal = memo.errorSignal;
+                } else {
+                    text = getNodeText(node);
+                    fingerprint = fingerprintCommandText(text);
+                    hasText = text.length > 0;
+                    errorSignal = role === 'assistant'
+                        ? this.getAssistantTurnErrorSignal(text)
+                        : '';
+                    if (cacheable) this._turnScanCache.set(node, { role, fingerprint, hasText, errorSignal });
+                }
                 const turnId = getTurnId(node, index, role, fingerprint);
-                const matchedExpected = !!expectedText && text === expectedText;
-                const errorSignal = role === 'assistant'
-                    ? this.getAssistantTurnErrorSignal(text)
-                    : '';
+                // A fingerprint alone is insufficient for delivery confirmation.
+                const matchedExpected = !!expectedText && fingerprint === expectedTextFingerprint &&
+                    (text === null ? getNodeText(node) : text) === expectedText;
 
                 if (role === 'user' || (!role && matchedExpected)) {
                     userTurns.push({
@@ -915,7 +956,7 @@
                         streaming,
                         hasErrorStop: errorStop,
                         hasIncompleteToolTurn: hasIncompleteToolTurn(node),
-                        hasCompletedText: !streaming && !errorStop && text.length > 0,
+                        hasCompletedText: !streaming && !errorStop && hasText,
                         errorSignal
                     });
                 }

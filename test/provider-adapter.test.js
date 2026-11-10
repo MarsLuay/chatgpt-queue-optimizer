@@ -1981,3 +1981,39 @@ test('ChatGPT generation state detects maximum-length on the active surface only
     assert.ok(handoff.length <= 1200);
 });
 
+
+test('turn snapshot caches historical fingerprints without retaining message text', () => {
+    const adapter = new ChatGPTAdapter();
+    let reads = 0;
+    const turns = Array.from({ length: 6 }, (_, i) => {
+        let value = 'Original user message ' + i;
+        return {
+            get innerText() { reads++; return value; },
+            get textContent() { return value; },
+            setText(next) { value = next; },
+            getAttribute(name) {
+                if (name === 'data-message-author-role') return 'user';
+                if (name === 'data-message-id') return 'user-' + i;
+                return null;
+            },
+            parentElement: null
+        };
+    });
+    adapter.getConversationTurns = () => turns;
+    adapter.getConversationIdentity = () => ({ conversationId: 'cache-test', key: 'chatgpt:c:cache-test' });
+    const doc = { defaultView: { location: { href: 'https://chatgpt.com/c/cache-test' } } };
+    adapter.setTurnScanCacheEnabled(true);
+    const first = adapter.getCommandTurnSnapshot(doc);
+    assert.equal(reads, 6);
+    const second = adapter.getCommandTurnSnapshot(doc);
+    assert.equal(reads, 8, 'only the two newest turns should require text extraction');
+    assert.deepEqual(second.userTurns, first.userTurns);
+    turns[0].setText('Edited prior message');
+    adapter.invalidateTurnScanCache([{ target: turns[0] }]);
+    const third = adapter.getCommandTurnSnapshot(doc);
+    assert.equal(reads, 11, 'one invalidated turn and the two newest must be rescanned');
+    assert.notEqual(third.userTurns[0].fingerprint, first.userTurns[0].fingerprint);
+    adapter.setTurnScanCacheEnabled(false);
+    adapter.getCommandTurnSnapshot(doc);
+    assert.equal(reads, 17, 'disabled optimizer must not reuse old cache entries');
+});

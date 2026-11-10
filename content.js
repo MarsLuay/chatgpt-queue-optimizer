@@ -416,12 +416,14 @@
 
       this.setupContainer();
       this.markConversationRoot();
+      this.provider?.setTurnScanCacheEnabled?.(true);
       this.setupObservers();
       this.refresh();
       this.state.optimizerBound = true;
     }
 
     unbindOptimizer() {
+      this.provider?.setTurnScanCacheEnabled?.(false);
       this.disable();
       this.clearConversationRoot();
       this.state.optimizerBound = false;
@@ -1012,13 +1014,16 @@
       }
 
       this.state.mutationObserver = new MutationObserver((mutations) => {
+        this.provider?.invalidateTurnScanCache?.(mutations);
         this.handleMutations(mutations);
       });
 
       this.state.mutationObserver.observe(this.state.container, {
         childList: true,
+        characterData: true,
         subtree: true,
-        attributes: false
+        attributes: true,
+        attributeFilter: ['data-message-author-role', 'data-message-id', 'data-testid']
       });
     }
 
