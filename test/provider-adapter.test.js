@@ -2030,3 +2030,62 @@ test('deduplication retains canonical turns instead of generic parent wrappers',
     });
     assert.deepEqual(adapter.removeDuplicates([wrapper, turn, wrapper]), [turn]);
 });
+
+test('ChatGPT response evaluation reuses a supplied generation snapshot without rescanning', () => {
+    const adapter = new ChatGPTAdapter();
+    let generationReads = 0;
+    adapter.getGenerationState = () => {
+        generationReads += 1;
+        return { generating: false };
+    };
+    adapter.getCommandTurnSnapshot = () => ({
+        conversationId: 'precomputed',
+        userTurns: [],
+        assistantTurns: [],
+        matchedUserTurnId: null,
+        latestUserTurnId: null
+    });
+    const result = adapter.getCommandResponseState({}, {}, {
+        generating: true,
+        deepResearchActive: false,
+        hasError: false,
+        hasTryAgainButton: false,
+        researchStatusPreview: ''
+    });
+    assert.equal(result.phase, 'active');
+    assert.equal(generationReads, 0);
+    adapter.getCommandResponseState({}, {});
+    assert.equal(generationReads, 1, 'standalone callers still compute generation state');
+});
+
+test('ChatGPT turn discovery uses a single document-ordered selector query', () => {
+    const adapter = new ChatGPTAdapter();
+    const first = { id: 'first' };
+    const second = { id: 'second' };
+    let calls = 0;
+    const doc = {
+        querySelectorAll(selector) {
+            calls += 1;
+            assert.equal(selector, adapter.compatibilitySignals.turnContext.join(','));
+            return [first, second];
+        }
+    };
+    assert.deepEqual(adapter.getConversationTurns(doc), [first, second]);
+    assert.equal(calls, 1);
+});
+
+test('ChatGPT turn discovery retains selector-by-selector fallback', () => {
+    const adapter = new ChatGPTAdapter();
+    const one = { id: 'one' };
+    const two = { id: 'two' };
+    const selectors = adapter.compatibilitySignals.turnContext;
+    const doc = {
+        querySelectorAll(selector) {
+            if (selector.includes(',')) throw new Error('Combined selector unsupported');
+            if (selector === selectors[0]) return [one];
+            if (selector === selectors[1]) return [one, two];
+            return [];
+        }
+    };
+    assert.deepEqual(adapter.getConversationTurns(doc), [one, two]);
+});

@@ -1395,3 +1395,28 @@ test('offscreen rendering is opt-in and cleared on optimizer disable', () => {
   optimizer.disable();
   assert.equal(turns[15].classList.contains('cpo-offscreen'), false);
 });
+
+test('queue polling forwards a single generation-state snapshot to the provider', () => {
+  const { ChatGPTOptimizer } = require('../content.js');
+  const optimizer = Object.create(ChatGPTOptimizer.prototype);
+  const state = { generating: true, deepResearchActive: false };
+  let stateReads = 0;
+  optimizer.getGenerationState = () => { stateReads++; return state; };
+  let called = 0;
+  optimizer.provider = {
+    getCommandResponseState(_document, binding, sharedState) {
+      called++;
+      assert.equal(binding.userTurnId, 'example-user-turn');
+      assert.equal(sharedState, state);
+      return { phase: 'active' };
+    }
+  };
+  let result;
+  optimizer.handleMessage({
+    type: 'CHECK_GENERATION_STATE',
+    commandBinding: { userTurnId: 'example-user-turn' }
+  }, null, response => { result = response; });
+  assert.equal(stateReads, 1);
+  assert.equal(called, 1);
+  assert.deepEqual(result, { state, responseState: { phase: 'active' } });
+});

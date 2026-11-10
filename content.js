@@ -184,7 +184,8 @@
           const state = this.getGenerationState();
           let responseState = null;
           if (this.provider && typeof this.provider.getCommandResponseState === 'function') {
-            responseState = this.provider.getCommandResponseState(document, message.commandBinding || {});
+            // One generation-state inspection per poll. The adapter may reuse it.
+            responseState = this.provider.getCommandResponseState(document, message.commandBinding || {}, state);
           }
           sendResponse({ state, responseState });
           break;

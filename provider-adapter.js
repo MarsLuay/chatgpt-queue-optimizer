@@ -847,25 +847,28 @@
 
         getConversationTurns(doc = (typeof document !== 'undefined' ? document : null)) {
             const selectors = this.compatibilitySignals.turnContext || [];
-            const matches = [];
-            const seen = new Set();
-
-            for (const selector of selectors) {
-                let nodes = [];
-                try {
-                    nodes = Array.from(doc?.querySelectorAll?.(selector) || []);
-                } catch {
-                    nodes = [];
-                }
-                for (const element of nodes) {
-                    if (!seen.has(element)) {
-                        seen.add(element);
-                        matches.push(element);
+            if (!doc || selectors.length === 0) return [];
+            // A single selector query returns nodes once, in DOM order. Fall
+            // back to individual selectors if a site-specific selector breaks.
+            try {
+                return Array.from(doc.querySelectorAll(selectors.join(',')));
+            } catch {
+                const matches = [];
+                const seen = new Set();
+                for (const selector of selectors) {
+                    try {
+                        for (const element of doc.querySelectorAll(selector)) {
+                            if (!seen.has(element)) {
+                                seen.add(element);
+                                matches.push(element);
+                            }
+                        }
+                    } catch {
+                        // An unsupported selector must not break queue processing.
                     }
                 }
+                return matches;
             }
-
-            return matches;
         }
 
         getAssistantTurnErrorSignal(text) {
@@ -976,8 +979,8 @@
             return snapshot;
         }
 
-        getCommandResponseState(doc = (typeof document !== 'undefined' ? document : null), binding = {}) {
-            const generation = this.getGenerationState(doc);
+        getCommandResponseState(doc = (typeof document !== 'undefined' ? document : null), binding = {}, generationState = null) {
+            const generation = generationState || this.getGenerationState(doc);
             const snapshot = this.getCommandTurnSnapshot(doc, {
                 expectedFingerprint: binding.commandFingerprint || ''
             });
