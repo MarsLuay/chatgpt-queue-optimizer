@@ -1808,12 +1808,26 @@
         removeDuplicates(messages) {
             const unique = Array.from(new Set(messages));
             const candidates = new Set(unique);
-            return unique.filter(node => {
+            const redundant = new Set();
+            const isTurn = node => {
+                const testId = node.getAttribute?.('data-testid') || '';
+                return node.tagName?.toLowerCase() === 'article' ||
+                    testId.startsWith('conversation-turn') ||
+                    !!node.getAttribute?.('data-message-author-role') ||
+                    !!node.getAttribute?.('data-message-id');
+            };
+            for (const node of unique) {
                 for (let parent = node.parentElement; parent; parent = parent.parentElement) {
-                    if (candidates.has(parent)) return false;
+                    if (!candidates.has(parent)) continue;
+                    // Prefer canonical turns over generic wrappers containing them.
+                    if (isTurn(node) && !isTurn(parent)) {
+                        redundant.add(parent);
+                    } else {
+                        redundant.add(node);
+                    }
                 }
-                return true;
-            });
+            }
+            return unique.filter(node => !redundant.has(node));
         }
     }
 

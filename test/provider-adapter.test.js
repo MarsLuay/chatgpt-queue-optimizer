@@ -2017,3 +2017,16 @@ test('turn snapshot caches historical fingerprints without retaining message tex
     adapter.getCommandTurnSnapshot(doc);
     assert.equal(reads, 17, 'disabled optimizer must not reuse old cache entries');
 });
+
+test('deduplication retains canonical turns instead of generic parent wrappers', () => {
+    const adapter = new ChatGPTAdapter();
+    const wrapper = { tagName: 'DIV', parentElement: null, getAttribute: () => null };
+    const turn = {
+        tagName: 'ARTICLE', parentElement: wrapper,
+        getAttribute: key => key === 'data-message-author-role' ? 'assistant' : null
+    };
+    Object.defineProperty(turn, 'textContent', {
+        get() { throw Error('Deduplication must not extract message text'); }
+    });
+    assert.deepEqual(adapter.removeDuplicates([wrapper, turn, wrapper]), [turn]);
+});
