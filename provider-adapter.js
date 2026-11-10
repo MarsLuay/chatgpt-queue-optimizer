@@ -723,9 +723,9 @@
             if (!this._turnScanCacheEnabled) return;
             for (const mutation of mutations) {
                 // Delete every ancestor key. The canonical turn may wrap a role node.
-                let node = mutation.target?.nodeType === 1
-                    ? mutation.target
-                    : mutation.target?.parentElement;
+                let node = mutation.target?.nodeType === 3
+                    ? mutation.target.parentElement
+                    : mutation.target;
                 while (node) {
                     this._turnScanCache.delete(node);
                     node = node.parentElement;
