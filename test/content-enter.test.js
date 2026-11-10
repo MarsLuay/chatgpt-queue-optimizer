@@ -1307,3 +1307,44 @@ test('ChatGPT optimizer binds conversation routes and cleans up after SPA naviga
   assert.equal(optimizer.config.enabled, true);
   assert.equal(optimizer.state.optimizerBound, true);
 });
+
+test('Load More preserves expanded window through repeated passes and resets on size change', () => {
+  const { dom, optimizer } = setupTestEnv();
+  optimizer.config.enabled = true;
+  optimizer.config.windowSize = 10;
+  optimizer.config.batchSize = 5;
+  const root = dom.document.createElement('main');
+  dom.document.body.appendChild(root);
+  const turns = Array.from({ length: 30 }, (_, i) => {
+    const node = dom.document.createElement('article');
+    node.textContent = 'Turn ' + i;
+    root.appendChild(node);
+    return node;
+  });
+  optimizer.state.container = root;
+  optimizer.sortMessagesByPosition = nodes => nodes;
+  optimizer.getMessageNodes = () => turns;
+  optimizer.ensureBanner = () => {};
+  optimizer.updateBanner = () => {};
+  optimizer.setupAutoScroll = () => {};
+  optimizer.applyWindowing(turns);
+  assert.equal(optimizer.state.hiddenCount, 20);
+  optimizer.showOlderMessages();
+  assert.equal(optimizer.state.visibleCount, 15);
+  assert.equal(turns[15].classList.contains('cpo-hidden'), false);
+  optimizer.applyWindowing(turns);
+  assert.equal(optimizer.state.visibleCount, 15);
+  optimizer.handleMessage({ type: 'UPDATE_CONFIG', config: { windowSize: 12 } }, null, () => {});
+  assert.equal(optimizer.state.visibleCount, 0);
+  optimizer.applyWindowing(turns);
+  assert.equal(optimizer.state.visibleCount, 12);
+});
+
+test('message deduplication is ancestor-based without reading large message strings', () => {
+  const provider = require('../provider-adapter.js').getProvider('chatgpt');
+  const parent = { parentElement: null };
+  const child = { parentElement: parent };
+  const other = { parentElement: null };
+  Object.defineProperty(child, 'textContent', { get() { throw Error('Unnecessary text allocation'); } });
+  assert.deepEqual(provider.removeDuplicates([child, parent, child, other]), [parent, other]);
+});

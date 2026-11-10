@@ -1761,25 +1761,17 @@
                         return 1;
                     }
                     return 0;
-                })
-                .slice(0, 1200);
+                });
         }
 
         removeDuplicates(messages) {
             const unique = Array.from(new Set(messages));
-
-            return unique.filter((msg) => {
-                return !unique.some((otherMsg) => {
-                    if (otherMsg === msg) return false;
-
-                    const otherTextLength = (otherMsg.textContent || '').trim().length;
-                    const msgTextLength = (msg.textContent || '').trim().length;
-
-                    return (
-                        otherMsg.contains(msg) &&
-                        otherTextLength > msgTextLength * 1.25
-                    );
-                });
+            const candidates = new Set(unique);
+            return unique.filter(node => {
+                for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+                    if (candidates.has(parent)) return false;
+                }
+                return true;
             });
         }
     }
