@@ -242,6 +242,7 @@ def run_upload_workflow(
     credential_reader: Callable[[], tuple[str, str]] | None = None,
     amo_submitter: Callable[[str, Path, Path, Path, tuple[str, str]], bool] | None = None,
     upload: bool = True,
+    require_local_test: bool = True,
 ) -> list[str]:
     package_builder = package_builder or build_store_packages
     npm_lookup = npm_lookup or find_npm
@@ -268,7 +269,10 @@ def run_upload_workflow(
         local_state = "failed"
         log(f"Temporary Firefox test could not start: {error}")
     if local_state == "failed":
-        errors.append("The temporary Firefox test did not start successfully; see its log in build/logs/.")
+        if require_local_test:
+            errors.append("The temporary Firefox test did not start successfully; see its log in build/logs/.")
+        else:
+            log("Temporary Firefox test failed; this does not block AMO submission in managed release mode.")
 
     if not upload:
         return errors

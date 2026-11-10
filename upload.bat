@@ -12,23 +12,23 @@ set "UPLOAD_EXIT=1"
 goto Finish
 
 :UsePy
-py -3 "%REPO_ROOT%Installers\upload_extension.py" --repo-dir "%REPO_ROOT%"
+py -3 "%REPO_ROOT%Installers\publish_firefox.py" --repo-dir "%REPO_ROOT%"
 set "UPLOAD_EXIT=%ERRORLEVEL%"
 goto FinishedRun
 
 :UsePython
-python "%REPO_ROOT%Installers\upload_extension.py" --repo-dir "%REPO_ROOT%"
+python "%REPO_ROOT%Installers\publish_firefox.py" --repo-dir "%REPO_ROOT%"
 set "UPLOAD_EXIT=%ERRORLEVEL%"
 goto FinishedRun
 
 :FinishedRun
 if "%UPLOAD_EXIT%"=="0" (
   echo.
-  echo AMO submission requested and local Firefox test launched.
+  echo AMO update submitted. Version bump committed and pushed to origin/main.
   echo Upload log: %REPO_ROOT%build\logs\upload.log
 ) else (
   echo.
-  echo Upload workflow needs attention. The local Firefox test may still be running.
+  echo Release stopped. Check the log and Git status before retrying.
   echo Upload log: %REPO_ROOT%build\logs\upload.log
   echo Firefox status: %REPO_ROOT%build\logs\upload-firefox-test.log
 )

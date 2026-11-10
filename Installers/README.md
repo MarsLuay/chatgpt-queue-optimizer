@@ -9,7 +9,9 @@ Installer and packaging tools for ChatGPT Queue + Optimizer.
 - `install_chatgpt_queue_optimizer.py` - shared Chrome/Firefox installation helper used by the launchers.
 - `package_for_stores.py` - builds upload-ready Chrome Web Store and Firefox AMO archives without installing or launching a browser.
 - `upload_extension.py` - submits a listed Firefox update to AMO and starts an isolated local Firefox test.
-- `../upload.bat` and `../upload.app` - Windows and macOS upload launchers.
+- `../upload.bat` - Windows managed release launcher (Git sync, validation, version bump, AMO, Git push).
+- `publish_firefox.py` - fail-closed Windows release coordinator.
+- `../upload.app` - macOS package-and-upload launcher.
 
 ## One-click install
 
@@ -29,7 +31,9 @@ Both launchers ultimately call `install_chatgpt_queue_optimizer.py` against the 
 
 ## Submit a Firefox update and test it locally
 
-Run `upload.bat` on Windows or open `upload.app` on macOS. These launchers are separate from the regular installer and:
+On Windows, `upload.bat` now runs the managed release publisher, which requires a clean `main` checkout and Git push access. It fast-forward pulls `origin/main`, installs locked npm dependencies, runs `npm run check`, automatically increments the patch version in `manifest.json`, then executes the existing Firefox AMO packaging/submission workflow. Once AMO confirms the submission request, it commits the version change and pushes it to `origin/main` (never with force). If validation fails, no version is changed or submitted. If AMO submission or Git push fails, the bumped manifest or local commit is retained so the user can inspect what the server accepted before retrying. Read `build/logs/upload.log` and `git status`. The temporary Firefox test is non-blocking in this managed Windows mode.
+
+On macOS, `upload.app` retains the existing submit-and-test behavior. Both launchers:
 
 1. Rebuild the store-ready packages and validate the Firefox add-on ID and version.
 2. Start `web-ext run` with the generated Firefox source in a separate temporary profile. This local test starts before the store submission and works while AMO review is pending; it does not modify your normal Firefox profile or disable signature checks.

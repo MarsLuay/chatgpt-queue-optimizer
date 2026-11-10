@@ -62,7 +62,7 @@ class UploadWorkflowTests(unittest.TestCase):
             (repo_root / "upload.app" / "Contents" / "Info.plist").read_bytes()
         )
 
-        self.assertIn("Installers\\upload_extension.py", batch_text)
+        self.assertIn("Installers\\publish_firefox.py", batch_text)
         self.assertNotIn("\npause\n", batch_text.lower())
         self.assertIn("Installers/upload_extension.py", app_script.read_text(encoding="utf-8"))
         self.assertEqual(app_info["CFBundleExecutable"], "upload")

@@ -167,7 +167,9 @@ The Firefox package declares a minimum Firefox version of 140.0.
 
 ### Submit and test a Firefox update
 
-Run `upload.bat` on Windows or open `upload.app` on macOS. The launcher rebuilds the store packages, starts a local Firefox test session, then submits the Firefox update to the existing AMO listing. It does not wait for review approval: the temporary local install is available for testing while the public listing remains on its currently approved version.
+On Windows, run `upload.bat` from a **clean `main` checkout**. It now automates the complete release sequence: `git pull --ff-only origin main`, `npm ci`, `npm run check`, a patch-version bump in `manifest.json`, Firefox package generation, AMO submission, and a version-only Git commit pushed to `origin/main`. You need Git push authorization and AMO API credentials. The script does not overwrite local edits, force-push, or continue after failed checks. If submission or pushing fails, inspect `git status` and the upload log before retrying; the bumped manifest or local release commit may remain because Mozilla could already have accepted the version.
+
+On macOS, `upload.app` retains the original package-and-submit behavior (without Git synchronization/version bump). Both platforms launch a separate Firefox test profile and submit to the existing AMO listing without waiting for Mozilla review approval. The public listing continues serving its approved version until Mozilla approves the new one.
 
 The launcher asks for an AMO API key and a hidden API secret (not your AMO account password). Create those credentials at [AMO API credentials](https://addons.mozilla.org/developers/addon/api/key/). They are passed to the submission process without being saved to the repository. Alternatively, set `WEB_EXT_API_KEY` and `WEB_EXT_API_SECRET` in the local environment.
 
