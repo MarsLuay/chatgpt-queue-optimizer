@@ -90,3 +90,13 @@ test('scheduled popup tab and form are ordered between queue and optimizer', () 
     assert.match(popupHtml, /id="scheduled-target-tab-select"/);
     assert.doesNotMatch(popupSource, /\balert\s*\(/);
 });
+
+test('saved prompt list is rendered in bounded chunks and tab status uses event listeners', () => {
+    const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '../popup.js'), 'utf8');
+    assert.match(src, /const MESSAGE_RENDER_CHUNK = 100/);
+    assert.match(src, /messages\.slice\(0, rendered\)/);
+    assert.match(src, /document\.createDocumentFragment\(\)/);
+    assert.match(src, /chrome\.tabs\?\.onCreated/);
+    assert.match(src, /chrome\.tabs\?\.onUpdated/);
+    assert.match(src, /}, 15000\)/);
+});

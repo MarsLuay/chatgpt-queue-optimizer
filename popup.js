@@ -1250,10 +1250,16 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     });
 
+    // Rendering thousands of saved prompts at once can freeze the popup.
+    // Keep all prompts in memory/storage; only the displayed rows are bounded.
+    const MESSAGE_RENDER_CHUNK = 100;
+    let renderedMessageLimit = MESSAGE_RENDER_CHUNK;
     function updateMessagesList() {
         messageList.textContent = '';
+        const rendered = Math.min(messages.length, renderedMessageLimit);
+        const fragment = document.createDocumentFragment();
 
-        messages.forEach((msg, index) => {
+        messages.slice(0, rendered).forEach((msg, index) => {
             const div = document.createElement('div');
             div.className = 'message-item';
             div.style.display = 'flex';
@@ -1311,8 +1317,20 @@ document.addEventListener('DOMContentLoaded', function () {
 
             div.appendChild(text);
             div.appendChild(controls);
-            messageList.appendChild(div);
+            fragment.appendChild(div);
         });
+        if (rendered < messages.length) {
+            const more = document.createElement('button');
+            more.type = 'button';
+            more.className = 'message-list-load-more';
+            more.textContent = `Show next ${Math.min(MESSAGE_RENDER_CHUNK, messages.length - rendered)} prompts (${rendered} of ${messages.length} shown)`;
+            more.addEventListener('click', () => {
+                renderedMessageLimit += MESSAGE_RENDER_CHUNK;
+                updateMessagesList();
+            });
+            fragment.appendChild(more);
+        }
+        messageList.appendChild(fragment);
     }
 
     function setSequenceEditMode(sequenceName) {
@@ -2473,12 +2491,34 @@ The sequence should do the following: `;
         });
     }
 
+    // React to tab changes instead of enumerating every browser tab every
+    // three seconds. Keep a slower fallback for missed browser events.
+    let targetTabsRefreshTimer = null;
+    const refreshTabsAfterEvent = () => {
+        clearTimeout(targetTabsRefreshTimer);
+        targetTabsRefreshTimer = setTimeout(() => {
+            if (document.hidden) return;
+            refreshTargetTabs();
+            refreshScheduledTargetTabs();
+        }, 200);
+    };
+    for (const event of [
+        chrome.tabs?.onCreated,
+        chrome.tabs?.onRemoved,
+        chrome.tabs?.onUpdated,
+        chrome.tabs?.onActivated
+    ]) {
+        event?.addListener?.(refreshTabsAfterEvent);
+    }
     setInterval(function () {
+        if (document.hidden) return;
         refreshTargetTabs();
+        refreshScheduledTargetTabs();
+        // Queue-state changes normally arrive via chrome.storage.onChanged.
+        // This is a low-frequency recovery refresh.
         refreshRunningJobsStatus();
-
         if (optimizerToolPanel && optimizerToolPanel.classList.contains('active')) {
             refreshOptimizerStatus();
         }
-    }, 3000);
+    }, 15000);
 });

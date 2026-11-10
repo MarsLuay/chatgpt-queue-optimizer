@@ -1321,15 +1321,12 @@
       this._isRefreshing = true;
 
       try {
+        // Refresh the list once, then reuse that exact result while selecting
+        // its container. The old flow discarded the cache twice per refresh.
+        this._cachedMessages = null;
+        this._cacheTimestamp = null;
         this.setupContainer();
-
-        this._cachedMessages = null;
-        this._cacheTimestamp = null;
-
         const messages = this.getMessageNodes();
-
-        this._cachedMessages = null;
-        this._cacheTimestamp = null;
 
         this.state.lastMessageCount = messages.length;
 

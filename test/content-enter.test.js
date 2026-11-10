@@ -1420,3 +1420,22 @@ test('queue polling forwards a single generation-state snapshot to the provider'
   assert.equal(called, 1);
   assert.deepEqual(result, { state, responseState: { phase: 'active' } });
 });
+
+test('optimizer refresh scans the message list only once when selecting its container', () => {
+  const { optimizer } = setupTestEnv();
+  optimizer.config.enabled = true;
+  optimizer._isRefreshing = false;
+  optimizer.getCurrentSurface = () => ({ optimizerEligible: true });
+  let scans = 0;
+  optimizer.getMessageNodes = () => {
+    if (optimizer._cachedMessages && optimizer._cacheTimestamp) return optimizer._cachedMessages;
+    scans++;
+    optimizer._cachedMessages = Array.from({ length: 10 }, () => ({}));
+    optimizer._cacheTimestamp = Date.now();
+    return optimizer._cachedMessages;
+  };
+  optimizer.setupContainer = () => { optimizer.getMessageNodes(); };
+  optimizer.applyWindowing = () => {};
+  optimizer.refresh();
+  assert.equal(scans, 1);
+});
