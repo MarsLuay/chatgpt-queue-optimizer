@@ -3354,12 +3354,27 @@ async function waitForTabResponse(tabId, context = {}) {
     const hasCommandBinding = !context.waitForExistingGeneration && !!(commandBinding.userTurnId || commandBinding.commandFingerprint);
     const requiredConfirmSamples = Math.max(1, Number(context.terminalConfirmSamples || QUEUE_WAIT_POLICY.terminalConfirmSamples) || 2);
 
-    const persistWaitSignals = () => {
+    // Save delivery-state transitions promptly, but coalesce unchanged
+    // heartbeat writes to avoid serializing large queued commands every poll.
+    let lastWaitPersistedAt = 0;
+    let lastWaitPersistedSignature = '';
+    const persistWaitSignals = (force = false) => {
         const current = jobs.get(tabId);
         if (!current) return;
         current.sawGenerating = sawGenerating;
         current.sawDeepResearch = sawDeepResearch;
-        current.updatedAt = Date.now();
+        const signature = [
+            current.sawGenerating, current.sawDeepResearch,
+            current.currentPhase, current.deliveryState, current.lastResponsePhase,
+            current.submittedUserTurnId, current.assistantTurnId,
+            current.submissionAckSource, current.terminalAckSource
+        ].join('|');
+        const now = Date.now();
+        if (!force && signature === lastWaitPersistedSignature &&
+            now - lastWaitPersistedAt < 5000) return;
+        lastWaitPersistedSignature = signature;
+        lastWaitPersistedAt = now;
+        current.updatedAt = now;
         updateRunningJobsStorage();
     };
 
@@ -3387,6 +3402,7 @@ async function waitForTabResponse(tabId, context = {}) {
     return new Promise((resolveRaw) => {
         let settled = false;
         let checkInterval = null;
+        let pollInFlight = false;
         const resolve = (value) => {
             if (settled) {
                 return;
@@ -3395,7 +3411,7 @@ async function waitForTabResponse(tabId, context = {}) {
             if (checkInterval) {
                 clearInterval(checkInterval);
             }
-            persistWaitSignals();
+            persistWaitSignals(true);
             resolveRaw(value);
         };
         const pollGeneration = () => {
@@ -3403,6 +3419,7 @@ async function waitForTabResponse(tabId, context = {}) {
                 clearInterval(checkInterval);
                 return;
             }
+            if (pollInFlight) return;
 
             const job = jobs.get(tabId);
 
@@ -3459,6 +3476,7 @@ async function waitForTabResponse(tabId, context = {}) {
             }
 
             try {
+                pollInFlight = true;
                 sendTabMessage(tabId, { type: 'CHECK_GENERATION_STATE', commandBinding }).then((response) => {
                     if (settled) {
                         return;
@@ -3754,8 +3772,11 @@ async function waitForTabResponse(tabId, context = {}) {
                             error: serializeError(executionError)
                         })
                     });
+                }).finally(() => {
+                    pollInFlight = false;
                 });
             } catch (error) {
+                pollInFlight = false;
                 clearInterval(checkInterval);
                 resolve({
                     ok: false,

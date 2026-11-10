@@ -821,3 +821,14 @@ test('topics 25-33 create one confirmed user turn each and preserve order', asyn
     stopJob(tabId);
     restoreConsole();
 });
+
+test('queue polling never overlaps and avoids serializing on every unchanged heartbeat', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../background.js'), 'utf8');
+    const wait = source.slice(source.indexOf('async function waitForTabResponse('),
+        source.indexOf('function getWaitContextLabel('));
+    assert.match(wait, /if \(pollInFlight\) return;/);
+    assert.match(wait, /pollInFlight = true;/);
+    assert.match(wait, /\.finally\(\(\) => \{\s*pollInFlight = false;/);
+    assert.match(wait, /now - lastWaitPersistedAt < 5000/);
+    assert.match(wait, /persistWaitSignals\(true\)/);
+});
