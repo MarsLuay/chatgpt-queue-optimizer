@@ -861,6 +861,10 @@
             };
         }
 
+        /**
+         * @param {Document | Element | null} [doc]
+         * @returns {HTMLElement[]}
+         */
         getConversationTurns(doc = (typeof document !== 'undefined' ? document : null)) {
             const selectors = this.compatibilitySignals.turnContext || [];
             if (!doc || selectors.length === 0) return [];
@@ -878,7 +882,7 @@
             // every selector. Preserve the independent-selector fallback.
             let nodes;
             try {
-                nodes = Array.from(doc.querySelectorAll(selectors.join(',')));
+                nodes = /** @type {HTMLElement[]} */ (Array.from(doc.querySelectorAll(selectors.join(','))));
             } catch {
                 nodes = [];
                 const seen = new Set();
@@ -887,7 +891,7 @@
                         for (const element of Array.from(doc.querySelectorAll(selector))) {
                             if (!seen.has(element)) {
                                 seen.add(element);
-                                nodes.push(element);
+                                nodes.push(/** @type {HTMLElement} */ (element));
                             }
                         }
                     } catch {
@@ -1590,6 +1594,7 @@
             };
         }
 
+        /** @param {Document | Element | null} [doc] */
         getRetryButtonMatch(doc = (typeof document !== 'undefined' ? document : null)) {
             const empty = {
                 element: null,
@@ -1654,6 +1659,7 @@
                 : empty;
         }
 
+        /** @param {Document | Element | null} [doc] */
         getRetryButton(doc = (typeof document !== 'undefined' ? document : null)) {
             return this.getRetryButtonMatch(doc).element;
         }
