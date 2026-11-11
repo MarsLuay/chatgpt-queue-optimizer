@@ -316,8 +316,10 @@
             state.hasActiveStopButton || state.hasResultStreaming ||
             state.hasActiveToolOrResearch) return false;
         if (document.querySelector('[role="dialog"], [aria-modal="true"]')) return false;
-        if (Array.from(document.querySelectorAll('input[type="file"]')).some(input => input.files?.length)) return false;
-        if (Array.from(document.querySelectorAll('audio,video')).some(media => media.paused === false)) return false;
+        if (Array.from(document.querySelectorAll('input[type="file"]')).some(input =>
+          /** @type {HTMLInputElement} */ (input).files?.length)) return false;
+        if (Array.from(document.querySelectorAll('audio,video')).some(media =>
+          /** @type {HTMLMediaElement} */ (media).paused === false)) return false;
         if (document.querySelector('[data-state="uploading"], [data-testid*="upload-progress"], [aria-label*="Uploading"]')) return false;
         return true;
       } catch {

@@ -884,7 +884,7 @@
                 const seen = new Set();
                 for (const selector of selectors) {
                     try {
-                        for (const element of doc.querySelectorAll(selector)) {
+                        for (const element of Array.from(doc.querySelectorAll(selector))) {
                             if (!seen.has(element)) {
                                 seen.add(element);
                                 nodes.push(element);
