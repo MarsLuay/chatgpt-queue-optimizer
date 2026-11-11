@@ -2133,3 +2133,18 @@ test('ChatGPT turn list cache invalidates when a canonical turn marker changes',
     adapter.getConversationTurns(doc);
     assert.equal(queries, 2);
 });
+
+test('active-response scoping uses the nearest turn ancestor', () => {
+    const adapter = new ChatGPTAdapter();
+    const previous = { parentElement: null };
+    const latest = { parentElement: null };
+    const oldButton = { parentElement: previous };
+    const liveButton = { parentElement: latest };
+    const outside = { parentElement: null };
+    const turns = [previous, latest];
+    const members = new Set(turns);
+    assert.equal(adapter.isActiveResponseNode(oldButton, turns, latest, members), false);
+    assert.equal(adapter.isActiveResponseNode(liveButton, turns, latest, members), true);
+    assert.equal(adapter.isActiveResponseNode(outside, turns, latest, members), true);
+    assert.equal(adapter.isActiveResponseNode(null, turns, latest, members), false);
+});

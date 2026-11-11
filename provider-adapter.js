@@ -438,17 +438,14 @@
             return false;
         }
 
-        isActiveResponseNode(node, turns, latestTurn) {
-            if (!node) {
-                return false;
-            }
-            for (const turn of turns) {
-                if (turn === latestTurn) {
-                    continue;
-                }
-                if (this.nodeContains(turn, node)) {
-                    return false;
-                }
+        isActiveResponseNode(node, turns, latestTurn, turnSet = null) {
+            if (!node) return false;
+            // Checking all historical turns for every button/spinner is O(N*M).
+            // Walk the node's ancestor chain and use a constant-time membership set.
+            const members = turnSet || new Set(turns);
+            for (let parent = node; parent; parent = parent.parentElement || parent.parentNode || null) {
+                if (parent === latestTurn) return true;
+                if (members.has(parent)) return false;
             }
             return true;
         }
@@ -899,7 +896,7 @@
                 }
             }
             if (this._turnScanCacheEnabled) {
-                this._turnListCache = { doc, nodes, createdAt: now };
+                this._turnListCache = { doc, nodes, turnSet: new Set(nodes), createdAt: now };
             }
             return nodes;
         }
@@ -1460,7 +1457,10 @@
             const turns = this.getConversationTurns(doc);
             const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
             const assistantErrorStop = getNodeRole(latestTurn) === 'assistant' && hasAssistantErrorStop(latestTurn);
-            const inActiveSurface = (node) => this.isActiveResponseNode(node, turns, latestTurn);
+            const turnSet = this._turnListCache?.nodes === turns
+                ? this._turnListCache.turnSet
+                : new Set(turns);
+            const inActiveSurface = (node) => this.isActiveResponseNode(node, turns, latestTurn, turnSet);
 
             const buttons = Array.from(doc.querySelectorAll('button')).filter(inActiveSurface);
             const stopSelectorMatch = this.getSelectorMatch(doc, 'stopButton', (button) => {
