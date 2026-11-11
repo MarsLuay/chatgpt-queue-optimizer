@@ -20,6 +20,8 @@ const sandbox = {
         },
         alarms: {
             onAlarm: { addListener: () => {} },
+            create: () => {},
+            clear: () => {},
         },
         commands: {
             onCommand: { addListener: () => {} },

@@ -1335,7 +1335,9 @@ test('Load More preserves expanded window through repeated passes and resets on 
   optimizer.applyWindowing(turns);
   assert.equal(optimizer.state.visibleCount, 15);
   optimizer.handleMessage({ type: 'UPDATE_CONFIG', config: { windowSize: 12 } }, null, () => {});
-  assert.equal(optimizer.state.visibleCount, 0);
+  // UPDATE_CONFIG refreshes immediately, so the new window is already applied.
+  assert.equal(optimizer.state.visibleCount, 12);
+  assert.equal(optimizer.state.hiddenCount, 18);
   optimizer.applyWindowing(turns);
   assert.equal(optimizer.state.visibleCount, 12);
 });

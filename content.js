@@ -1360,10 +1360,10 @@
 
     disable() {
       const fromDocument = typeof document !== 'undefined' && typeof document.querySelectorAll === 'function'
-        ? Array.from(document.querySelectorAll('.cpo-hidden'))
+        ? Array.from(document.querySelectorAll('.cpo-hidden, .cpo-offscreen'))
         : [];
       const fromContainer = this.state.container && typeof this.state.container.querySelectorAll === 'function'
-        ? Array.from(this.state.container.querySelectorAll('.cpo-hidden'))
+        ? Array.from(this.state.container.querySelectorAll('.cpo-hidden, .cpo-offscreen'))
         : [];
       const fromCache = Array.isArray(this._cachedMessages) ? this._cachedMessages : [];
       const messages = [...new Set([...fromDocument, ...fromContainer, ...fromCache])];
