@@ -18,12 +18,12 @@ echo Install Python 3 from https://www.python.org/downloads/windows/
 goto Finish
 
 :UsePy
-py -3 "%REPO_ROOT%Installers\publish_firefox.py" --repo-dir "%REPO_ROOT%"
+py -3 "%REPO_ROOT%Installers\publish_firefox.py" --repo-dir "%REPO_ROOT%."
 set "UPLOAD_EXIT=%ERRORLEVEL%"
 goto ShowResult
 
 :UsePython
-python "%REPO_ROOT%Installers\publish_firefox.py" --repo-dir "%REPO_ROOT%"
+python "%REPO_ROOT%Installers\publish_firefox.py" --repo-dir "%REPO_ROOT%."
 set "UPLOAD_EXIT=%ERRORLEVEL%"
 goto ShowResult
 

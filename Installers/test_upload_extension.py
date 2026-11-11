@@ -63,6 +63,10 @@ class UploadWorkflowTests(unittest.TestCase):
         )
 
         self.assertIn("Installers\\publish_firefox.py", batch_text)
+        # Windows command-line parsing treats a trailing backslash before a
+        # closing quote as an escaped quote. %%~dp0 ends with a backslash.
+        self.assertEqual(batch_text.count('--repo-dir "%REPO_ROOT%."'), 2)
+        self.assertNotIn('--repo-dir "%REPO_ROOT%"', batch_text)
         # Double-clicking the batch file must keep error output visible.
         self.assertIn("pause >nul", batch_text.lower())
         self.assertIn('type "%UPLOAD_LOG%"', batch_text)

@@ -1,3 +1,4 @@
+import io
 import json
 import tempfile
 import unittest
@@ -45,6 +46,14 @@ class PublishFirefoxTests(unittest.TestCase):
         with patch.object(publish_firefox.shutil, 'which', return_value='git'):
             return publish_firefox.managed_publish(self.root, command_runner=self.command,
                 npm_lookup=lambda: 'npm', credentials_reader=lambda: ('key', 'secret'), upload_runner=self.upload)
+
+    def test_invalid_log_path_exits_cleanly_with_visible_error(self):
+        with patch.object(Path, "mkdir", side_effect=OSError(123, "Invalid directory name")):
+            with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                exit_code = publish_firefox.main(["--repo-dir", str(self.root)])
+        self.assertEqual(exit_code, 1)
+        self.assertIn("Could not initialize the release directory", stderr.getvalue())
+        self.assertIn("Invalid directory name", stderr.getvalue())
 
     def test_bump_version_preserves_other_fields(self):
         previous, current = publish_firefox.bump_patch_version(self.root / 'manifest.json')
