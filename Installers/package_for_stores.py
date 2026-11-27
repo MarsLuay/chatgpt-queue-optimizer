@@ -34,6 +34,7 @@ REPO_FILES = [
     "options.html",
     "history-viewer.html",
     "history-viewer.js",
+    "history-store.js",
     "history-viewer.css",
     "styles.css",
     "icon_16.png",
@@ -55,6 +56,7 @@ def copy_source(repo_dir, target_dir):
         shutil.copy2(repo_dir / name, target_dir / name)
     shutil.copy2(wasm, target_dir / wasm.name)
     shutil.copy2(repo_dir / 'optimizer_browser.wasm', target_dir / 'optimizer_browser.wasm')
+    shutil.copy2(repo_dir / 'optimizer_history.wasm', target_dir / 'optimizer_history.wasm')
     icons = repo_dir / "icons"
     if icons.exists():
         shutil.copytree(icons, target_dir / "icons")
