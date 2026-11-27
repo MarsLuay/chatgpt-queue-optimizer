@@ -76,3 +76,80 @@ test('adaptive budget selects a bounded recent window and matches native policy'
         }
     }
 });
+
+test('resource sampling counts nodes and text lengths without reading contents', () => {
+    const instance = optimizer();
+    const original = global.document;
+    const root = { nodeType: 1, localName: 'article' };
+    const textNode = { nodeType: 3, length: 129 };
+    Object.defineProperty(textNode, 'textContent', {
+        get() { throw new Error('Profiler must not copy text'); }
+    });
+    const descendants = [textNode, { nodeType: 1, localName: 'img' },
+        { nodeType: 1, localName: 'video' }, { nodeType: 1, localName: 'canvas' }];
+    try {
+        global.document = { createTreeWalker() {
+            let i = 0;
+            return { nextNode: () => descendants[i++] || null };
+        } };
+        const sample = instance.sampleResources([root]);
+        assert.equal(sample.nodes, 5);
+        assert.equal(sample.textChars, 129);
+        assert.equal(sample.images, 1);
+        assert.equal(sample.media, 1);
+        assert.equal(sample.surfaces, 1);
+        assert.equal(sample.units, 295);
+        assert.equal(sample.truncatedTurns, 0);
+    } finally {
+        if (original === undefined) delete global.document;
+        else global.document = original;
+    }
+});
+
+test('resource sampling stays bounded for very large turns', () => {
+    const instance = optimizer();
+    const original = global.document;
+    const root = { nodeType: 1, localName: 'article' };
+    try {
+        global.document = { createTreeWalker() {
+            return { nextNode: () => ({ nodeType: 1, localName: 'span' }) };
+        } };
+        const sample = instance.sampleResources(Array.from({ length: 100 }, () => root));
+        assert.equal(sample.sampledTurns, 32);
+        assert.equal(sample.nodes, 32 * 512);
+        assert.equal(sample.truncatedTurns, 32);
+    } finally {
+        if (original === undefined) delete global.document;
+        else global.document = original;
+    }
+});
+
+test('adaptive window honors manual expansion and defers unsafe shrink', () => {
+    const instance = optimizer();
+    instance.config.enabled = true;
+    instance.config.adaptiveBudget = true;
+    instance.state = { visibleCount: 0, manualVisibleCount: 0, perf: {} };
+    instance.policyAdaptiveTarget = () => 8;
+    instance.canShrinkAdaptiveWindow = () => true;
+    instance.sortMessagesByPosition = messages => messages;
+    instance.hideMessage = () => {};
+    instance.showMessage = () => {};
+    instance.ensureBanner = () => {};
+    instance.updateBanner = () => {};
+    instance.setupAutoScroll = () => {};
+    const turns = Array.from({ length: 100 }, () => ({ classList: { remove() {} } }));
+    instance.getMessageNodes = () => turns;
+    instance.applyWindowing(turns);
+    assert.equal(instance.state.visibleCount, 8);
+    instance.showOlderMessages();
+    assert.equal(instance.state.visibleCount, 33);
+    instance.applyWindowing(turns);
+    assert.equal(instance.state.visibleCount, 33);
+    instance.state.manualVisibleCount = 0;
+    instance.canShrinkAdaptiveWindow = () => false;
+    instance.applyWindowing(turns);
+    assert.equal(instance.state.visibleCount, 33);
+    instance.canShrinkAdaptiveWindow = () => true;
+    instance.applyWindowing(turns);
+    assert.equal(instance.state.visibleCount, 8);
+});
