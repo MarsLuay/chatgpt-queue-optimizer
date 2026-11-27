@@ -5,6 +5,28 @@
     const GEMINI_HOSTS = new Set(['gemini.google.com']);
     const CLAUDE_HOSTS = new Set(['claude.ai']);
 
+    const PROVIDER_CODES = { chatgpt: 1, gemini: 2, claude: 3 };
+    const nativeContains = (text, marker) => globalThis.CpoQueueEngine?.contains(text, marker) ?? text.includes(marker);
+    function nativeRoute(provider, pathname) {
+        return globalThis.CpoQueueEngine?.providerRoute(PROVIDER_CODES[provider], pathname) ?? null;
+    }
+    function nativeGeneration(stop, streaming, tool, error, retry, deep = false, capacity = false) {
+        const flags = Number(!!stop) | (Number(!!streaming)<<1) | (Number(!!tool)<<2) |
+            (Number(!!error)<<3) | (Number(!!retry)<<4) | (Number(!!deep)<<5) | (Number(!!capacity)<<6);
+        const result = globalThis.CpoQueueEngine?.call('cpo_generation_state', [flags]);
+        if (result == null) return null;
+        return { generating: !!(result&1), deepResearchActive: !!(result&2),
+            statusUnknown: !!(result&4), compatibilityState: result&24 ? 'error' : result&32 ? 'active' : 'unknown' };
+    }
+    function nativeResponse(generation, assistant, waiting = false, interrupted = false) {
+        const flags = [generation.conversationCapacityReached || generation.requiresNewConversation,
+            assistant?.hasErrorStop, generation.hasError, generation.hasDeliveryTimedOut,
+            generation.hasTryAgainButton, assistant?.errorSignal, waiting, interrupted,
+            assistant?.hasCompletedText, generation.generating, generation.deepResearchActive,
+            assistant?.streaming, assistant?.hasIncompleteToolTurn].reduce((mask,value,i) => mask | (Number(!!value)<<i),0);
+        return globalThis.CpoQueueEngine?.call('cpo_response_class', [flags]) ?? null;
+    }
+
     const CHATGPT_MESSAGE_CONTEXT_SELECTORS = [
         '[data-testid^="conversation-turn"]',
         '[data-testid*="conversation-turn"]',
@@ -625,7 +647,8 @@
          */
         getCommandResponseState(doc, binding = {}) {
             const generation = this.getGenerationState(doc);
-            if (generation.hasError || generation.hasTryAgainButton || generation.hasDeliveryTimedOut) {
+            const native = nativeResponse(generation, null);
+            if (native == null ? (generation.hasError || generation.hasTryAgainButton || generation.hasDeliveryTimedOut) : [3,4,5].includes(native)) {
                 return {
                     phase: 'error',
                     userTurnId: binding.userTurnId || null,
@@ -637,7 +660,7 @@
                     source: generation.hasDeliveryTimedOut ? 'delivery-timeout' : (generation.hasTryAgainButton ? 'retry-visible' : 'generation-error')
                 };
             }
-            if (generation.generating || generation.deepResearchActive) {
+            if (native == null ? (generation.generating || generation.deepResearchActive) : [10,12].includes(native)) {
                 return {
                     phase: 'active',
                     userTurnId: binding.userTurnId || null,
@@ -652,7 +675,7 @@
             const lastAssistant = typeof this.getLastAssistantTurn === 'function'
                 ? this.getLastAssistantTurn(doc)
                 : null;
-            if (lastAssistant && lastAssistant.isAssistant && lastAssistant.hasCompletedText) {
+            if ((nativeResponse(generation, {hasCompletedText: !!(lastAssistant?.isAssistant && lastAssistant?.hasCompletedText)}) ?? (lastAssistant?.isAssistant && lastAssistant?.hasCompletedText ? 13 : 0)) === 13) {
                 return {
                     phase: 'terminal',
                     userTurnId: binding.userTurnId || null,
@@ -1060,11 +1083,12 @@
                 null;
             const conversationId = binding.conversationId || snapshot.conversationId || null;
             const statusText = String(generation.researchStatusPreview || '').toLowerCase();
-            const waitingForUser = (this.compatibilitySignals.waitingForUserMarkers || []).some(marker => statusText.includes(marker));
-            const interrupted = (this.compatibilitySignals.interruptedMarkers || []).some(marker => statusText.includes(marker));
+            const waitingForUser = (this.compatibilitySignals.waitingForUserMarkers || []).some(marker => nativeContains(statusText, marker));
+            const interrupted = (this.compatibilitySignals.interruptedMarkers || []).some(marker => nativeContains(statusText, marker));
             const incompleteToolTurn = followingAssistant?.hasIncompleteToolTurn === true;
+            const native = nativeResponse(generation, followingAssistant, waitingForUser, interrupted);
 
-            if (generation.conversationCapacityReached || generation.requiresNewConversation) {
+            if (native == null ? (generation.conversationCapacityReached || generation.requiresNewConversation) : native === 1) {
                 return {
                     phase: 'error',
                     userTurnId,
@@ -1077,7 +1101,7 @@
                 };
             }
 
-            if (followingAssistant?.hasErrorStop) {
+            if (native == null ? (followingAssistant?.hasErrorStop) : native === 2) {
                 return {
                     phase: 'error',
                     userTurnId,
@@ -1090,7 +1114,7 @@
                 };
             }
 
-            if (generation.hasError || generation.hasTryAgainButton || generation.hasDeliveryTimedOut) {
+            if (native == null ? (generation.hasError || generation.hasTryAgainButton || generation.hasDeliveryTimedOut) : [3,4,5].includes(native)) {
                 return {
                     phase: 'error',
                     userTurnId,
@@ -1103,7 +1127,7 @@
                 };
             }
 
-            if (followingAssistant?.errorSignal) {
+            if (native == null ? (followingAssistant?.errorSignal) : native === 6) {
                 return {
                     phase: 'error',
                     userTurnId,
@@ -1117,7 +1141,7 @@
                 };
             }
 
-            if (waitingForUser) {
+            if (native == null ? (waitingForUser) : native === 7) {
                 return {
                     phase: 'waiting-for-user',
                     userTurnId,
@@ -1130,7 +1154,7 @@
                 };
             }
 
-            if (interrupted && !(followingAssistant?.hasCompletedText)) {
+            if (native == null ? (interrupted && !(followingAssistant?.hasCompletedText)) : native === 8) {
                 return {
                     phase: 'interrupted',
                     userTurnId,
@@ -1144,7 +1168,7 @@
             }
 
             const boundActivity = !!(generation.generating || generation.deepResearchActive || followingAssistant?.streaming || incompleteToolTurn);
-            if (boundActivity) {
+            if (native == null ? (boundActivity) : [9,10,11,12].includes(native)) {
                 return {
                     phase: 'active',
                     userTurnId,
@@ -1160,7 +1184,7 @@
                 };
             }
 
-            if (followingAssistant && followingAssistant.hasCompletedText && !followingAssistant.streaming) {
+            if (native == null ? (followingAssistant && followingAssistant.hasCompletedText && !followingAssistant.streaming) : native === 13) {
                 return {
                     phase: 'terminal',
                     userTurnId,
@@ -1238,7 +1262,9 @@
 
             try {
                 const parsed = new URL(url);
-                return parsed.protocol === 'https:' && CHATGPT_HOSTS.has(parsed.hostname.toLowerCase());
+                if (parsed.protocol !== 'https:') return false;
+                const native = globalThis.CpoQueueEngine?.providerHost(parsed.hostname.toLowerCase());
+                return native == null ? CHATGPT_HOSTS.has(parsed.hostname.toLowerCase()) : native === PROVIDER_CODES.chatgpt;
             } catch {
                 return false;
             }
@@ -1280,6 +1306,14 @@
             try {
                 const parsed = new URL(urlStr);
                 const pathname = parsed.pathname || '/';
+                const native = nativeRoute(this.id, pathname);
+                if (native) {
+                    const existing = native.type === 'existing';
+                    const fresh = native.type === 'new';
+                    return { ...unsupported, ...native, key: existing ? this.id + ':c:' + native.conversationId : this.id + ':' + native.type,
+                        surface: existing ? 'conversation' : fresh ? 'composer' : 'unsupported',
+                        optimizerEligible: existing || fresh, allowFallbackDiscovery: existing, pathname };
+                }
                 const existingMatch = pathname.match(/(?:^|\/)c\/([a-zA-Z0-9_-]+)/);
                 if (existingMatch && existingMatch[1]) {
                     const conversationId = existingMatch[1];
@@ -1348,6 +1382,11 @@
         }
 
         isFreshConversationIdentity(identity, previousConversationId = null) {
+            const kind = identity?.type === 'existing' ? 1 : identity?.type === 'new' ? 2 : 0;
+            const flags = Number(identity?.provider === 'chatgpt') | (Number(!!identity?.conversationId)<<1) |
+                (Number(identity?.conversationId !== previousConversationId)<<2) | (Number(!!previousConversationId)<<3);
+            const native = globalThis.CpoQueueEngine?.call('cpo_rollover_fresh',[kind,flags]);
+            if (native != null) return native === 1;
             if (!identity || identity.provider !== 'chatgpt') {
                 return false;
             }
@@ -1366,7 +1405,7 @@
             if (!haystack) {
                 return '';
             }
-            return (this.compatibilitySignals.conversationCapacityMarkers || []).find(marker => haystack.includes(marker)) || '';
+            return (this.compatibilitySignals.conversationCapacityMarkers || []).find(marker => nativeContains(haystack, marker)) || '';
         }
 
         buildContinuationHandoffMessage(context = {}) {
@@ -1547,7 +1586,7 @@
                 .slice(0, 1200);
             const activeTextLower = statusText.toLowerCase();
 
-            const matchedResearchMarker = this.compatibilitySignals.researchMarkers.find(marker => activeTextLower.includes(marker)) || '';
+            const matchedResearchMarker = this.compatibilitySignals.researchMarkers.find(marker => nativeContains(activeTextLower, marker)) || '';
             const hasActiveToolOrResearch = !!matchedResearchMarker || hasActiveSpinner;
             const isDeepResearch = matchedResearchMarker === 'deep research' ||
                 activeTextLower.includes('deep research') ||
@@ -1561,13 +1600,13 @@
                 .replace(/\s+/g, ' ')
                 .trim();
 
-            const matchedDeliveryTimeout = this.compatibilitySignals.deliveryTimeoutMarkers.find(marker => errorSearchText.includes(marker)) || '';
+            const matchedDeliveryTimeout = this.compatibilitySignals.deliveryTimeoutMarkers.find(marker => nativeContains(errorSearchText, marker)) || '';
             const hasDeliveryTimedOut = !!matchedDeliveryTimeout;
             const matchedCapacity = this.matchConversationCapacity(`${errorSearchText} ${activeTextLower}`);
             const conversationCapacityReached = !!matchedCapacity;
             const matchedGeneralError = conversationCapacityReached
                 ? ''
-                : (this.compatibilitySignals.errorMarkers.find(marker => errorSearchText.includes(marker)) || '');
+                : (this.compatibilitySignals.errorMarkers.find(marker => nativeContains(errorSearchText, marker)) || '');
             const matchedError = conversationCapacityReached
                 ? 'conversation-max-length'
                 : (matchedDeliveryTimeout
@@ -1580,10 +1619,11 @@
 
             const hasKnownError = !!matchedError || hasDeliveryTimedOut || conversationCapacityReached || assistantErrorStop;
             const isWorking = hasActiveStopButton || hasResultStreaming || hasActiveToolOrResearch;
-            const generating = !hasKnownError && isWorking;
-            const deepResearchActive = !hasKnownError && isWorking && isDeepResearch;
-            const statusUnknown = !hasKnownError && !hasTryAgainButton && !isWorking;
-            const compatibilityState = (hasKnownError || hasTryAgainButton) ? 'error' : (isWorking ? 'active' : 'unknown');
+            const native = nativeGeneration(hasActiveStopButton,hasResultStreaming,hasActiveToolOrResearch,hasKnownError,hasTryAgainButton,isDeepResearch,conversationCapacityReached);
+            const generating = native?.generating ?? (!hasKnownError && isWorking);
+            const deepResearchActive = native?.deepResearchActive ?? (!hasKnownError && isWorking && isDeepResearch);
+            const statusUnknown = native?.statusUnknown ?? (!hasKnownError && !hasTryAgainButton && !isWorking);
+            const compatibilityState = native?.compatibilityState ?? ((hasKnownError || hasTryAgainButton) ? 'error' : (isWorking ? 'active' : 'unknown'));
 
             const url = typeof location !== 'undefined' ? location.href : (doc.defaultView?.location?.href || '');
             const title = typeof document !== 'undefined' ? document.title : (doc.title || '');
@@ -1743,8 +1783,8 @@
                 .replace(/\s+/g, ' ')
                 .trim();
 
-            const hasDeliveryTimeout = this.compatibilitySignals.deliveryTimeoutMarkers.some(marker => alertText.includes(marker));
-            const hasGeneralError = this.compatibilitySignals.errorMarkers.some(marker => alertText.includes(marker));
+            const hasDeliveryTimeout = this.compatibilitySignals.deliveryTimeoutMarkers.some(marker => nativeContains(alertText, marker));
+            const hasGeneralError = this.compatibilitySignals.errorMarkers.some(marker => nativeContains(alertText, marker));
             const hasErrorStop = hasAssistantErrorStop(latestTurn);
             const errorSignal = this.getAssistantTurnErrorSignal(text);
             const hasError = hasDeliveryTimeout || hasGeneralError || hasErrorStop || !!errorSignal;
@@ -1975,7 +2015,9 @@
 
             try {
                 const parsed = new URL(url);
-                return parsed.protocol === 'https:' && GEMINI_HOSTS.has(parsed.hostname.toLowerCase());
+                if (parsed.protocol !== 'https:') return false;
+                const native = globalThis.CpoQueueEngine?.providerHost(parsed.hostname.toLowerCase());
+                return native == null ? GEMINI_HOSTS.has(parsed.hostname.toLowerCase()) : native === PROVIDER_CODES.gemini;
             } catch {
                 return false;
             }
@@ -1998,6 +2040,10 @@
             try {
                 const parsed = new URL(urlStr);
                 const pathname = parsed.pathname || '/';
+
+                const native = nativeRoute(this.id, pathname);
+                if (native) return { provider: this.id, ...native,
+                    key: native.conversationId ? this.id + ':c:' + native.conversationId : this.id + ':' + native.type };
 
                 // /app/:id or /u/:n/app/:id
                 const existingMatch = pathname.match(/(?:^|\/)(?:u\/\d+\/)?app\/([a-zA-Z0-9_-]+)\/?$/);
@@ -2193,7 +2239,7 @@
                 'researching',
                 'loading'
             ];
-            const matchedResearchMarker = progressMarkers.find(marker => activeTextLower.includes(marker)) || '';
+            const matchedResearchMarker = progressMarkers.find(marker => nativeContains(activeTextLower, marker)) || '';
             const hasActiveToolOrResearch = !!matchedResearchMarker;
 
             const alertSelector = this.selectors.errorAlerts.join(',');
@@ -2211,7 +2257,7 @@
                 'try again later',
                 'unable to'
             ];
-            const matchedError = errorMarkers.find(marker => alertText.includes(marker)) || '';
+            const matchedError = errorMarkers.find(marker => nativeContains(alertText, marker)) || '';
             const errorSnippet = matchedError
                 ? alertText
                     .slice(Math.max(0, alertText.indexOf(matchedError) - 60), alertText.indexOf(matchedError) + 160)
@@ -2227,7 +2273,7 @@
 
             const hasKnownError = !!matchedError;
             const isWorking = hasActiveStopButton || hasResultStreaming || hasActiveToolOrResearch;
-            const generating = !hasKnownError && isWorking;
+            const generating = nativeGeneration(hasActiveStopButton,hasResultStreaming,hasActiveToolOrResearch,hasKnownError,hasTryAgainButton)?.generating ?? (!hasKnownError && isWorking);
 
             const url = typeof location !== 'undefined' ? location.href : (doc.defaultView?.location?.href || '');
             const title = typeof document !== 'undefined' ? document.title : (doc.title || '');
@@ -2335,7 +2381,9 @@
 
             try {
                 const parsed = new URL(url);
-                return parsed.protocol === 'https:' && CLAUDE_HOSTS.has(parsed.hostname.toLowerCase());
+                if (parsed.protocol !== 'https:') return false;
+                const native = globalThis.CpoQueueEngine?.providerHost(parsed.hostname.toLowerCase());
+                return native == null ? CLAUDE_HOSTS.has(parsed.hostname.toLowerCase()) : native === PROVIDER_CODES.claude;
             } catch {
                 return false;
             }
@@ -2358,6 +2406,10 @@
             try {
                 const parsed = new URL(urlStr);
                 const pathname = parsed.pathname || '/';
+
+                const native = nativeRoute(this.id, pathname);
+                if (native) return { provider: this.id, ...native,
+                    key: native.conversationId ? this.id + ':c:' + native.conversationId : this.id + ':' + native.type };
 
                 // Existing chat: /chat/:id
                 const existingMatch = pathname.match(/^\/chat\/([a-zA-Z0-9_-]+)\/?$/);
@@ -2553,7 +2605,7 @@
                 'researching',
                 'loading'
             ];
-            const matchedResearchMarker = progressMarkers.find(marker => activeTextLower.includes(marker)) || '';
+            const matchedResearchMarker = progressMarkers.find(marker => nativeContains(activeTextLower, marker)) || '';
             const hasActiveToolOrResearch = !!matchedResearchMarker;
 
             const alertSelector = this.selectors.errorAlerts.join(',');
@@ -2571,7 +2623,7 @@
                 'try again later',
                 'unable to'
             ];
-            const matchedError = errorMarkers.find(marker => alertText.includes(marker)) || '';
+            const matchedError = errorMarkers.find(marker => nativeContains(alertText, marker)) || '';
             const errorSnippet = matchedError
                 ? alertText
                     .slice(Math.max(0, alertText.indexOf(matchedError) - 60), alertText.indexOf(matchedError) + 160)
@@ -2587,7 +2639,7 @@
 
             const hasKnownError = !!matchedError;
             const isWorking = hasActiveStopButton || hasResultStreaming || hasActiveToolOrResearch;
-            const generating = !hasKnownError && isWorking;
+            const generating = nativeGeneration(hasActiveStopButton,hasResultStreaming,hasActiveToolOrResearch,hasKnownError,hasTryAgainButton)?.generating ?? (!hasKnownError && isWorking);
 
             const url = typeof location !== 'undefined' ? location.href : (doc.defaultView?.location?.href || '');
             const title = typeof document !== 'undefined' ? document.title : (doc.title || '');
@@ -2642,6 +2694,12 @@
             return null;
         }
         const urlStr = typeof url === 'string' ? url : url.href;
+        try {
+            const parsed = new URL(urlStr);
+            if (parsed.protocol !== 'https:') return null;
+            const native = globalThis.CpoQueueEngine?.providerHost(parsed.hostname.toLowerCase());
+            if (native != null) return PROVIDERS[['','chatgpt','gemini','claude'][native]] || null;
+        } catch { return null; }
         for (const provider of Object.values(PROVIDERS)) {
             if (provider.isSupportedUrl(urlStr)) {
                 return provider;
