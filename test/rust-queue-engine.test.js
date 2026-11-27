@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 29);
+    assert.equal(e.cpo_queue_abi(), 30);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -804,4 +804,22 @@ test('native scheduled creation and settlement use durable rows and exact leases
     assert.deepEqual(done.items[0].enqueueResult,{queued:true,started:false,paused:false,waitingForIdle:true,remaining:2});
     assert.deepEqual(done.effects,[1]);assert.equal(tx(7,done.items,'new',22,0,'"failed"',claim.claim).code,7);
     assert.equal(engine.workerCollection(8,claim.claim,['"new"']),1);
+});
+
+
+test('native recovery effects, observations and compatibility normalization',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    const jobs=engine.createLiveJobs();jobs.set(7,{tabId:7,queue:['next'],currentMessage:'current',isRunning:true});const job=jobs.get(7);
+    assert.equal(jobs.recoveryStep(job,0,false,1),1);assert.equal(jobs.recoveryStep(job,1,false,0),4);
+    assert.equal(jobs.recoveryStep(job,4,true,0),5);assert.equal(jobs.recoveryStep(job,5,true,0),6);
+    assert.equal(jobs.recoveryStep(job,6,false,2),7);assert.equal(jobs.recoveryStep(job,7,false,1),8);
+    assert.equal(jobs.recoveryStep(job,8,false,0),13);
+    assert.equal(engine.waitObservation({matchedError:'Delivery timed out'},null,true).failure,1);
+    assert.equal(engine.waitObservation({}, {source:'incomplete-tool-turn'},true).active,true);
+    assert.deepEqual(engine.diagnosticGroups([['','  one  two '],['abcdef']],5),['one …','abcd…']);
+    assert.equal(engine.deserializeDurable({tabId:'0x8',queue:['x'],completedCount:' 0b10 '},1000,()=> 'run').value.completedCount,2);
+    const rev=jobs.revision();jobs.transaction(job,15,0,{lastResponsePhase:'active'});assert.equal(jobs.revision(),rev+1);
+    jobs.transaction(job,15,0,{lastResponsePhase:'active'});assert.equal(jobs.revision(),rev+1);
+    jobs.delete(7);assert.equal(jobs.recoveryStep(job,4,true,0),0);
 });

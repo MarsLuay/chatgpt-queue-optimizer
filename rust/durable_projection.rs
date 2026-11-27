@@ -13,12 +13,33 @@ fn string(v:&[u8])->bool{v.len()>=2&&v.first()==Some(&b'"')&&v.last()==Some(&b'"
 fn present(v:&[u8])->bool{!v.is_empty()&&v!=NULL&&v!=EMPTY&&v!=FALSE&&v!=ZERO}
 fn numeric(v:&[u8])->Option<u64>{
     if v==NULL||v==EMPTY||v.is_empty(){return Some(0);}
-    // Normal live state is numeric. Let legacy JS handle numeric strings,
-    // including ECMAScript radix and whitespace conversions.
-    if string(v){return None;}
-    let n=std::str::from_utf8(v).ok()?.parse::<f64>().ok()?;
+    let decoded;
+    let text=if string(v){decoded=decode_numeric_string(v)?;decoded.as_str()}else{std::str::from_utf8(v).ok()?};
+    let n=if text.is_empty(){0.0}
+        else if let Some(digits)=text.strip_prefix("0x").or_else(||text.strip_prefix("0X")){radix(digits,16)?}
+        else if let Some(digits)=text.strip_prefix("0b").or_else(||text.strip_prefix("0B")){radix(digits,2)?}
+        else if let Some(digits)=text.strip_prefix("0o").or_else(||text.strip_prefix("0O")){radix(digits,8)?}
+        else{text.parse::<f64>().ok()?};
     let valid=cpo_durable_number(5,0,n,0.0);
     valid.is_finite().then_some(valid as u64)
+}
+fn radix(s:&str,base:u32)->Option<f64>{
+    if s.is_empty(){return None;}
+    let mut n=0u64;for c in s.chars(){n=n.checked_mul(base as u64)?.checked_add(c.to_digit(base)? as u64)?;if n>MAX_SAFE{return None;}}
+    Some(n as f64)
+}
+fn decode_numeric_string(v:&[u8])->Option<String>{
+    let v=trim_json(v)?;let text=std::str::from_utf8(body(&v)?).ok()?;
+    let mut chars=text.chars();let mut out=Vec::new();
+    while let Some(c)=chars.next(){
+        if c!='\\'{let mut units=[0;2];out.extend_from_slice(c.encode_utf16(&mut units));continue;}
+        let unit=match chars.next()?{
+            'u'=>{let mut n=0u16;for _ in 0..4{n=(n<<4)|chars.next()?.to_digit(16)? as u16;}n},
+            't'=>9,'n'=>10,'r'=>13,'f'=>12,'b'=>8,'"'=>34,'\\'=>92,'/'=>47,_=>return None
+        };
+        out.push(unit);
+    }
+    String::from_utf16(&out).ok()
 }
 fn body(v:&[u8])->Option<&[u8]>{if string(v){Some(&v[1..v.len()-1])}else{None}}
 fn append(out:&mut Vec<u8>,first:&mut bool,name:&str,value:&[u8]){
@@ -80,7 +101,7 @@ fn project_mode(fields:&[Option<Vec<u8>>],queue:&VecDeque<Vec<u8>>,mode:u32,now:
     let mut kind=if present(id){b"\"existing\"".to_vec()}else{b"\"unknown\"".to_vec()};
     for (i,field) in DURABLE_FIELDS.iter().enumerate(){
         let v=fields[i].as_deref().unwrap_or(NULL);
-        let rule=field.project;
+        let rule=if mode==0{field.project}else{field.restore};
         if rule==6{
             if queue.iter().any(|p|!string(p)){return None;}
             if !first{out.push(b',');}first=false;
@@ -175,6 +196,9 @@ mod tests{
         assert!(s.contains("\"queue\":[\"one\",\"two\"]"));
         assert!(s.contains("\"totalMessages\":7"));assert!(s.contains("\"isRunning\":true"));
         assert!(!s.contains("\"startedAt\""));assert!(!s.contains("\"isProcessing\""));
-        set(&mut f,"completedCount",b"\"4\"");assert!(project(&f,&q).is_none());
+        set(&mut f,"completedCount",b"\"4\"");assert!(project(&f,&q).is_some());
+        assert_eq!(numeric(b"\"\\uFEFF0x10\\t\""),Some(16));
+        assert_eq!(numeric(b"\"0b101\""),Some(5));
+        assert_eq!(numeric(b"\"-0x10\""),None);
     }
 }

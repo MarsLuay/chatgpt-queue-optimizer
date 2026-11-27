@@ -1585,6 +1585,7 @@ async function processQueue(tabId) {
             }
             if (action !== 8 && action !== 9) throw new Error('Unknown queue execution action.');
             const validation = await validateJobTargetConversation(tabId, job);
+            if(jobs.processing(job,2)!==1)return;
             if (!validation.ok) {
                 if (validation.awaitingRollover || job.rolloverInProgress) {
                     const rolloverResult = await handleConversationCapacityRollover(tabId, job);
@@ -1656,17 +1657,25 @@ async function handleProcessWaiting(tabId, job) {
         commandBinding: getCommandBinding(job)
     });
 
-    if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+    if (jobs.processing(job,2)!==1) {
         return { action: 'return' };
     }
 
-    if (!waitResult.ok) {
-        if (isConversationCapacityFailure(waitResult)) {
+    return settleQueueWait(tabId,job,waitResult,totalMessages,queueSettings);
+}
+
+async function settleQueueWait(tabId,job,waitResult,totalMessages,queueSettings){
+    const flags=Number(jobs.processing(job,2)===1)|(Number(!!waitResult.ok)<<1)|(Number(isConversationCapacityFailure(waitResult))<<2)|(Number(!!waitResult.isDeliveryTimeout)<<3)|(Number(queueSettings.queueDeliveryTimeoutRefresh!==false)<<4);
+    const outcome=requiredQueueDecision(globalThis.CpoQueueEngine?.call('cpo_worker_outcome',[flags]));
+    if(outcome===0)return {action:'return'};
+    if (outcome!==1) {
+        if (outcome===2) {
             return await handleConversationCapacityRollover(tabId, job, waitResult);
         }
 
-        if (waitResult.isDeliveryTimeout && queueSettings.queueDeliveryTimeoutRefresh !== false) {
+        if (outcome===3) {
             const recoveryResult = await recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages, queueSettings);
+            if(jobs.processing(job,2)!==1)return {action:'return'};
             if (recoveryResult.action === 'complete') {
                 completeCurrentCommand(tabId, job, totalMessages, recoveryResult.details || {});
                 if (job.queue.length > 0) {
@@ -1691,6 +1700,7 @@ async function handleProcessWaiting(tabId, job) {
             return { action: 'continue' };
         }
 
+        if(jobs.processing(job,2)!==1)return {action:'return'};
         pauseJob(tabId, job.lastError || waitResult.error || 'ChatGPT response failed.', {
             phase: 'wait',
             retryClass: job.retryClass || '',
@@ -1727,7 +1737,7 @@ async function handleProcessRetryWait(tabId, job) {
     const remainingMs=requiredQueueDecision(globalThis.CpoQueueEngine?.timestampMath?.(2,Number(job.nextRetryAt||0),retryNow));
     const interrupted = await interruptibleSleep(tabId, job, remainingMs);
 
-    if (interrupted || !jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+    if (interrupted || jobs.processing(job,2)!==1) {
         return { action: 'return' };
     }
 
@@ -1740,8 +1750,8 @@ async function handleProcessWaitForIdle(tabId, job) {
     const totalMessages = getTotalMessages(job);
     const queueSettings = await getQueueSettings();
 
-    job.currentPhase = 'waiting-for-idle';
-    job.updatedAt = Date.now();
+    if(jobs.processing(job,2)!==1)return {action:'return'};
+    jobs.transaction(job,16,0);
 
     logQueueEvent(tabId, 'info', 'Waiting for the current ChatGPT response before sending queued command.', {
         totalMessages,
@@ -1760,7 +1770,7 @@ async function handleProcessWaitForIdle(tabId, job) {
         waitLabel: 'the current ChatGPT response'
     });
 
-    if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+    if (jobs.processing(job,2)!==1) {
         return { action: 'return' };
     }
 
@@ -1777,9 +1787,7 @@ async function handleProcessWaitForIdle(tabId, job) {
         return { action: 'return' };
     }
 
-    job.waitForIdleBeforeSend = false;
-    job.currentPhase = 'queued';
-    job.updatedAt = Date.now();
+    jobs.transaction(job,16,1);
     updateRunningJobsStorage();
     await sleep(500);
     return { action: 'continue' };
@@ -1854,57 +1862,11 @@ async function handleProcessSending(tabId, job) {
         commandBinding: getCommandBinding(job)
     });
 
-    if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+    if (jobs.processing(job,2)!==1) {
         return { action: 'return' };
     }
 
-    if (!waitResult.ok) {
-        if (isConversationCapacityFailure(waitResult)) {
-            return await handleConversationCapacityRollover(tabId, job, waitResult);
-        }
-
-        if (waitResult.isDeliveryTimeout && queueSettings.queueDeliveryTimeoutRefresh !== false) {
-            const recoveryResult = await recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages, queueSettings);
-            if (recoveryResult.action === 'complete') {
-                completeCurrentCommand(tabId, job, totalMessages, recoveryResult.details || {});
-                if (job.queue.length > 0) {
-                    await sleep(Number(QUEUE_WAIT_POLICY.interCommandDelayMs) || 0);
-                }
-                return { action: 'next' };
-            } else if (recoveryResult.action === 'retry') {
-                return { action: 'continue' };
-            } else if (recoveryResult.action === 'return') {
-                return { action: 'return' };
-            }
-        }
-
-        logQueueEvent(tabId, 'error', `Command ${job.currentCommandNumber}/${totalMessages} failed while waiting for ChatGPT.`, {
-            commandNumber: job.currentCommandNumber,
-            totalMessages,
-            error: waitResult.error || 'ChatGPT response failed.',
-            diagnostics: waitResult.details || {}
-        });
-
-        if (await retryCurrentCommandIfEnabled(tabId, job, 'wait', waitResult.error || 'ChatGPT response failed.', waitResult.details || {})) {
-            return { action: 'continue' };
-        }
-
-        pauseJob(tabId, job.lastError || waitResult.error || 'ChatGPT response failed.', {
-            phase: 'wait',
-            retryClass: job.retryClass || '',
-            retryAttemptCount: Number(job.retryAttemptCount || 0),
-            diagnostics: waitResult.details || {}
-        });
-        return { action: 'return' };
-    }
-
-    completeCurrentCommand(tabId, job, totalMessages, waitResult.details || {});
-
-    if (job.queue.length > 0) {
-        await sleep(Number(QUEUE_WAIT_POLICY.interCommandDelayMs) || 0);
-    }
-
-    return { action: 'next' };
+    return settleQueueWait(tabId,job,waitResult,totalMessages,queueSettings);
 }
 
 function completeCurrentCommand(tabId, job, totalMessages, diagnostics = {}) {
@@ -2017,24 +1979,17 @@ function getDiagnosticTurnIdentity(job, details = {}) {
 }
 
 function collectDeliveryDiagnostics(job, extra = {}) {
-    const pick=(...values)=>globalThis.CpoQueueEngine?.diagnosticPick?.(...values)??'';
-    const turnIdentity = getDiagnosticTurnIdentity(job, extra);
-    return {
-        ...extra,
-        runId: boundedDiagnosticValue(pick(job?.runId,extra.runId)),
-        commandId: boundedDiagnosticValue(pick(job?.commandId,extra.commandId)),
-        commandNumber: job?.currentCommandNumber || extra.commandNumber || 0,
-        deliveryState: boundedDiagnosticValue(pick(job?.deliveryState,extra.deliveryState)),
-        submissionAckSource: boundedDiagnosticValue(pick(job?.submissionAckSource,extra.submissionAckSource)),
-        terminalAckSource: boundedDiagnosticValue(pick(job?.terminalAckSource,extra.terminalAckSource)),
-        userTurnId: turnIdentity.userTurnId,
-        assistantTurnId: turnIdentity.assistantTurnId,
-        lastResponsePhase: boundedDiagnosticValue(
-            pick(job?.lastResponsePhase,extra.phase,extra.responseState?.phase)
-        ),
-        commandFingerprint: boundedDiagnosticValue(pick(job?.commandFingerprint,extra.commandFingerprint)),
-        turnIdentity
-    };
+    const values=globalThis.CpoQueueEngine?.diagnosticGroups([
+        [job?.runId,extra.runId],[job?.commandId,extra.commandId],[job?.deliveryState,extra.deliveryState],
+        [job?.submissionAckSource,extra.submissionAckSource],[job?.terminalAckSource,extra.terminalAckSource],
+        [extra.userTurnId,extra.responseState?.userTurnId,job?.submittedUserTurnId],
+        [extra.assistantTurnId,extra.responseState?.assistantTurnId,job?.assistantTurnId],
+        [job?.lastResponsePhase,extra.phase,extra.responseState?.phase],[job?.commandFingerprint,extra.commandFingerprint]
+    ])||[];
+    const [runId='',commandId='',deliveryState='',submissionAckSource='',terminalAckSource='',user='',assistant='',lastResponsePhase='',commandFingerprint='']=values;
+    const turnIdentity={userTurnId:user||null,assistantTurnId:assistant||null};
+    return {...extra,runId,commandId,commandNumber:job?.currentCommandNumber||extra.commandNumber||0,
+        deliveryState,submissionAckSource,terminalAckSource,...turnIdentity,lastResponsePhase,commandFingerprint,turnIdentity};
 }
 
 function summarizeProviderState(state = {}, responseState = {}) {
@@ -2198,7 +2153,7 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
     });
 
     const interrupted = await interruptibleSleep(tabId, job, delayMs);
-    if (interrupted || !jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+    if (interrupted || jobs.processing(job,2)!==1) {
         return false;
     }
 
@@ -2209,11 +2164,10 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
     return true;
 }
 
-async function refreshChatGPTTab(tabId) {
+async function refreshChatGPTTab(tabId,owner=jobs.get(tabId)) {
     await globalThis.CpoQueueEngine?.load();
     let stage = 0;
     let succeeded = false;
-    const owner = jobs.get(tabId);
     for (let attempt=0;attempt<4;attempt++) {
         if (owner && (jobs.get(tabId)!==owner || owner.isStopped || owner.isPaused)) return false;
         const flags=Number(succeeded) |
@@ -2237,10 +2191,9 @@ async function refreshChatGPTTab(tabId) {
     return false;
 }
 
-async function waitForTabToRecover(tabId, maxWaitMs = 30000) {
+async function waitForTabToRecover(tabId, maxWaitMs = 30000,owner=jobs.get(tabId)) {
     await globalThis.CpoQueueEngine?.load();
     const started=Date.now();
-    const owner=jobs.get(tabId);
     const cancelled=()=>!!owner&&(jobs.get(tabId)!==owner||owner.isStopped||owner.isPaused);
     const poll=(ready=false)=>globalThis.CpoQueueEngine?.numeric('cpo_tab_recover_poll',[
         Date.now()-started,maxWaitMs,Number(ready)|(Number(cancelled())<<1)]) ??
@@ -2256,248 +2209,90 @@ async function waitForTabToRecover(tabId, maxWaitMs = 30000) {
     return false;
 }
 
-async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages, queueSettings) {
-    if (!job || job.isStopped || job.isPaused || !job.isRunning) {
-        return { action: 'return' };
-    }
-
+async function recoverFromDeliveryTimeout(tabId,job,waitResult,totalMessages,queueSettings){
     if(jobs.processing(job,2)!==1)return {action:'return'};
     jobs.transaction(job,13,0);
-    const attempt = job.deliveryTimeoutAttempts;
-    const maxAttempts = queueSettings.queueUnlimitedRetryWait ? Number.POSITIVE_INFINITY : 3;
-
-    const initialRecovery=jobs.delivery(job,0,Number(!!waitResult?.details?.state?.hasTryAgainButton)|(Number(!!queueSettings.queueUnlimitedRetryWait)<<3));
-    if(initialRecovery===0)return {action:'return'};
-    if (initialRecovery === 8) {
-        logQueueEvent(tabId, 'error', `Exceeded maximum delivery timeout recovery attempts (${maxAttempts}) for command ${job.currentCommandNumber || '?'}/${totalMessages}.`, {
-            commandNumber: job.currentCommandNumber || 0,
-            totalMessages,
-            attempts: attempt,
-            maxAttempts
-        });
-        return { action: 'fail' };
-    }
-
+    const attempt=job.deliveryTimeoutAttempts;
+    const unlimited=!!queueSettings.queueUnlimitedRetryWait;
+    const maxAttempts=unlimited?'unlimited':3;
+    let observed=Number(!!waitResult?.details?.state?.hasTryAgainButton)|(Number(unlimited)<<3);
+    const advance=(stage,success=false)=>jobs.recoveryStep(job,stage,success,observed);
+    let effect=advance(0),details={},reloadedState={},lastAssistant=null;
+    const log=(level,message)=>logQueueEvent(tabId,level,message,{attempt,maxAttempts,commandNumber:job.currentCommandNumber||0,totalMessages});
+    if(effect===14){log('error','Exceeded maximum delivery timeout recovery attempts.');return {action:'fail'};}
+    if(!effect)return {action:'return'};
     jobs.transaction(job,13,1);
-    await updateRunningJobsStorage({ force: true });
-    if(jobs.processing(job,2)!==1)return {action:'return'};
-
-    // Stage 1: In-page retry if a retry/regenerate button is currently present
-    if (initialRecovery === 1) {
-        logQueueEvent(tabId, 'info', `Delivery timeout detected. Attempting in-page retry (attempt ${attempt}/${maxAttempts === Number.POSITIVE_INFINITY ? 'unlimited' : maxAttempts}) for command ${job.currentCommandNumber || '?'}/${totalMessages}.`, {
-            commandNumber: job.currentCommandNumber || 0,
-            totalMessages,
-            attempt
-        });
-
-        try {
-            const clickRes = await sendTabMessage(tabId, { type: 'CLICK_RETRY_BUTTON' });
-            if (clickRes && clickRes.ok) {
-                await sleep(2000);
-
-                if (jobs.processing(job,2)!==1) {
-                    return { action: 'return' };
-                }
-
-                const check = await sendTabMessage(tabId, { type: 'CHECK_GENERATION_STATE' }).catch(() => null);
-                if (check?.state?.generating || check?.state?.deepResearchActive) {
-                    logQueueEvent(tabId, 'info', `In-page retry resumed response for command ${job.currentCommandNumber || '?'}/${totalMessages}. Waiting for completion...`, {
-                        commandNumber: job.currentCommandNumber || 0,
-                        totalMessages
-                    });
-
-                    if(jobs.processing(job,2)!==1)return {action:'return'};
-                    jobs.transaction(job,13,2,{sawGenerating:!!check?.state?.generating,sawDeepResearch:!!check?.state?.deepResearchActive});
-                    await updateRunningJobsStorage({ force: true });
-
-                    const retryWait = await waitForTabResponse(tabId, {
-                        commandNumber: job.currentCommandNumber,
-                        totalMessages,
-                        queueSettings,
-                        commandBinding: getCommandBinding(job)
-                    });
-
-                    if (jobs.processing(job,2)!==1) {
-                        return { action: 'return' };
+    await updateRunningJobsStorage({force:true});
+    const wait=async(state={})=>{
+        if(jobs.processing(job,2)!==1)return {ok:false};
+        jobs.transaction(job,13,2,{sawGenerating:!!state.generating,sawDeepResearch:!!state.deepResearchActive});
+        await updateRunningJobsStorage({force:true});
+        if(jobs.processing(job,2)!==1)return {ok:false};
+        return waitForTabResponse(tabId,{commandNumber:job.currentCommandNumber,totalMessages,queueSettings,commandBinding:getCommandBinding(job)});
+    };
+    for(let steps=0;steps<16;steps++){
+        if(jobs.processing(job,2)!==1||effect===0)return {action:'return'};
+        let success=false;
+        switch(effect){
+            case 1:{
+                log('info','Delivery timeout detected. Attempting in-page retry.');
+                try{
+                    const click=await sendTabMessage(tabId,{type:'CLICK_RETRY_BUTTON'});
+                    if(click?.ok){await sleep(2000);
+                        if(jobs.processing(job,2)!==1)return {action:'return'};
+                        const check=await sendTabMessage(tabId,{type:'CHECK_GENERATION_STATE'}).catch(()=>null);
+                        reloadedState=check?.state||{};
+                        success=!!(reloadedState.generating||reloadedState.deepResearchActive);
                     }
-
-                    if (retryWait.ok) {
-                        jobs.transaction(job,13,4);
-                        return { action: 'complete', details: retryWait.details || {} };
-                    }
-                }
+                }catch(error){console.warn('In-page retry failed:',error);}
+                break;
             }
-        } catch (err) {
-            console.warn('In-page retry button click failed, proceeding to reload:', err);
-        }
-    }
-
-    if (jobs.processing(job,2)!==1) {
-        return { action: 'return' };
-    }
-
-    // Stage 2: Refresh page to reconnect streaming connection
-    logQueueEvent(tabId, 'warn', `Delivery timeout detected. Refreshing ChatGPT tab to recover stream (attempt ${attempt}/${maxAttempts === Number.POSITIVE_INFINITY ? 'unlimited' : maxAttempts}) for command ${job.currentCommandNumber || '?'}/${totalMessages}.`, {
-        commandNumber: job.currentCommandNumber || 0,
-        totalMessages,
-        attempt
-    });
-
-    const reloaded = await refreshChatGPTTab(tabId);
-    if(jobs.processing(job,2)!==1)return {action:'return'};
-    if (!reloaded) {
-        logQueueEvent(tabId, 'error', `Could not reload ChatGPT tab ${tabId}.`, {
-            commandNumber: job.currentCommandNumber || 0,
-            totalMessages
-        });
-        return { action: 'fail' };
-    }
-
-    const recovered = await waitForTabToRecover(tabId, 30000);
-    if(jobs.processing(job,2)!==1)return {action:'return'};
-    if (!recovered) {
-        logQueueEvent(tabId, 'error', `ChatGPT tab did not become responsive within 30s after reload.`, {
-            commandNumber: job.currentCommandNumber || 0,
-            totalMessages
-        });
-        return { action: 'fail' };
-    }
-
-    // Allow DOM to settle after reloaded content script responds
-    await sleep(2500);
-
-    if (jobs.processing(job,2)!==1) {
-        return { action: 'return' };
-    }
-
-    const inspect = await sendTabMessage(tabId, { type: 'INSPECT_GENERATION_STATE' }).catch(() => null);
-    if(jobs.processing(job,2)!==1)return {action:'return'};
-    const reloadedState = inspect?.state || {};
-    const lastAssistant = inspect?.lastAssistant || null;
-
-    const recoveryDecision=stage=>jobs.delivery(job,stage,
-        Number(!!(reloadedState.hasTryAgainButton||lastAssistant?.hasRetry))|
-        (Number(!!(reloadedState.generating||reloadedState.deepResearchActive))<<1)|
-        (Number(!!lastAssistant?.hasCompletedText)<<2));
-    // Case 0: Page reloaded and is actively generating
-    if (recoveryDecision(1) === 3) {
-        logQueueEvent(tabId, 'info', `ChatGPT resumed generating after reload for command ${job.currentCommandNumber || '?'}/${totalMessages}. Waiting for completion...`, {
-            commandNumber: job.currentCommandNumber || 0,
-            totalMessages
-        });
-
-        jobs.transaction(job,13,2,{sawGenerating:!!reloadedState.generating,sawDeepResearch:!!reloadedState.deepResearchActive});
-        await updateRunningJobsStorage({ force: true });
-
-        const postReloadWait = await waitForTabResponse(tabId, {
-            commandNumber: job.currentCommandNumber,
-            totalMessages,
-            queueSettings,
-            commandBinding: getCommandBinding(job)
-        });
-
-        if (jobs.processing(job,2)!==1) {
-            return { action: 'return' };
-        }
-
-        if (postReloadWait.ok) {
-            jobs.transaction(job,13,4);
-            return { action: 'complete', details: postReloadWait.details || {} };
-        }
-    }
-
-    // Case A: Completed on backend prior to or during reload
-    if (recoveryDecision(2) === 4) {
-        logQueueEvent(tabId, 'success', `Response completed on backend prior to reload for command ${job.currentCommandNumber || '?'}/${totalMessages}. Advancing queue.`, {
-            commandNumber: job.currentCommandNumber || 0,
-            totalMessages,
-            recoveredTurnPreview: previewText(lastAssistant.text, 140)
-        });
-        jobs.transaction(job,13,4);
-        return {
-            action: 'complete',
-            details: {
-                recoveredViaBackendCompletion: true,
-                terminalAckSource: 'backend-completion',
-                assistantPreview: previewText(lastAssistant.text, 140)
+            case 2:case 7:case 9:{
+                const result=await wait(effect===9?{}:reloadedState);
+                success=!!result.ok;details=result.details||{};break;
             }
-        };
-    }
-
-    // Case B: Retry / Regenerate button present on reloaded page
-    if (recoveryDecision(2) === 5) {
-        logQueueEvent(tabId, 'info', `Found Regenerate/Try Again button on reloaded page. Clicking for command ${job.currentCommandNumber || '?'}/${totalMessages}.`, {
-            commandNumber: job.currentCommandNumber || 0,
-            totalMessages
-        });
-
-        try {
-            const clickResult = await sendTabMessage(tabId, { type: 'CLICK_RETRY_BUTTON' });
-            if (clickResult && clickResult.ok) {
-                await sleep(2000);
-
-                if (jobs.processing(job,2)!==1) {
-                    return { action: 'return' };
-                }
-
-                jobs.transaction(job,13,2);
-                await updateRunningJobsStorage({ force: true });
-
-                const retryWait = await waitForTabResponse(tabId, {
-                    commandNumber: job.currentCommandNumber,
-                    totalMessages,
-                    queueSettings,
-                    commandBinding: getCommandBinding(job)
-                });
-
-                if (jobs.processing(job,2)!==1) {
-                    return { action: 'return' };
-                }
-
-                if (retryWait.ok) {
-                    jobs.transaction(job,13,4);
-                    return { action: 'complete', details: retryWait.details || {} };
-                }
+            case 4:
+                log('warn','Delivery timeout detected. Refreshing ChatGPT tab to recover stream.');
+                success=await refreshChatGPTTab(tabId,job);
+                if(!success)log('error','Could not reload ChatGPT tab.');
+                break;
+            case 5:
+                success=await waitForTabToRecover(tabId,30000,job);
+                if(success)await sleep(2500);
+                else log('error','ChatGPT tab did not become responsive within 30s after reload.');
+                break;
+            case 6:{
+                const inspect=await sendTabMessage(tabId,{type:'INSPECT_GENERATION_STATE'}).catch(()=>null);
+                reloadedState=inspect?.state||{};lastAssistant=inspect?.lastAssistant||null;
+                observed=Number(!!(reloadedState.hasTryAgainButton||lastAssistant?.hasRetry))|
+                    (Number(!!(reloadedState.generating||reloadedState.deepResearchActive))<<1)|
+                    (Number(!!lastAssistant?.hasCompletedText)<<2);
+                break;
             }
-        } catch (err) {
-            console.warn('Clicking retry button after reload failed:', err);
+            case 8:
+                log('info','Found Regenerate/Try Again button on reloaded page. Clicking.');
+                try{success=!!(await sendTabMessage(tabId,{type:'CLICK_RETRY_BUTTON'}))?.ok;if(success)await sleep(2000);}
+                catch(error){console.warn('Retry after reload failed:',error);}
+                break;
+            case 10:jobs.transaction(job,13,4);return {action:'complete',details};
+            case 11:
+                log('success','Response completed on backend prior to reload.');
+                jobs.transaction(job,13,4);
+                return {action:'complete',details:{recoveredViaBackendCompletion:true,terminalAckSource:'backend-completion',assistantPreview:previewText(lastAssistant?.text,140)}};
+            case 12:
+                log('warn','Delivery timeout recovery kept the confirmed command without resending.');
+                jobs.transaction(job,13,2);await updateRunningJobsStorage({force:true});return {action:'retry'};
+            case 13:
+                log('info','Re-submitting unconfirmed prompt after reload.');
+                jobs.transaction(job,13,3);await updateRunningJobsStorage({force:true});return {action:'retry'};
+            case 14:return {action:'fail'};
+            default:throw new Error('Unexpected native recovery effect.');
         }
+        effect=advance(effect,success);
     }
-
-    // Case C: Turn not completed and no retry button.
-    const finalRecovery = recoveryDecision(3);
-    if (finalRecovery === 0) return { action: 'return' };
-    if (finalRecovery === 6) {
-        logQueueEvent(tabId, 'warn', `Delivery timeout recovery kept the confirmed command without resending.`, {
-            commandNumber: job.currentCommandNumber || 0,
-            totalMessages,
-            ...collectDeliveryDiagnostics(job)
-        });
-        jobs.transaction(job,13,2);
-        await updateRunningJobsStorage({ force: true });
-        return { action: 'retry' };
-    }
-
-    if (finalRecovery === 7) {
-        logQueueEvent(tabId, 'info', `Re-submitting prompt after reload for command ${job.currentCommandNumber || '?'}/${totalMessages}.`, {
-            commandNumber: job.currentCommandNumber || 0,
-            totalMessages,
-            messagePreview: previewText(job.currentMessage, 140)
-        });
-
-        jobs.transaction(job,13,3);
-        await updateRunningJobsStorage({ force: true });
-
-        return { action: 'retry' };
-    }
-
-    return { action: 'fail' };
+    throw new Error('Native recovery exceeded bounded effect count.');
 }
 
-/**
- * @param {number} tabId
- * @param {{ expectedText?: string, expectedFingerprint?: string }} [options]
- */
 async function inspectTabCommandTurns(tabId, { expectedText, expectedFingerprint } = {}) {
     try {
         const response = await sendTabMessage(tabId, {
@@ -2945,28 +2740,11 @@ async function waitForTabResponse(tabId, context = {}) {
                     const responseState = response?.responseState || null;
                     const phase = String(responseState?.phase || '');
 
-                    if (responseState && typeof responseState === 'object') {
-                        if (responseState.userTurnId && !job.submittedUserTurnId) {
-                            job.submittedUserTurnId = responseState.userTurnId;
-                        }
-                        if (responseState.assistantTurnId) {
-                            job.assistantTurnId = responseState.assistantTurnId;
-                        }
-                    }
-                    if (phase) {
-                        job.lastResponsePhase = phase;
-                    }
-
-                    const isDeliveryTimeout = !!state.hasDeliveryTimedOut ||
-                        (typeof state.matchedError === 'string' && /delivery time(?:d\s*)?out/i.test(state.matchedError)) ||
-                        (typeof state.errorSnippet === 'string' && /delivery time(?:d\s*)?out/i.test(state.errorSnippet));
-
-                    const failureFlags = Number(isDeliveryTimeout) |
-                        (Number(!!(state.conversationCapacityReached || state.requiresNewConversation || responseState?.source === 'conversation-max-length'))<<1) |
-                        (Number(!!(state.hasError || state.hasTryAgainButton || phase === 'error'))<<2) |
-                        (Number(phase === 'waiting-for-user')<<3) | (Number(phase === 'interrupted')<<4);
-                    const failure = globalThis.CpoQueueEngine?.call('cpo_wait_failure',[failureFlags]);
-                    if(failure==null){clearInterval(checkInterval);resolve({ok:false,error:'Native response classifier unavailable.',details:{failureClass:'non-retryable'}});return;}
+                    jobs.transaction(job,15,0,{submittedUserTurnId:responseState?.userTurnId||null,
+                        assistantTurnId:responseState?.assistantTurnId||null,lastResponsePhase:phase});
+                    const observation=globalThis.CpoQueueEngine?.waitObservation(state,responseState,queueSettings.queueDeepResearchAware);
+                    if(!observation){resolve({ok:false,error:'Native response classifier unavailable.',details:{failureClass:'non-retryable'}});return;}
+                    const failure=observation.failure;
                     if (failure === 1) {
                         clearInterval(checkInterval);
                         resolve({
@@ -3043,7 +2821,7 @@ async function waitForTabResponse(tabId, context = {}) {
                         return;
                     }
 
-                const deepResearchActive = queueSettings.queueDeepResearchAware && !!state.deepResearchActive;
+                const deepResearchActive=observation.deep;
                 const researchPreview = String(state.researchStatusPreview || '');
 
                 if (deepResearchActive && !sawDeepResearch) {
@@ -3058,8 +2836,8 @@ async function waitForTabResponse(tabId, context = {}) {
                     job.lastResearchProgressAt = Date.now();
                 }
 
-                    const incompleteToolTurn = isIncompleteToolResponse(responseState);
-                    const responseIsActive = state.generating || deepResearchActive || phase === 'active' || incompleteToolTurn;
+                    const incompleteToolTurn=observation.incomplete;
+                    const responseIsActive=observation.active;
 
                     if (responseIsActive) {
                     if (!sawGenerating && responseIsActive) {
@@ -3073,13 +2851,9 @@ async function waitForTabResponse(tabId, context = {}) {
                         });
                     }
 
-                    sawGenerating = sawGenerating || !!state.generating || phase === 'active' || incompleteToolTurn;
-                    sawDeepResearch = sawDeepResearch || deepResearchActive;
-                    job.deliveryState = hasCommandBinding ? 'active-response' : job.deliveryState;
-                    job.lastResponsePhase = incompleteToolTurn ? 'incomplete-tool' : (phase || 'active');
-                    if (responseState?.assistantTurnId) {
-                        job.assistantTurnId = responseState.assistantTurnId;
-                    }
+                    sawGenerating=sawGenerating||observation.generating;
+                    sawDeepResearch=sawDeepResearch||deepResearchActive;
+                    jobs.transaction(job,15,Number(hasCommandBinding),{lastResponsePhase:incompleteToolTurn?'incomplete-tool':(phase||'active'),assistantTurnId:responseState?.assistantTurnId||null});
                     sample(0);
 
                     if (state.generating || researchPreview !== lastResearchPreview || phase === 'active' || incompleteToolTurn) {
@@ -3164,13 +2938,10 @@ async function waitForTabResponse(tabId, context = {}) {
 
                 if (settle === 4) {
                     const confirmed=sample(3,requiredConfirmSamples);
-                    job.lastResponsePhase = 'terminal';
-                    job.assistantTurnId = responseState?.assistantTurnId || job.assistantTurnId || null;
-                    job.terminalAckSource = responseState?.source || 'bound-assistant-turn';
+                    jobs.transaction(job,15,confirmed?2:0,{lastResponsePhase:'terminal',
+                        assistantTurnId:responseState?.assistantTurnId||null,terminalAckSource:responseState?.source||'bound-assistant-turn'});
                     persistWaitSignals();
                     if (confirmed) {
-                        job.currentPhase = 'terminal';
-                        job.deliveryState = 'terminal-awaiting-bookkeeping';
                         resolve({
                             ok: true,
                             details: buildWaitDetails({

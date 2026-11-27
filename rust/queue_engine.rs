@@ -5,6 +5,8 @@ mod queue_schema;
 mod background_controller;
 pub use background_controller::*;
 mod background_runtime;
+mod recovery_effects;
+pub use recovery_effects::cpo_worker_outcome;
 mod background_schedule;
 mod worker_collections;
 mod scheduled_transaction;
@@ -1155,6 +1157,15 @@ mod live_state {
                 |((observed&7)<<1)|((j.confirmed() as u32)<<4)|((j.truth("currentMessage") as u32)<<5)|((observed&8)<<3);
             super::cpo_delivery_recovery(stage,flags,j.num("deliveryTimeoutAttempts"),3)
         }
+        fn recovery_step(&self,id:u32,stage:u32,success:u32,observed:u32)->u32{
+            let Some(job)=self.jobs.get(&id)else{return 0;};
+            let active=job.truth("isRunning")&&!job.truth("isPaused")&&!job.truth("isStopped");
+            let decision=match stage{0=>self.delivery_decision(id,0,observed),
+                6=>self.delivery_decision(id,1,observed),
+                7=>self.delivery_decision(id,2,observed),
+                8|9=>self.delivery_decision(id,3,observed),_=>0};
+            super::recovery_effects::recovery_step(stage,active,success!=0,decision)
+        }
         fn retry_plan(&self,id:u32,unlimited:u32,limit:u32,base:u32,factor:u32,max:u32,unlimited_delay:u32)->u32{
             let Some(j)=self.jobs.get(&id)else{return u32::MAX;};
             if !j.truth("isRunning")||j.truth("isPaused")||j.truth("isStopped")||!j.truth("currentMessage"){return u32::MAX;}
@@ -1348,6 +1359,30 @@ mod live_state {
                     job.set("retryExhausted",TRUE);job.set("retryMode",if arg!=0{b"\"unlimited\"".as_slice()}else{b"\"finite\"".as_slice()});
                     job.set("lastError",reason);
                 },
+                15=>{
+                    if !job.truth("isRunning")||job.truth("isPaused")||job.truth("isStopped"){return false;}
+                    let mut changed=false;
+                    for name in ["submittedUserTurnId","assistantTurnId","lastResponsePhase","terminalAckSource"]{
+                        if let Some(v)=value(name){
+                            if present(v)&&job.get(name)!=v&&(name!="submittedUserTurnId"||!job.truth(name)){
+                                job.set(name,v);changed=true;
+                            }
+                        }
+                    }
+                    if arg&1!=0&&job.get("deliveryState")!=b"\"active-response\""{job.set("deliveryState",b"\"active-response\"");changed=true;}
+                    if arg&2!=0{
+                        if job.get("currentPhase")!=b"\"terminal\""{job.set("currentPhase",b"\"terminal\"");changed=true;}
+                        if job.get("deliveryState")!=b"\"terminal-awaiting-bookkeeping\""{job.set("deliveryState",b"\"terminal-awaiting-bookkeeping\"");changed=true;}
+                    }
+                    if changed{self.changed(id);}
+                    return true;
+                },
+                16=>{
+                    if !job.truth("isRunning")||job.truth("isPaused")||job.truth("isStopped"){return false;}
+                    if arg==0{job.set("currentPhase",b"\"waiting-for-idle\"");}
+                    else if arg==1{job.set("waitForIdleBeforeSend",FALSE);job.set("currentPhase",b"\"queued\"");}
+                    else{return false;}
+                },
                 _=>return false
             }
             if op==0{for (i,v) in fields{job.fields[i]=v;}}
@@ -1440,6 +1475,10 @@ mod live_state {
     #[no_mangle]
     pub extern "C" fn cpo_live_delivery(id:u32,stage:u32,observed:u32)->u32{
         STORE.with(|s|s.borrow().delivery_decision(id,stage,observed))
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_live_recovery_step(id:u32,stage:u32,success:u32,observed:u32)->u32{
+        STORE.with(|s|s.borrow().recovery_step(id,stage,success,observed))
     }
     #[no_mangle]
     pub extern "C" fn cpo_live_retry_plan(id:u32,unlimited:u32,limit:u32,base:u32,factor:u32,max:u32,unlimited_delay:u32)->u32{
@@ -2091,6 +2130,48 @@ mod presentation_batch {
         Some(Vec::new())
     }
     include!("provider_observation.rs");
+    fn delivery_timeout(text:&[u16])->bool{
+        let t=lower_ascii(text);let prefix=ascii("delivery time");let suffix=ascii("out");
+        for (i,v) in t.windows(prefix.len()).enumerate(){
+            if v!=prefix.as_slice(){continue;}
+            let mut rest=&t[i+prefix.len()..];
+            if rest.first()==Some(&100){rest=&rest[1..];while rest.first().is_some_and(|v|super::whitespace(*v)){rest=&rest[1..];}}
+            if rest.starts_with(&suffix){return true;}
+        }
+        false
+    }
+    fn wait_observation(f:&[&[u16]])->Option<Vec<Vec<u16>>>{
+        if f.len()!=5{return None;}
+        let flags=number(f[0]) as u32;let phase=f[1];let source=f[2];
+        let timeout=flags&1!=0||delivery_timeout(f[3])||delivery_timeout(f[4]);
+        let capacity=flags&2!=0||eq(source,"conversation-max-length");
+        let error=flags&4!=0||eq(phase,"error");
+        let failure=super::cpo_wait_failure((timeout as u32)|((capacity as u32)<<1)|((error as u32)<<2)
+            |((eq(phase,"waiting-for-user") as u32)<<3)|((eq(phase,"interrupted") as u32)<<4));
+        let deep=flags&24==24;
+        let incomplete=flags&32!=0||eq(source,"incomplete-tool-turn");
+        let generating=flags&64!=0||eq(phase,"active")||incomplete;
+        let result=(deep as u32)|((incomplete as u32)<<1)|((generating as u32)<<2)|(((generating||deep) as u32)<<3);
+        Some(vec![ascii(&failure.to_string()),ascii(&result.to_string())])
+    }
+    fn bounded_group(f:&[&[u16]])->Option<Vec<Vec<u16>>>{
+        let mut at=0;let mut out=Vec::new();
+        while at<f.len(){
+            let limit=number(*f.get(at)?) as usize;let count=number(*f.get(at+1)?) as usize;at+=2;
+            if !(2..=1024).contains(&limit)||count>32{return None;}
+            let end=at.checked_add(count)?;let values=f.get(at..end)?;at=end;
+            let value=values.iter().find(|v|!v.is_empty()).copied().unwrap_or(&[]);
+            let mut text=Vec::with_capacity(limit);let mut space=false;let mut overflow=false;
+            for &ch in value{
+                if super::whitespace(ch){space=!text.is_empty();continue;}
+                if space{if text.len()==limit{overflow=true;break;}text.push(32);space=false;}
+                if text.len()==limit{overflow=true;break;}text.push(ch);
+            }
+            if overflow{text.truncate(limit-1);text.push(0x2026);}
+            out.push(text);
+        }
+        Some(out)
+    }
     fn execute(op:u32,f:&[&[u16]])->Option<Vec<Vec<u16>>>{
         let single=|v:Vec<u16>|Some(vec![v]);
         match op{
@@ -2151,6 +2232,8 @@ mod presentation_batch {
             34=>provider_surface(f),
             35=>provider_navigation(f),
             36=>generic_provider_response(f),
+            37=>wait_observation(f),
+            38=>bounded_group(f),
             _=>None
         }
     }
