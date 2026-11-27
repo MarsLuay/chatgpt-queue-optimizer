@@ -565,32 +565,30 @@
         : fallback;
     }
 
-    policyCall(name, args, fallback) {
-      if (this.nativeCore) {
-        try {
-          return this.nativeCore[name](...args) >>> 0;
-        } catch (error) {
-          this.nativeCore = null;
-          this.nativeMemoryBytes = 0;
-          this.nativeCoreState = 'unavailable';
-          console.warn('CPO: Rust optimizer failed; reverting to JS policy.', error);
-        }
+    policyCall(name, args) {
+      try {
+        if(!this.nativeCore)throw new Error('Required Rust optimizer policy unavailable.');
+        return this.nativeCore[name](...args)>>>0;
+      } catch(error) {
+        this.nativeCore=null;
+        this.nativeMemoryBytes=0;
+        this.nativeCoreState='unavailable';
+        if(this.state.optimizerBound||this.state.hiddenCount)this.unbindOptimizer();
+        throw error;
       }
-      return fallback();
     }
 
     policyVisible(total, expanded = 0) {
       const count = this.policyCount(total);
       const configured = this.policyCount(this.config.windowSize, 50);
       const requested = this.policyCount(expanded);
-      return this.policyCall('cpo_visible_count', [count, configured, requested],
-        () => Math.min(count, Math.max(configured, requested, 8)));
+      return this.policyCall('cpo_visible_count', [count, configured, requested]);
     }
 
     policyBatch(hidden) {
       const count = this.policyCount(hidden);
       const batch = this.policyCount(this.config.batchSize, 25);
-      return this.policyCall('cpo_batch_count', [count, batch], () => Math.min(count, batch));
+      return this.policyCall('cpo_batch_count', [count, batch]);
     }
 
     // A bounded, on-demand scan of recent turns. Counts only, no retained DOM
@@ -605,8 +603,7 @@
     getResourceSample(messages) {
       const current = this.resourceSample;
       if (current && current.totalTurns === messages.length &&
-          (this.browserEngine?.cacheValid(2, current.time, true, true) ??
-            (Date.now() >= current.time && Date.now() - current.time < 8000))) return current;
+          this.browserEngine?.cacheValid(2, current.time, true, true) === true) return current;
       this.resourceSample = this.sampleResources(messages);
       return this.resourceSample;
     }
@@ -635,11 +632,8 @@
       const configured = this.policyCount(this.config.windowSize, 50);
       const sample = this.getResourceSample(messages);
       const budget = this.policyCount(this.config.resourceBudget, 8000);
-      const cap = this.policyVisible(total);
       const args = [total, configured, sample.sampledTurns, sample.units, budget];
-      return this.policyCall('cpo_adaptive_window', args, () =>
-        !sample.sampledTurns || !sample.units ? cap :
-          Math.min(cap, Math.max(8, Math.floor(budget * sample.sampledTurns / sample.units))));
+      return this.policyCall('cpo_adaptive_window', args);
     }
 
     // Do not shrink an already displayed history window over an edit,
@@ -1206,9 +1200,7 @@
 
     getMessageNodes() {
       const cached = this._cachedMessages;
-      if (cached && (this.browserEngine?.cacheNodesValid(0, this._cacheTimestamp, cached) ??
-          (!!this._cacheTimestamp && Date.now() >= this._cacheTimestamp &&
-            Date.now() - this._cacheTimestamp < 800 && cached.every(node => node.isConnected !== false)))) {
+      if (cached && this.browserEngine?.cacheNodesValid(0, this._cacheTimestamp, cached) === true) {
         return cached;
       }
 
@@ -1514,8 +1506,7 @@
       const total = this.policyCount(messages.length);
       const current = this.policyCount(currentVisible);
       this.state.visibleCount = toShow === 0 ? Math.min(total, current) :
-        this.policyCall('cpo_expand_count', [total, current, toShow],
-          () => Math.min(total, current + toShow));
+        this.policyCall('cpo_expand_count', [total, current, toShow]);
       if (this.config.adaptiveBudget) this.state.manualVisibleCount = this.state.visibleCount;
       this.applyWindowing(messages);
     }
@@ -1537,18 +1528,17 @@
         this.state.adaptiveTarget = this.policyAdaptiveTarget(messages);
         const manual = this.state.manualVisibleCount || 0;
         const previous = this.state.visibleCount || 0;
-        targetVisible = this.browserEngine?.windowVisible(totalMessages, this.state.adaptiveTarget, manual, previous, true) ??
-          Math.min(totalMessages, Math.max(this.state.adaptiveTarget, manual));
+        targetVisible = this.browserEngine?.windowVisible(totalMessages, this.state.adaptiveTarget, manual, previous, true);
+        if(targetVisible==null){this.unbindOptimizer();return;}
         if (targetVisible < previous && !this.canShrinkAdaptiveWindow(messages)) {
-          targetVisible = this.browserEngine?.windowVisible(totalMessages, this.state.adaptiveTarget, manual, previous, false) ??
-            Math.min(totalMessages, previous);
+          targetVisible = this.browserEngine?.windowVisible(totalMessages, this.state.adaptiveTarget, manual, previous, false);
+          if(targetVisible==null){this.unbindOptimizer();return;}
         }
       } else {
         this.state.adaptiveTarget = 0;
         targetVisible = this.policyVisible(totalMessages, this.state.visibleCount);
       }
-      const startIndex = this.policyCall('cpo_hidden_count', [totalMessages, targetVisible],
-        () => Math.max(0, totalMessages - targetVisible));
+      const startIndex = this.policyCall('cpo_hidden_count', [totalMessages, targetVisible]);
 
 
       this.state.hiddenCount = startIndex;
