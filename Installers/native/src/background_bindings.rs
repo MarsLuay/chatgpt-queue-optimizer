@@ -773,7 +773,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
             totalMessages: getTotalMessages(job),
             remaining: getRemainingCount(job)
         });
-        if (job) { job.isStopped = true; job.isRunning = false; }
+        if(job)jobs.transaction(job,20);
         jobs.delete(tabId);
         updateRunningJobsStorage({ force: true });
     }
@@ -932,16 +932,15 @@ function restoreDurableJobs(durableJobs) {
             });
         }
 
-        restoredJobs.push({job,restoreAction});
+        restoredJobs.push({job});
     }
     // Publish the reconstructed jobs only after the entire decode succeeds.
     const published=[];
     try{
-        for(const {job,restoreAction} of restoredJobs){
-            jobs.set(job.tabId,job);
+        for(const {job} of restoredJobs){
+            jobs.set(job.tabId,job,true);
             const owner=jobs.get(job.tabId);
             published.push(owner);
-            if(restoreAction)jobs.transaction(owner,11,restoreAction);
         }
     }catch(error){
         for(const job of published){
@@ -1466,9 +1465,7 @@ function handleStopSequence(request, sendResponse) {
     if (tabId && jobs.has(tabId)) {
         revokeClickGrant(tabId);
         const job = jobs.get(tabId);
-        job.isRunning = false;
-        job.isPaused = false;
-        job.isStopped = true;
+        jobs.transaction(job,20);
 
         logQueueEvent(tabId, 'warn', 'Queue stopped manually.', {
             completedCount: job.completedCount || 0,
@@ -1492,9 +1489,7 @@ function handleStopAllSequences(sendResponse) {
     if(!jobs.canPersist()||restoreControl(4)===1){emergencyStopQueues(null,sendResponse);return;}
     revokeClickGrant(null);
     for (const [tabId, job] of jobs.entries()) {
-        job.isRunning = false;
-        job.isPaused = false;
-        job.isStopped = true;
+        jobs.transaction(job,20);
         logQueueEvent(tabId, 'warn', 'Queue stopped by Stop all.', {
             completedCount: job.completedCount || 0,
             totalMessages: getTotalMessages(job),
@@ -1544,7 +1539,7 @@ async function processQueue(tabId) {
                 continue;
             }
             if (action === 3 || action === 4 || action === 5) {
-                if (action === 5) job.currentPhase = 'awaiting-response';
+                if(action===5)jobs.transaction(job,21);
                 const result = action === 4 ? await handleProcessRetryWait(tabId, job) :
                     await handleProcessWaiting(tabId, job);
                 if (result.action === 'return') return;
@@ -1705,12 +1700,12 @@ function handleProcessRecovered(tabId, job) {
 }
 
 async function handleProcessRetryWait(tabId, job) {
-    const retryNow=Date.now();
-    const remainingMs=requiredQueueDecision(globalThis.CpoQueueEngine?.timestampMath?.(2,Number(job.nextRetryAt||0),retryNow));
-    const interrupted = await interruptibleSleep(tabId, job, remainingMs);
-
-    if (interrupted || jobs.processing(job,2)!==1) {
-        return { action: 'return' };
+    const slice=Math.max(5,Number(QUEUE_RETRY_POLICY.sleepSliceMs)||250);
+    for(;;){
+        const delay=jobs.retryTick(job,Date.now(),slice);
+        if(delay<0)return {action:'return'};
+        if(delay===0)break;
+        await sleep(delay);
     }
 
     jobs.transaction(job,6);
@@ -2071,13 +2066,9 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
     }
 
     const classification = classifyQueueFailure(phase, reason, diagnostics);
-    jobs.transaction(job,0,0,{retryClass:classification.class,lastRetryableReason:classification.reason});
-
-    if (!classification.retryable) {
-        job.lastError = classification.reason;
-        job.updatedAt = Date.now();
-        return false;
-    }
+    if(jobs.processing(job,2)!==1)return false;
+    jobs.transaction(job,22,Number(classification.retryable),{retryClass:classification.class,lastRetryableReason:classification.reason});
+    if(!classification.retryable)return false;
 
     const queueSettings = await getQueueSettings();
     if(jobs.get(tabId)!==job||job.isPaused||job.isStopped||!job.isRunning)return false;
@@ -2838,7 +2829,7 @@ async function waitForTabResponse(tabId, context = {}) {
                         responsePhase: phase,
                         source: responseState?.source || ''
                     });
-                    job.lastResponsePhase = phase;
+                    jobs.transaction(job,15,0,{lastResponsePhase:phase});
                 }
 
                 const pageIsIdle = !state.generating && !deepResearchActive && phase !== 'active' && !incompleteToolTurn;
@@ -3176,12 +3167,10 @@ function flushQueueDebugLogs() {
 
             const logs = Array.isArray(data[QUEUE_DEBUG_LOG_KEY]) ? data[QUEUE_DEBUG_LOG_KEY] : [];
             const start=globalThis.CpoQueueEngine?.call('cpo_log_keep_start',[logs.length,entries.length,MAX_QUEUE_DEBUG_LOG_ENTRIES])??logs.length+entries.length;
-            const nextLogs = [...logs.slice(Math.min(start,logs.length)), ...entries.slice(Math.max(0,start-logs.length))]
-                .map((entry) => ({
-                    ...entry,
-                    details: sanitizeLogValue(entry?.details)
-                }))
-                .slice(-MAX_QUEUE_DEBUG_LOG_ENTRIES);
+            const nextLogs=[
+                ...logs.slice(Math.min(start,logs.length)).map(entry=>({...entry,details:sanitizeLogValue(entry?.details)})),
+                ...entries.slice(Math.max(0,start-logs.length))
+            ];
 
             await writeLocalStorage({ [QUEUE_DEBUG_LOG_KEY]: nextLogs });
 

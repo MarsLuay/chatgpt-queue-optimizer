@@ -1013,7 +1013,7 @@ mod live_state {
         // Initialize all scalars and the queue before allocating a visible
         // native owner. Repeated queue frames are ordered; duplicate scalar
         // indices or malformed prompt frames reject the entire operation.
-        fn initialize(&mut self)->u32{
+        fn initialize(&mut self,restore:bool)->u32{
             let input=std::mem::take(&mut self.input);
             let mut job=Job::new();let mut seen=vec![false;job.fields.len()];
             let mut at=0usize;
@@ -1031,6 +1031,20 @@ mod live_state {
                     if seen[idx]{return 0;}seen[idx]=true;
                     if len!=0{job.fields[idx]=Some(value.to_vec());}
                 }
+            }
+            if restore{
+                let phase=match job.get("currentPhase"){b"\"waiting\""=>1,b"\"sending\""|b"\"awaiting-submission-ack\""=>2,b"\"terminal\""=>3,_=>0};
+                let delivery=job.get("deliveryState");
+                let flags=(job.confirmed() as u32)|(((delivery==b"\"terminal-awaiting-bookkeeping\"") as u32)<<1)|
+                    (((matches!(delivery,b"\"pre-click\""|b"\"unknown-acceptance\"")) as u32)<<2)|((job.truth("currentMessage") as u32)<<3);
+                match super::cpo_restore_action(phase,flags){
+                    0=>{},
+                    1=>{job.set("currentPhase",b"\"awaiting-response\"");if job.get("deliveryState")!=b"\"active-response\""{job.set("deliveryState",b"\"confirmed-submission\"");}},
+                    2=>{job.set("currentPhase",b"\"terminal\"");job.set("deliveryState",b"\"terminal-awaiting-bookkeeping\"");},
+                    3 if !job.confirmed()&&job.truth("currentMessage")=>{job.requeue();job.set("currentPhase",b"\"queued\"");job.reset(6);},
+                    _=>return 0
+                }
+                job.fields[super::DURABLE_FIELDS.len()]=Some(FALSE.to_vec());
             }
             let Some(id)=self.next.checked_add(1)else{return 0;};
             self.next=id;job.dirty(self.advance());self.jobs.insert(id,job);id
@@ -1162,6 +1176,14 @@ mod live_state {
             job.wait=Some(wait);
             if dirty{self.changed(id);}
             result
+        }
+        fn retry_tick(&self,id:u32,now:f64,slice:f64)->f64{
+            let Some(job)=self.jobs.get(&id)else{return -1.0;};
+            if !job.truth("isRunning")||job.truth("isPaused")||job.truth("isStopped")||
+                job.get("currentPhase")!=b"\"retry-wait\""||!now.is_finite()||!slice.is_finite(){return -1.0;}
+            let deadline=std::str::from_utf8(job.get("nextRetryAt")).ok().and_then(|s|s.parse::<f64>().ok()).unwrap_or(0.0);
+            if !deadline.is_finite(){return -1.0;}
+            (deadline-now).max(0.0).min(slice.max(5.0))
         }
         fn processing(&mut self,id:u32,op:u32)->u32{
             let Some(job)=self.jobs.get_mut(&id)else{return 0;};
@@ -1472,6 +1494,21 @@ mod live_state {
                     job.set("conversationId",target);job.set("conversationType",b"\"existing\"");
                     job.set("targetKey",key);job.set("rolloverToConversationId",target);
                 },
+                20=>{ // Cancellation invalidates the native wait immediately.
+                    job.set("isRunning",FALSE);job.set("isPaused",FALSE);job.set("isStopped",TRUE);
+                    job.wait=None;
+                },
+                21=>{ // resume confirmed command without resending
+                    if !job.truth("isRunning")||job.truth("isPaused")||job.truth("isStopped")||
+                        !job.confirmed()||!job.truth("currentMessage"){return false;}
+                    job.set("currentPhase",b"\"awaiting-response\"");
+                },
+                22=>{ // failure classification and nonretryable error are one mutation
+                    if !job.truth("isRunning")||job.truth("isPaused")||job.truth("isStopped")||!job.truth("currentMessage"){return false;}
+                    let (Some(class),Some(reason))=(value("retryClass"),value("lastRetryableReason"))else{return false;};
+                    job.set("retryClass",class);job.set("lastRetryableReason",reason);
+                    if arg==0{job.set("lastError",reason);}
+                },
                 _=>return false
             }
             if op==0{for (i,v) in fields{job.fields[i]=v;}}
@@ -1572,7 +1609,9 @@ mod live_state {
     }
     thread_local! { static STORE: RefCell<Store> = RefCell::new(Store::default()); }
     #[no_mangle]
-    pub extern "C" fn cpo_live_initialize()->u32{STORE.with(|s|s.borrow_mut().initialize())}
+    pub extern "C" fn cpo_live_initialize()->u32{STORE.with(|s|s.borrow_mut().initialize(false))}
+    #[no_mangle]
+    pub extern "C" fn cpo_live_restore()->u32{STORE.with(|s|s.borrow_mut().initialize(true))}
     #[no_mangle]
     pub extern "C" fn cpo_live_new() -> u32 { STORE.with(|s| s.borrow_mut().create()) }
     #[no_mangle]
@@ -1634,6 +1673,8 @@ mod live_state {
     pub extern "C" fn cpo_live_retry_plan(id:u32,unlimited:u32,limit:u32,base:u32,factor:u32,max:u32,unlimited_delay:u32)->u32{
         STORE.with(|s|s.borrow().retry_plan(id,unlimited,limit,base,factor,max,unlimited_delay))
     }
+    #[no_mangle]
+    pub extern "C" fn cpo_live_retry_tick(id:u32,now:f64,slice:f64)->f64{STORE.with(|s|s.borrow().retry_tick(id,now,slice))}
     #[no_mangle]
     pub extern "C" fn cpo_live_processing(id:u32,op:u32)->u32{
         STORE.with(|s|s.borrow_mut().processing(id,op))

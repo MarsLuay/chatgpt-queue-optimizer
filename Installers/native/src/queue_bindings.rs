@@ -346,7 +346,7 @@ const HOST:&str=r####"(() => {
             if(!accepted)throw new Error('Native job transaction rejected');
             return true;
         }
-        function initialize(initial){
+        function initialize(initial,restore=false){
             return native(e=>{
                 const entries=[];
                 for(const [key,value] of Object.entries(initial)){
@@ -368,7 +368,7 @@ const HOST:&str=r####"(() => {
                     let at=0;
                     for(const [field,bytes] of entries){view.setUint32(at,field,true);view.setUint32(at+4,bytes.length,true);out.set(bytes,at+8);at+=8+bytes.length;}
                 }
-                const id=e.cpo_live_initialize()>>>0;
+                const id=(restore?e.cpo_live_restore():e.cpo_live_initialize())>>>0;
                 if(!id)throw new Error('Native initialization rejected');
                 return id;
             });
@@ -440,8 +440,8 @@ const HOST:&str=r####"(() => {
             values:()=>handles.values(),
             keys:()=>handles.keys(),
             [Symbol.iterator]:()=>handles.entries(),
-            set(tabId,initial){
-                const allocated=initialize(initial);
+            set(tabId,initial,restore=false){
+                const allocated=initialize(initial,restore);
                 const id=allocated??native(e=>e.cpo_live_new()>>>0);
                 if(!id)throw new Error('Native live handle exhaustion');
                 let handle;
@@ -449,7 +449,12 @@ const HOST:&str=r####"(() => {
                 catch(error){if(!broken)native(e=>e.cpo_live_delete(id));throw error;}
                 const previous=handles.get(tabId);
                 if(previous)native(e=>e.cpo_live_delete(ids.get(previous)));
-                handles.set(tabId,handle);return store;
+                handles.set(tabId,handle);
+                if(restore&&allocated==null){
+                    try{const action=liveDecision(handle,2,liveDecision(handle,0)===1);if(action)transaction(handle,11,action);}
+                    catch(error){store.delete(tabId);throw error;}
+                }
+                return store;
             },
             delete(tabId){
                 const handle=handles.get(tabId);
@@ -530,6 +535,11 @@ const HOST:&str=r####"(() => {
                 const id=ids.get(job);
                 if(!id||handles.get(ownerTabs.get(job))!==job)return 0;
                 return native(e=>e.cpo_live_recovery_step(id,stage,Number(success),observed)>>>0);
+            },
+            retryTick(job,now=Date.now(),slice=250){
+                const id=ids.get(job);
+                if(!id||handles.get(ownerTabs.get(job))!==job)return -1;
+                return native(e=>e.cpo_live_retry_tick(id,now,slice));
             },
             retryPlan(job,unlimited,limit,base,factor,max,unlimitedDelay){
                 const id=ids.get(job);

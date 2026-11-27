@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 34);
+    assert.equal(e.cpo_queue_abi(), 35);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -887,4 +887,17 @@ test('native target binding rejects mismatches and builds rollover handoff from 
     assert.equal(jobs.target(job,{provider:'chatgpt',type:'existing',conversationId:'b',key:'chatgpt:c:b'},13).decision,9);
     assert.equal(job.conversationGeneration,1);assert.equal(jobs.target(job,{provider:'chatgpt',type:'existing',conversationId:'c',key:'chatgpt:c:c'},14).decision,10);
     assert.equal(job.conversationId,'b');
+});
+
+
+test('native restore reconciles before publication and retry timing follows live state',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});engine.install(instance.exports);
+    const jobs=engine.createLiveJobs(),before=jobs.revision();
+    jobs.set(7,{tabId:7,isRunning:true,currentMessage:'pending',currentPhase:'sending',deliveryState:'pre-click',queue:['next']},true);
+    let job=jobs.get(7);assert.equal(jobs.revision(),before+1);assert.equal(job.currentPhase,'queued');assert.deepEqual([...job.queue],['pending','next']);
+    jobs.transaction(job,17);jobs.transaction(job,8,1000,{retryMode:'finite'},1000);
+    assert.equal(jobs.retryTick(job,1000,250),250);assert.equal(jobs.retryTick(job,1900,250),100);assert.equal(jobs.retryTick(job,2000,250),0);
+    jobs.transaction(job,20);assert.equal(jobs.retryTick(job,2000,250),-1);assert.equal(job.isStopped,true);
+    jobs.set(8,{tabId:8,isRunning:true,currentMessage:'sent',currentPhase:'sending',deliveryState:'confirmed-submission',queue:[]},true);
+    assert.equal(jobs.get(8).currentPhase,'awaiting-response');
 });
