@@ -20,7 +20,7 @@ fn h(op: u32, a: u32, b: u32, c: u32) -> u32 {
 }
 
 #[no_mangle]
-pub extern "C" fn cpo_browser_abi() -> u32 { 7 }
+pub extern "C" fn cpo_browser_abi() -> u32 { 8 }
 
 #[cfg(target_arch = "wasm32")]
 mod sequence;
@@ -108,6 +108,66 @@ pub extern "C" fn cpo_collect_resources(total: u32) -> u32 {
     1
 }
 
+// Read text through a browser TreeWalker and short UTF-16 transfers. Rust
+// owns trimming and early termination. No entire message string is copied.
+fn dom_whitespace(c:u16)->bool {
+    matches!(c,9..=13|32|160|0x1680|0x2000..=0x200a|0x2028|0x2029|0x202f|0x205f|0x3000|0xfeff)
+}
+#[derive(Default)]
+struct TrimmedCount { count:u32, pending:u32 }
+impl TrimmedCount {
+    fn add(&mut self, text:&[u16], limit:u32) {
+        for &ch in text {
+            if dom_whitespace(ch) {
+                if self.count!=0 {self.pending=self.pending.saturating_add(1).min(limit);}
+            } else {
+                self.count=self.count.saturating_add(self.pending).saturating_add(1).min(limit);
+                self.pending=0;
+                if self.count>=limit {break;}
+            }
+        }
+    }
+}
+#[cfg(target_arch="wasm32")]
+fn trimmed_dom_length(node:u32,limit:u32)->u32 {
+    if limit==0 || h(152,node,0,0)==0{return 0;}
+    let mut count=TrimmedCount::default();
+    let mut scratch=[0u16;256];
+    loop {
+        let len=h(153,scratch.as_mut_ptr() as u32,scratch.len() as u32,0);
+        if len==0{break;}
+        if len>scratch.len() as u32{core::arch::wasm32::unreachable();}
+        count.add(&scratch[..len as usize],limit);
+        // Volatile clearing prevents sensitive text from lingering in memory.
+        for ch in &mut scratch[..len as usize]{unsafe{core::ptr::write_volatile(ch,0);}}
+        if count.count>=limit{break;}
+    }
+    h(154,0,0,0);
+    count.count
+}
+// Parent traversal uses one property read per host operation. The host
+// returns a previously indexed candidate or the unindexed-node sentinel.
+#[cfg(target_arch="wasm32")]
+fn accepted_parent(node:u32)->u32 {
+    h(155,node,0,0);
+    loop{
+        let id=h(156,0,0,0);
+        if id!=u32::MAX{return id;}
+    }
+}
+// Intersection delivery: now=1, previous=2, armed=4, in-flight=8,
+// hidden=16. Output armed=1, intersecting=2, request expansion=4.
+#[no_mangle]
+pub extern "C" fn cpo_intersection_transition(flags:u32)->u32 {
+    let now=flags&1!=0;
+    let previous=flags&2!=0;
+    let mut armed=flags&4!=0;
+    if !now&&previous {armed=true;}
+    let expand=now&&!previous&&armed&&flags&8==0&&flags&16!=0;
+    if expand {armed=false;}
+    (armed as u32)|((now as u32)<<1)|((expand as u32)<<2)
+}
+
 // Discovery ops 10..24. Query lists, closest() and DOM ordering are browser
 // primitives. Rust decides candidate normalization, validity, redundancy and
 // the final order (heap sort; no allocation or quadratic insertion sort).
@@ -128,13 +188,13 @@ fn discover_pass(fallback: bool, selectors: u32) -> u32 {
         if raw == 0 { continue; }
         let raw_flags = h(13, raw, 0, 0);
         if raw_flags & IN_ROOT == 0 || raw_flags & EXCLUDED != 0 { continue; }
-        if fallback && (raw_flags & (THREAD_BOTTOM | HAS_INPUT_OR_FORM) != 0 || h(14, raw, 15, 0) < 15) {
+        if fallback && (raw_flags & (THREAD_BOTTOM | HAS_INPUT_OR_FORM) != 0 || trimmed_dom_length(raw,15) < 15) {
             continue;
         }
         let node = normalized(raw, selectors);
         let flags = h(13, node, 0, 0);
         let threshold = if fallback { 15 } else if flags & HAS_FORM != 0 { 80 } else { 1 };
-        let text = h(14, node, threshold, 0);
+        let text = trimmed_dom_length(node,threshold);
         if if fallback { fallback_valid(flags, text) } else { primary_valid(flags, text) } {
             h(15, node, raw, 0);
         }
@@ -143,14 +203,14 @@ fn discover_pass(fallback: bool, selectors: u32) -> u32 {
     for i in 0..count {
         let node = h(17, i, 0, 0);
         let canonical = h(19, node, 0, 0) != 0;
-        let mut parent = h(18, node, 0, 0);
+        let mut parent = accepted_parent(node);
         while parent != 0 {
             if canonical && h(19, parent, 0, 0) == 0 {
                 h(20, parent, 0, 0);
             } else {
                 h(20, node, 0, 0);
             }
-            parent = h(18, parent, 0, 0);
+            parent = accepted_parent(parent);
         }
     }
     let kept = h(21, 0, 0, 0);
@@ -695,6 +755,20 @@ pub extern "C" fn cpo_ui_sequence_select(flags:u32,count:u32)->u32{
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dom_trim_and_intersection() {
+        let mut count=TrimmedCount::default();
+        count.add(&[32,0xfeff,97,32,32],80);
+        assert_eq!(count.count,1);
+        count.add(&[98,32],80);
+        assert_eq!(count.count,4);
+        count.add(&[99,100],6);
+        assert_eq!(count.count,6);
+        assert_eq!(cpo_intersection_transition(1|4|16),6);
+        assert_eq!(cpo_intersection_transition(2),1);
+        assert_eq!(cpo_intersection_transition(1|4|8|16),3);
+        assert_eq!(cpo_intersection_transition(1|2|16),2);
+    }
     #[test]
     fn provider_interaction_policy() {
         assert_eq!(cpo_dom_submit_stage(0,1|32|64),2);
