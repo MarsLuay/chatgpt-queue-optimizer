@@ -241,3 +241,49 @@ test('explicit cache cleanup drops retained DOM references and timers', () => {
     assert.equal(instance._cacheTimestamp, null);
     assert.equal(instance._messageCacheTimer, null);
 });
+
+test('history capture refuses unsafe or changed conversations and bounds individual turns', () => {
+    const instance = optimizer();
+    instance.provider = { supportsOptimizer: true };
+    instance.getCurrentSurface = () => ({ conversationId: 'example', key: 'chatgpt:c:example', optimizerEligible: true });
+    instance.canDiscardInactiveTab = () => false;
+    assert.equal(instance.captureHistoryBatch({ offset: 0 }).ok, false);
+    instance.canDiscardInactiveTab = () => true;
+    const node = {
+        isConnected: true,
+        matches: () => true,
+        getAttribute: () => 'assistant'
+    };
+    instance.getMessageNodes = () => Array.from({ length: 20 }, () => node);
+    instance.sortMessagesByPosition = messages => messages;
+    assert.equal(instance.captureHistoryBatch({ offset: 0, identity: 'wrong', total: 20 }).ok, false);
+    assert.equal(instance.captureHistoryBatch({ offset: -1 }).ok, false);
+    const priorDocument = global.document;
+    const priorFilter = global.NodeFilter;
+    try {
+        global.NodeFilter = { SHOW_TEXT: 4 };
+        global.document = {
+            createTreeWalker() {
+                let first = true;
+                return { nextNode() {
+                    if (!first) return null;
+                    first = false;
+                    return { length: 50000, substringData: (_offset, count) => 'x'.repeat(count) };
+                } };
+            }
+        };
+        const reply = instance.captureHistoryBatch({ offset: 0 });
+        assert.equal(reply.ok, true);
+        assert.equal(reply.records.length, 16);
+        assert.equal(reply.next, 16);
+        assert.equal(reply.records[0].text.length, 32768);
+        assert.equal(reply.records[0].truncated, true);
+        const next = instance.captureHistoryBatch({ offset: 16, identity: reply.identity, total: reply.total });
+        assert.equal(next.records.length, 4);
+    } finally {
+        if (priorDocument === undefined) delete global.document;
+        else global.document = priorDocument;
+        if (priorFilter === undefined) delete global.NodeFilter;
+        else global.NodeFilter = priorFilter;
+    }
+});
