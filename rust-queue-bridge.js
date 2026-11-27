@@ -23,9 +23,9 @@
             'cpo_durable_number','cpo_durable_boolean','cpo_durable_retry_mode','cpo_durable_trim',
             'cpo_setting_number','cpo_setting_bool','cpo_popup_status','cpo_popup_remaining','cpo_popup_schedule_actions',
             'cpo_log_duplicate','cpo_log_keep_start','cpo_log_limit','cpo_log_sensitive',
-            'cpo_event_code','cpo_content_event_kind','cpo_api_mode','cpo_api_path','cpo_injection_route','cpo_async_transition'];
+            'cpo_event_code','cpo_content_event_kind','cpo_api_mode','cpo_api_path','cpo_injection_route','cpo_async_transition','cpo_live_new','cpo_live_delete','cpo_live_epoch','cpo_live_len','cpo_live_input','cpo_live_write','cpo_live_read','cpo_live_output','cpo_live_wipe'];
         if (!names.every(name => typeof exports[name] === 'function') ||
-            exports.cpo_queue_abi() !== 8 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
+            exports.cpo_queue_abi() !== 9 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
         core = exports;
         durableSchema = null;
         status = 'Rust/WASM';
@@ -208,6 +208,157 @@
     }
     // The field list and conversion rules come from Rust. JS only reads and
     // writes structured-clone values because browser storage accepts objects.
+
+    // Only background workers instantiate the live store. Maps retain handles,
+    // not prompt strings or mirrored job fields. Existing asynchronous owners
+    // can compare stable handles without accidentally targeting replacement jobs.
+    const nativeQueues = new WeakSet();
+    function createLiveJobs() {
+        const handles = new Map();
+        const ids = new WeakMap();
+        let engine = null, broken = false;
+        const encoder = new TextEncoder(), decoder = new TextDecoder();
+        const NONE = 0xffffffff;
+        let fields, queueField;
+        function ready() {
+            if (broken || !(engine || core)) throw new Error('Native live queue unavailable');
+            if (!engine) {
+                engine = core;
+                fields = new Map(getDurableSchema().map((f,i)=>[f.name,i]));
+                queueField = fields.get('queue');
+                fields.set('isProcessing', fields.size);
+            }
+            return engine;
+        }
+        function native(fn) {
+            const e=ready();
+            try { return fn(e); }
+            catch (error) { broken=true; fail(error); throw error; }
+        }
+        function write(id, field, op, index, value) {
+            return native(e=>{
+                const bytes=value===undefined?new Uint8Array(0):encoder.encode(JSON.stringify(value));
+                const ptr=e.cpo_live_input(bytes.length)>>>0;
+                if(!ptr)throw new Error('Native live field exceeds transfer capacity');
+                new Uint8Array(e.memory.buffer,ptr,bytes.length).set(bytes);
+                if(e.cpo_live_write(id,field,op,index)!==1)throw new Error('Native live mutation rejected');
+            });
+        }
+        function read(id, field, index=0) {
+            return native(e=>{
+                const size=e.cpo_live_read(id,field,index)>>>0;
+                if(!size)return undefined;
+                try {
+                    return JSON.parse(decoder.decode(new Uint8Array(e.memory.buffer,e.cpo_live_output()>>>0,size-1)));
+                } finally { e.cpo_live_wipe(); }
+            });
+        }
+        function makeJob(tabId, id, initial) {
+            let handle;
+            const active=()=>handles.get(tabId)===handle;
+            const len=()=>active()?native(e=>e.cpo_live_len(id)>>>0):0;
+            const at=i=>active()?read(id,queueField,i):undefined;
+            const add=(op,index,value)=>{
+                if(!active())return;
+                if(typeof value!=='string')throw new Error('Queue prompt must be a string');
+                write(id,queueField,op,index,value);
+            };
+            const queue=new Proxy([],{
+                get(_target,key) {
+                    if(key==='length')return len();
+                    if(key===Symbol.iterator)return function*(){const count=len();for(let i=0;i<count;i++)yield at(i);};
+                    if(key==='push')return (...values)=>{for(const v of values)add(1,0,v);return len();};
+                    if(key==='unshift')return (...values)=>{for(const v of values.reverse())add(2,0,v);return len();};
+                    if(key==='shift')return ()=>{if(!len())return undefined;const v=at(0);write(id,queueField,4,0);return v;};
+                    if(key==='splice')return (index,remove,...values)=>{
+                        if(remove!==0||!Number.isInteger(index)||index<0||index>len())throw new Error('Unsupported queue splice');
+                        for(const v of values)add(3,index++,v);return [];
+                    };
+                    if(typeof key==='string'&&/^(0|[1-9]\d*)$/.test(key))return Number(key)<len()?at(Number(key)):undefined;
+                    return Reflect.get(_target,key);
+                },
+                set(){throw new Error('Native queue cannot be assigned by index');}
+            });
+            nativeQueues.add(queue);
+            handle=new Proxy({},{
+                get(_target,key) {
+                    if(key==='queue')return queue;
+                    if(!active()||!fields.has(key))return undefined;
+                    return read(id,fields.get(key));
+                },
+                set(_target,key,value) {
+                    if(!active())return true; // retired async owner
+                    if(key==='queue'||!fields.has(key))throw new Error('Unsupported native job field: '+String(key));
+                    write(id,fields.get(key),0,0,value);return true;
+                },
+                ownKeys(){return active()?[...fields.keys()]:[];},
+                getOwnPropertyDescriptor(_target,key){
+                    if(active()&&fields.has(key))return {configurable:true,enumerable:true,writable:true,value:handle[key]};
+                },
+                has(_target,key){return active()&&fields.has(key);}
+            });
+            ids.set(handle,id);
+            // Populate before publication; failed initialization never replaces a live owner.
+            for(const [key,value] of Object.entries(initial)){
+                if(key==='queue'){
+                    if(!Array.isArray(value))throw new Error('Invalid initial queue');
+                    for(const item of value){
+                        if(typeof item!=='string')throw new Error('Invalid queue prompt');
+                        write(id,queueField,1,0,item);
+                    }
+                }else{
+                    if(!fields.has(key))throw new Error('Unsupported native job field: '+key);
+                    write(id,fields.get(key),0,0,value);
+                }
+            }
+            return handle;
+        }
+        const store={
+            get size(){return handles.size;},
+            has:key=>handles.has(key),
+            get:key=>handles.get(key),
+            entries:()=>handles.entries(),
+            values:()=>handles.values(),
+            keys:()=>handles.keys(),
+            [Symbol.iterator]:()=>handles.entries(),
+            set(tabId,initial){
+                const id=native(e=>e.cpo_live_new()>>>0);
+                if(!id)throw new Error('Native live handle exhaustion');
+                let handle;
+                try { handle=makeJob(tabId,id,initial); }
+                catch(error){if(!broken)native(e=>e.cpo_live_delete(id));throw error;}
+                const previous=handles.get(tabId);
+                if(previous)native(e=>e.cpo_live_delete(ids.get(previous)));
+                handles.set(tabId,handle);return store;
+            },
+            delete(tabId){
+                const handle=handles.get(tabId);
+                if(!handle)return false;
+                if(!broken)native(e=>e.cpo_live_delete(ids.get(handle)));
+                return handles.delete(tabId);
+            },
+            clear(){for(const key of handles.keys())store.delete(key);},
+            canPersist(){return !broken&&!!(engine||core);},
+            revision(){return native(e=>e.cpo_live_epoch());},
+            checkpoint(job){
+                const id=ids.get(job);
+                if(!id)throw new Error('Unowned live job');
+                let meta=read(id,NONE);
+                if(meta===undefined){
+                    const projected=projectDurable(job);
+                    if(!projected?.ok)throw new Error(projected?.error||'Native durable projection unavailable');
+                    meta=projected.value;
+                    delete meta.queue;
+                    write(id,NONE,5,0,meta);
+                }
+                // Browser structured-clone requires a plain array. Only the
+                // write path materializes the native queue, never polling.
+                return {...meta,queue:read(id,queueField,NONE)};
+            }
+        };
+        return store;
+    }
+
     function getDurableSchema() {
         if (durableSchema) return durableSchema;
         const e=core;
@@ -292,6 +443,7 @@
                 const v=read(key);
                 if(rule===6){
                     if(v!=null&&!Array.isArray(v))return reject(key);
+                    if(mode===0&&nativeQueues.has(v)){out[key]=v;continue;}
                     const queue=[];
                     for(const item of v||[]){
                         if(typeof item!=='string')return reject(key);
@@ -453,7 +605,7 @@
             (Number(!!job.waitForIdleBeforeSend) << 6);
         return call('cpo_queue_next', [flags, phase, job.queue.length]);
     }
-    const api = { load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
+    const api = { createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
     globalThis.CpoQueueEngine = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();

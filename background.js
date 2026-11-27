@@ -1,5 +1,3 @@
-/** @type {Map<number, QueueJob>} */
-const jobs = new Map();
 // Ephemeral one-use click grants; never persisted or transferred between jobs.
 const nativeClickGrants = new Map();
 const QUEUE_DEBUG_LOG_KEY = 'queueDebugLogs';
@@ -180,6 +178,9 @@ if (typeof importScripts === 'function') {
 } else if(typeof require==='function'&&!globalThis.CpoBrowserApi) {
     require('./utils.js');
 }
+
+if(typeof require==='function'&&!globalThis.CpoQueueEngine)require('./rust-queue-bridge.js');
+const jobs = globalThis.CpoQueueEngine.createLiveJobs();
 
 let providerAdapterRegistry = typeof globalThis !== 'undefined' ? globalThis.ProviderAdapterRegistry : null;
 if (!providerAdapterRegistry && typeof require === 'function') {
@@ -1072,8 +1073,7 @@ function restoreDurableJobs(durableJobs) {
         restoredJobs.push(job);
     }
     // Publish the reconstructed jobs only after the entire decode succeeds.
-    for(const job of restoredJobs)jobs.set(job.tabId,job);
-    return restoredJobs;
+    return restoredJobs.map(job=>{jobs.set(job.tabId,job);return jobs.get(job.tabId);});
 }
 
 function logLegacyStaleRunningJobs() {
@@ -3672,15 +3672,11 @@ function getJobStatus(job) {
 }
 
 function updateRunningJobsStorage(options = {}) {
-    const snapshot = getRunningJobsSnapshot();
-    const durableJobs = getDurableJobsState();
-    const hasJobs = Object.keys(snapshot).length > 0;
-    const items = {
-        runningJobs: snapshot,
-        queueDurableJobs: durableJobs,
-        isRunning: hasJobs
-    };
-    const serialized = globalThis.CpoQueueEngine?.serialize(items) ?? JSON.stringify(items);
+    // A native revision is an exact dirty token, not a hash or full JSON copy.
+    // Never replace durable storage with an empty snapshot after an engine trap.
+    if(!jobs.canPersist())return queueStateWrite;
+    const serialized = jobs.revision();
+    const hasJobs = jobs.size > 0;
 
     updateQueueWakeAlarm(hasJobs);
 
@@ -3700,7 +3696,7 @@ function updateRunningJobsStorage(options = {}) {
         }
         return queueStateWrite;
     }
-    pendingQueueState = { items, serialized };
+    pendingQueueState = { serialized };
     if (action === 2) return flushQueueState();
     if (action === 3) {
         queueStateFlushTimer = setTimeout(() => {
@@ -3722,8 +3718,18 @@ function flushQueueState() {
         return queueStateWrite;
     }
 
-    const nextState = pendingQueueState;
     pendingQueueState = null;
+    if(!jobs.canPersist())return queueStateWrite;
+    let nextState;
+    try {
+        const snapshot=getRunningJobsSnapshot();
+        nextState={serialized:jobs.revision(),items:{
+            runningJobs:snapshot,queueDurableJobs:getDurableJobsState(),isRunning:jobs.size>0
+        }};
+    } catch(error) {
+        console.warn('Native checkpoint unavailable; previous durable state preserved.',error);
+        return queueStateWrite;
+    }
     queueStateInFlightSerialized = nextState.serialized;
     queueStateWrite = queueStateWrite
         .catch(() => {})
@@ -3748,67 +3754,8 @@ function flushQueueState() {
 }
 
 function getDurableJobsState() {
-    /** @type {DurableQueueSnapshot} */
     const state = {};
-
-    for (const [tabId, job] of jobs.entries()) {
-        const projected = globalThis.CpoQueueEngine?.projectDurable(job);
-        if (projected?.ok) {
-            state[tabId] = projected.value;
-            continue;
-        }
-        // Preserve live jobs using the established projection on engine failure
-        // or unexpected in-memory values rather than dropping a checkpoint.
-        const provider = job.provider || 'chatgpt';
-        const conversationId = job.conversationId || null;
-        const conversationType = job.conversationType || (conversationId ? 'existing' : 'unknown');
-        const targetKey = job.targetKey || (conversationId ? `${provider}:c:${conversationId}` : `${provider}:${conversationType}`);
-
-        state[tabId] = {
-            tabId: job.tabId,
-            provider,
-            conversationId,
-            conversationType,
-            targetKey,
-            queue: Array.isArray(job.queue) ? [...job.queue] : [],
-            currentMessage: job.currentMessage || '',
-            isRunning: !!job.isRunning,
-            isPaused: !!job.isPaused,
-            isStopped: !!job.isStopped,
-            pausedReason: job.pausedReason || '',
-            lastError: job.lastError || '',
-            runId: job.runId || '',
-            totalMessages: getTotalMessages(job),
-            completedCount: Number(job.completedCount || 0),
-            currentCommandNumber: Number(job.currentCommandNumber || 0),
-            currentPhase: job.currentPhase || 'queued',
-            waitForIdleBeforeSend: job.waitForIdleBeforeSend === true,
-            deliveryTimeoutAttempts: Number(job.deliveryTimeoutAttempts || 0),
-            retryAttemptCount: Number(job.retryAttemptCount || 0),
-            lastRetryableReason: job.lastRetryableReason || '',
-            retryClass: job.retryClass || '',
-            retryMode: job.retryMode || '',
-            nextRetryDelayMs: Number(job.nextRetryDelayMs || 0),
-            nextRetryAt: Number(job.nextRetryAt || 0),
-            retryExhausted: job.retryExhausted === true,
-            waitStartedAt: Number(job.waitStartedAt || 0),
-            lastResearchProgressAt: Number(job.lastResearchProgressAt || 0),
-            sawDeepResearch: job.sawDeepResearch === true,
-            sawGenerating: job.sawGenerating === true,
-            deliveryState: job.deliveryState || '',
-            commandId: job.commandId || '',
-            commandFingerprint: job.commandFingerprint || '',
-            submittedUserTurnId: job.submittedUserTurnId || null,
-            assistantTurnId: job.assistantTurnId || null,
-            submissionAckSource: job.submissionAckSource || '',
-            terminalAckSource: job.terminalAckSource || '',
-            lastResponsePhase: job.lastResponsePhase || '',
-            ...copyRolloverFields(job),
-            startedAt: job.startedAt,
-            updatedAt: job.updatedAt
-        };
-    }
-
+    for(const [tabId,job] of jobs.entries())state[tabId]=jobs.checkpoint(job);
     return state;
 }
 

@@ -1,11 +1,7 @@
 //! Queue execution decisions and streaming legacy-compatible UTF-16 fingerprints.
-#![cfg_attr(target_arch = "wasm32", no_std)]
-#[cfg(target_arch = "wasm32")]
-#[panic_handler]
-fn panic(_: &core::panic::PanicInfo<'_>) -> ! { core::arch::wasm32::unreachable() }
 
 #[no_mangle]
-pub extern "C" fn cpo_queue_abi() -> u32 { 8 }
+pub extern "C" fn cpo_queue_abi() -> u32 { 9 }
 
 const OFFSET: u32 = 2166136261;
 const PRIME: u32 = 16777619;
@@ -915,5 +911,171 @@ mod tests {
         assert_eq!(cpo_queue_retry_action(1,0),2);
         assert_eq!(cpo_queue_backoff(100,2000,2,30000),30000);
         assert_eq!(cpo_queue_can_retry(3,3,0),0);
+    }
+}
+
+
+ // Live queue state is isolated to the background worker's WASM instance.
+ // JSON scalar bytes preserve JS number/string semantics (including lone surrogates).
+ // The pending prompts are a real deque; the host only holds opaque handles.
+mod live_state {
+    use std::{cell::RefCell, collections::{BTreeMap, VecDeque}};
+    const QUEUE: usize = 5;
+    const MAX_INPUT: usize = 64 * 1024 * 1024;
+    const METADATA: u32 = u32::MAX;
+    struct Job {
+        fields: Vec<Option<Vec<u8>>>,
+        queue: VecDeque<Vec<u8>>,
+        revision: u64,
+        metadata: Option<(u64, Vec<u8>)>,
+    }
+    impl Job {
+        fn new() -> Self {
+            Self { fields: vec![None; super::DURABLE_FIELDS.len()+1], queue: VecDeque::new(), revision: 0, metadata: None }
+        }
+        fn dirty(&mut self, revision: u64) { self.revision = revision; self.metadata = None; }
+    }
+    #[derive(Default)]
+    struct Store {
+        jobs: BTreeMap<u32, Job>,
+        next: u32,
+        epoch: u64,
+        input: Vec<u8>,
+        output: Vec<u8>,
+    }
+    impl Store {
+        fn advance(&mut self) -> u64 { self.epoch += 1; self.epoch }
+        fn changed(&mut self, id: u32) {
+            let revision = self.advance();
+            self.jobs.get_mut(&id).unwrap().dirty(revision);
+        }
+        fn create(&mut self) -> u32 {
+            let Some(id) = self.next.checked_add(1) else { return 0; };
+            self.next = id;
+            self.jobs.insert(id, Job::new());
+            self.changed(id);
+            id
+        }
+        fn mutate(&mut self, id: u32, field: u32, op: u32, index: u32) -> bool {
+            let input = std::mem::take(&mut self.input);
+            let Some(job) = self.jobs.get_mut(&id) else { return false; };
+            let changed = match op {
+                0 if field as usize != QUEUE && (field as usize) < job.fields.len() => {
+                    let slot = &mut job.fields[field as usize];
+                    let next = if input.is_empty() { None } else { Some(input) };
+                    if *slot == next { return true; }
+                    *slot = next;
+                    // isProcessing is ephemeral; never invalidate durable snapshots.
+                    (field as usize) < super::DURABLE_FIELDS.len()
+                },
+                1 if !input.is_empty() => { job.queue.push_back(input); true },
+                2 if !input.is_empty() => { job.queue.push_front(input); true },
+                3 if !input.is_empty() && index as usize <= job.queue.len() => {
+                    job.queue.insert(index as usize, input); true
+                },
+                4 => { if job.queue.pop_front().is_none() { return false; } true },
+                5 if !input.is_empty() => { job.metadata = Some((job.revision, input)); false },
+                _ => return false,
+            };
+            if changed { self.changed(id); }
+            true
+        }
+        fn read(&mut self, id: u32, field: u32, index: u32) -> u32 {
+            self.output.clear();
+            let Some(job) = self.jobs.get(&id) else { return 0; };
+            if field == METADATA {
+                let Some((revision, bytes)) = &job.metadata else { return 0; };
+                if *revision != job.revision { return 0; }
+                self.output.extend_from_slice(bytes);
+            } else if field as usize == QUEUE {
+                if index == u32::MAX {
+                    self.output.push(b'[');
+                    for (i, item) in job.queue.iter().enumerate() {
+                        if i != 0 { self.output.push(b','); }
+                        self.output.extend_from_slice(item);
+                    }
+                    self.output.push(b']');
+                } else {
+                    let Some(bytes) = job.queue.get(index as usize) else { return 0; };
+                    self.output.extend_from_slice(bytes);
+                }
+            } else {
+                let Some(Some(bytes)) = job.fields.get(field as usize) else { return 0; };
+                self.output.extend_from_slice(bytes);
+            }
+            u32::try_from(self.output.len()).ok().and_then(|n| n.checked_add(1)).unwrap_or(0)
+        }
+    }
+    thread_local! { static STORE: RefCell<Store> = RefCell::new(Store::default()); }
+    #[no_mangle]
+    pub extern "C" fn cpo_live_new() -> u32 { STORE.with(|s| s.borrow_mut().create()) }
+    #[no_mangle]
+    pub extern "C" fn cpo_live_delete(id: u32) -> u32 {
+        STORE.with(|s| {
+            let mut s = s.borrow_mut();
+            if s.jobs.remove(&id).is_none() { return 0; }
+            s.advance(); 1
+        })
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_live_epoch() -> f64 { STORE.with(|s| s.borrow().epoch as f64) }
+    #[no_mangle]
+    pub extern "C" fn cpo_live_len(id: u32) -> u32 {
+        STORE.with(|s| s.borrow().jobs.get(&id).map_or(0, |j| j.queue.len() as u32))
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_live_input(len: u32) -> usize {
+        if len as usize > MAX_INPUT { return 0; }
+        STORE.with(|s| {
+            let mut s = s.borrow_mut();
+            s.input.resize(len as usize, 0);
+            s.input.as_mut_ptr() as usize
+        })
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_live_write(id: u32, field: u32, op: u32, index: u32) -> u32 {
+        STORE.with(|s| s.borrow_mut().mutate(id,field,op,index) as u32)
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_live_read(id: u32, field: u32, index: u32) -> u32 {
+        STORE.with(|s| s.borrow_mut().read(id,field,index))
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_live_output() -> usize {
+        STORE.with(|s| s.borrow().output.as_ptr() as usize)
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_live_wipe() {
+        STORE.with(|s| {
+            let mut s = s.borrow_mut();
+            s.output.fill(0);
+            s.output.clear();
+        })
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn deque_order_and_checkpoint_invalidation() {
+            let mut s = Store::default();
+            let id = s.create();
+            for (op, index, value) in [(1,0,b"\"b\"".as_slice()),(2,0,b"\"a\""),(3,1,b"\"next\"")] {
+                s.input = value.to_vec();
+                assert!(s.mutate(id,QUEUE as u32,op,index));
+            }
+            s.read(id,QUEUE as u32,u32::MAX);
+            assert_eq!(s.output,b"[\"a\",\"next\",\"b\"]");
+            s.input = b"{}".to_vec();
+            assert!(s.mutate(id,0,5,0));
+            let epoch = s.epoch;
+            s.input = b"true".to_vec();
+            assert!(s.mutate(id,super::super::DURABLE_FIELDS.len() as u32,0,0));
+            assert_eq!(s.epoch,epoch);
+            assert_ne!(s.read(id,METADATA,0),0);
+            assert!(s.mutate(id,QUEUE as u32,4,0));
+            assert_eq!(s.read(id,METADATA,0),0);
+            s.read(id,QUEUE as u32,u32::MAX);
+            assert_eq!(s.output,b"[\"next\",\"b\"]");
+        }
     }
 }
