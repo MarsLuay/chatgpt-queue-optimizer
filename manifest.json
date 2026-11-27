@@ -71,7 +71,6 @@
     {
       "resources": [
         "optimizer_core.wasm",
-        "optimizer_browser.wasm",
         "icon_16.png",
         "icon_48.png",
         "icon_128.png"
@@ -83,7 +82,8 @@
     },
     {
       "resources": [
-        "optimizer_queue.wasm"
+        "optimizer_queue.wasm",
+        "optimizer_browser.wasm"
       ],
       "matches": [
         "https://chatgpt.com/*",
