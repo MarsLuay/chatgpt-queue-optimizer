@@ -178,7 +178,7 @@ function isIncompleteToolResponse(responseState = {}) {
 let scheduledStorageWrite = Promise.resolve();
 
 if (typeof importScripts === 'function') {
-    importScripts('utils.js', 'provider-adapter.js');
+    importScripts('utils.js', 'rust-queue-bridge.js', 'provider-adapter.js');
 }
 
 let providerAdapterRegistry = typeof globalThis !== 'undefined' ? globalThis.ProviderAdapterRegistry : null;
@@ -1606,6 +1606,21 @@ function handleStopAllSequences(sendResponse) {
     sendResponse({ ok: true, stopped: 'all' });
 }
 
+function queueExecutionAction(job) {
+    const native = globalThis.CpoQueueEngine?.next(job, isSubmissionConfirmed(job));
+    if (native != null) return native;
+    if (!job.isRunning || job.isPaused || job.isStopped) return 0;
+    if (job.rolloverInProgress || job.currentPhase === 'rollover-in-progress') return 1;
+    if (job.currentMessage) {
+        if (job.currentPhase === 'terminal') return 2;
+        if (WAITING_COMMAND_PHASES.has(job.currentPhase)) return 3;
+        if (job.currentPhase === 'retry-wait') return 4;
+        return isSubmissionConfirmed(job) ? 5 : 6;
+    }
+    if (!job.queue.length) return 7;
+    return job.waitForIdleBeforeSend ? 8 : 9;
+}
+
 async function processQueue(tabId) {
     const job = jobs.get(tabId);
 
@@ -1616,71 +1631,38 @@ async function processQueue(tabId) {
     job.isProcessing = true;
 
     try {
-        while (job.isRunning && !job.isPaused && !job.isStopped) {
-            if (job.rolloverInProgress || job.currentPhase === 'rollover-in-progress') {
+        // The native engine selects the next action from durable job state.
+        // JavaScript performs asynchronous browser and storage effects only.
+        await globalThis.CpoQueueEngine?.load();
+        while (jobs.get(tabId) === job) {
+            const action = queueExecutionAction(job);
+            if (action === 0 || action === 7) break;
+            if (action === 1) {
                 const result = await handleConversationCapacityRollover(tabId, job);
                 if (result.action === 'return') return;
                 if (result.action === 'continue') continue;
+                throw new Error('Unexpected rollover result.');
             }
-
-            if (job.currentMessage && job.currentPhase === 'terminal') {
+            if (action === 2) {
                 completeCurrentCommand(tabId, job, getTotalMessages(job), collectDeliveryDiagnostics(job, {
                     terminalAckSource: job.terminalAckSource || 'durable-recovery'
                 }));
-                if (job.queue.length > 0) {
-                    await sleep(Number(QUEUE_WAIT_POLICY.interCommandDelayMs) || 0);
-                }
+                if (job.queue.length > 0) await sleep(Number(QUEUE_WAIT_POLICY.interCommandDelayMs) || 0);
                 continue;
             }
-
-            if (job.currentMessage && WAITING_COMMAND_PHASES.has(job.currentPhase)) {
-                const result = await handleProcessWaiting(tabId, job);
+            if (action === 3 || action === 4 || action === 5) {
+                if (action === 5) job.currentPhase = 'awaiting-response';
+                const result = action === 4 ? await handleProcessRetryWait(tabId, job) :
+                    await handleProcessWaiting(tabId, job);
                 if (result.action === 'return') return;
                 if (result.action === 'continue') continue;
+                throw new Error('Unexpected response or retry result.');
             }
-
-            if (job.currentMessage && job.currentPhase === 'retry-wait') {
-                const result = await handleProcessRetryWait(tabId, job);
-                if (result.action === 'return') return;
-                if (result.action === 'continue') continue;
+            if (action === 6) {
+                handleProcessRecovered(tabId, job);
+                continue;
             }
-
-            if (job.currentMessage && isSubmissionConfirmed(job)) {
-                job.currentPhase = 'awaiting-response';
-                const result = await handleProcessWaiting(tabId, job);
-                if (result.action === 'return') return;
-                if (result.action === 'continue') continue;
-            }
-
-            if (job.currentMessage) {
-                const result = handleProcessRecovered(tabId, job);
-                if (result.action === 'continue') continue;
-            }
-
-            if (job.queue.length === 0) {
-                break;
-            }
-
-            if (job.waitForIdleBeforeSend) {
-                const validation = await validateJobTargetConversation(tabId, job);
-                if (!validation.ok) {
-                    if (validation.awaitingRollover || job.rolloverInProgress) {
-                        const rolloverResult = await handleConversationCapacityRollover(tabId, job);
-                        if (rolloverResult.action === 'return') return;
-                        if (rolloverResult.action === 'continue') continue;
-                    }
-                    logQueueEvent(tabId, 'error', validation.reason, {
-                        phase: 'pre-send-validation',
-                        mismatch: true
-                    });
-                    pauseJob(tabId, validation.reason, { phase: 'pre-send-validation', mismatch: true });
-                    return;
-                }
-                const result = await handleProcessWaitForIdle(tabId, job);
-                if (result.action === 'return') return;
-                if (result.action === 'continue') continue;
-            }
-
+            if (action !== 8 && action !== 9) throw new Error('Unknown queue execution action.');
             const validation = await validateJobTargetConversation(tabId, job);
             if (!validation.ok) {
                 if (validation.awaitingRollover || job.rolloverInProgress) {
@@ -1688,19 +1670,20 @@ async function processQueue(tabId) {
                     if (rolloverResult.action === 'return') return;
                     if (rolloverResult.action === 'continue') continue;
                 }
-                logQueueEvent(tabId, 'error', validation.reason, {
-                    phase: 'pre-send-validation',
-                    mismatch: true
-                });
+                logQueueEvent(tabId, 'error', validation.reason, { phase: 'pre-send-validation', mismatch: true });
                 pauseJob(tabId, validation.reason, { phase: 'pre-send-validation', mismatch: true });
                 return;
             }
-
-            const result = await handleProcessSending(tabId, job);
+            // Recheck ownership after asynchronous validation, before a send.
+            if (jobs.get(tabId) !== job || job.isStopped || job.isPaused || !job.isRunning) return;
+            const result = action === 8 ? await handleProcessWaitForIdle(tabId, job) :
+                await handleProcessSending(tabId, job);
             if (result.action === 'return') return;
-            if (result.action === 'continue') continue;
+            if (result.action === 'continue' || result.action === 'next') continue;
+            throw new Error('Unexpected queue effect result.');
         }
 
+        if (jobs.get(tabId) !== job) return;
         if (job.isStopped) {
             jobs.delete(tabId);
             updateRunningJobsStorage({ force: true });
@@ -1830,7 +1813,8 @@ async function handleProcessRetryWait(tabId, job) {
         return { action: 'return' };
     }
 
-    if (isSubmissionConfirmed(job) && job.currentMessage) {
+    if ((globalThis.CpoQueueEngine?.call('cpo_queue_retry_action', [Number(!!job.currentMessage), Number(isSubmissionConfirmed(job))]) ??
+        (isSubmissionConfirmed(job) && job.currentMessage ? 1 : 2)) === 1) {
         job.currentPhase = 'awaiting-response';
         job.deliveryState = 'confirmed-submission';
         job.nextRetryAt = 0;
@@ -2145,6 +2129,8 @@ function emptyDeliveryFields() {
 }
 
 function fingerprintCommandTextForJob(text) {
+    const native = globalThis.CpoQueueEngine?.fingerprint(text);
+    if (native != null) return native;
     if (typeof globalThis !== 'undefined' && typeof globalThis.fingerprintCommandText === 'function') {
         return globalThis.fingerprintCommandText(text);
     }
@@ -2163,6 +2149,8 @@ function fingerprintCommandTextForJob(text) {
 
 function isSubmissionConfirmed(job) {
     if (!job) return false;
+    const native = globalThis.CpoQueueEngine?.confirmed(job);
+    if (native != null) return native === 1;
     if (job.submittedUserTurnId) return true;
     return CONFIRMED_DELIVERY_STATES.has(String(job.deliveryState || ''));
 }
@@ -2301,6 +2289,10 @@ function getRetryBackoffDelayMs(attemptCount, unlimited = false) {
     }
 
     const exponent = Math.max(0, Number(attemptCount) || 0);
+    const native = globalThis.CpoQueueEngine?.call('cpo_queue_backoff', [exponent,
+        Number(QUEUE_RETRY_POLICY.backoffBaseMs), Number(QUEUE_RETRY_POLICY.backoffFactor) || 2,
+        Number(QUEUE_RETRY_POLICY.backoffMaxMs)]);
+    if (native != null) return native;
     const delay = Number(QUEUE_RETRY_POLICY.backoffBaseMs) * Math.pow(Number(QUEUE_RETRY_POLICY.backoffFactor) || 2, exponent);
     const maxDelay = Number(QUEUE_RETRY_POLICY.backoffMaxMs) || delay;
     return Math.max(1, Math.min(maxDelay, delay));
@@ -2410,7 +2402,9 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
     const maxAttempts = unlimited ? Number.POSITIVE_INFINITY : Number(QUEUE_RETRY_POLICY.maxAutomaticAttempts);
     const attemptCount = Number(job.retryAttemptCount || 0);
 
-    if (attemptCount >= maxAttempts) {
+    const canRetry = globalThis.CpoQueueEngine?.call('cpo_queue_can_retry', [attemptCount,
+        Number(QUEUE_RETRY_POLICY.maxAutomaticAttempts), Number(unlimited)]);
+    if (canRetry == null ? attemptCount >= maxAttempts : canRetry === 0) {
         job.retryExhausted = true;
         job.retryMode = unlimited ? 'unlimited' : 'finite';
         job.lastError = getRetryExhaustionReason(job, classification.reason);
@@ -2461,7 +2455,8 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
         return false;
     }
 
-    if (isSubmissionConfirmed(job) && job.currentMessage) {
+    if ((globalThis.CpoQueueEngine?.call('cpo_queue_retry_action', [Number(!!job.currentMessage), Number(isSubmissionConfirmed(job))]) ??
+        (isSubmissionConfirmed(job) && job.currentMessage ? 1 : 2)) === 1) {
         job.currentPhase = 'awaiting-response';
         job.deliveryState = 'confirmed-submission';
         job.nextRetryAt = 0;
@@ -3923,16 +3918,17 @@ function getRunningJobsSnapshot() {
 
 function getRemainingCount(job) {
     const queued = Array.isArray(job?.queue) ? job.queue.length : 0;
-    return queued + (job?.currentMessage ? 1 : 0);
+    return globalThis.CpoQueueEngine?.call('cpo_queue_remaining', [queued, Number(!!job?.currentMessage)]) ??
+        queued + (job?.currentMessage ? 1 : 0);
 }
 
 function getTotalMessages(job) {
     if (!job) return 0;
 
-    return Math.max(
-        Number(job.totalMessages || 0),
-        Number(job.completedCount || 0) + getRemainingCount(job)
-    );
+    const declared = Number(job.totalMessages || 0);
+    const completed = Number(job.completedCount || 0);
+    const remaining = getRemainingCount(job);
+    return globalThis.CpoQueueEngine?.call('cpo_queue_total', [declared, completed, remaining]) ?? Math.max(declared, completed + remaining);
 }
 
 function getJobStatus(job) {
