@@ -11,3 +11,5 @@ node_modules/
 /optimizer_core.wasm
 
 /optimizer_browser.wasm
+
+/optimizer_history.wasm
