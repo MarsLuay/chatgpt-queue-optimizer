@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 36);
+    assert.equal(e.cpo_queue_abi(), 37);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -915,4 +915,13 @@ test('native bulk checkpoint and restore preserve isolation and one revision',{s
     assert.deepEqual(snapshot.items.queueDurableJobs['7'],jobs.checkpoint(jobs.get(7)));
     assert.equal(snapshot.items.runningJobs['7'].currentMessage,undefined);
     assert.throws(()=>jobs.restoreBatch([{tabId:7,queue:[]}])) ;assert.equal(jobs.revision(),snapshot.serialized);
+});
+
+
+test('batched settings preserve absent keys and install defaults',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});engine.install(instance.exports);
+    assert.deepEqual(engine.settings({enabled:false,windowSize:900,batchSize:2,adaptiveBudget:true}),{windowSize:500,batchSize:5,enabled:false,adaptiveBudget:true});
+    assert.deepEqual(engine.settings({queueUnlimitedRetryWait:true,queueDeepResearchAware:null},'queue'),{queueUnlimitedRetryWait:true,queueDeepResearchAware:true});
+    assert.deepEqual(engine.installationDefaults({enabled:false,windowSize:80,batchSize:30,autoScroll:false,inactiveTabMinutes:15,queueUnlimitedRetryWait:true,queueDeepResearchAware:false,queueDeliveryTimeoutRefresh:false}),{});
+    assert.deepEqual(engine.installationDefaults({}),{enabled:true,windowSize:50,batchSize:25,autoScroll:true,inactiveTabMinutes:0,queueUnlimitedRetryWait:false,queueDeepResearchAware:true,queueDeliveryTimeoutRefresh:true});
 });

@@ -717,42 +717,10 @@ chrome.runtime.onInstalled.addListener(() => {
             queueDeepResearchAware: undefined,
             queueDeliveryTimeoutRefresh: undefined
         },
-        (data) => {
-            const defaults = {};
-
-            if (typeof data.enabled !== 'boolean') {
-                defaults.enabled = true;
-            }
-
-            if (typeof data.windowSize !== 'number') {
-                defaults.windowSize = 50;
-            }
-
-            if (typeof data.batchSize !== 'number') {
-                defaults.batchSize = 25;
-            }
-
-            if (typeof data.autoScroll !== 'boolean') {
-                defaults.autoScroll = true;
-            }
-
-            if (!ALLOWED_IDLE_DISCARD_MINUTES.has(Number(data.inactiveTabMinutes)) &&
-                data.inactiveTabMinutes !== 0) {
-                defaults.inactiveTabMinutes = 0;
-            }
-
-            if (typeof data.queueUnlimitedRetryWait !== 'boolean') {
-                defaults.queueUnlimitedRetryWait = QUEUE_SETTINGS_DEFAULTS.queueUnlimitedRetryWait;
-            }
-
-            if (typeof data.queueDeepResearchAware !== 'boolean') {
-                defaults.queueDeepResearchAware = QUEUE_SETTINGS_DEFAULTS.queueDeepResearchAware;
-            }
-
-            if (typeof data.queueDeliveryTimeoutRefresh !== 'boolean') {
-                defaults.queueDeliveryTimeoutRefresh = QUEUE_SETTINGS_DEFAULTS.queueDeliveryTimeoutRefresh;
-            }
-
+        async (data) => {
+            if(!await globalThis.CpoQueueEngine?.load())return;
+            const defaults=globalThis.CpoQueueEngine?.installationDefaults(data);
+            if(!defaults)return;
             if (Object.keys(defaults).length > 0) {
                 chrome.storage.sync.set(defaults);
             }

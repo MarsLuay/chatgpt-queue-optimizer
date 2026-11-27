@@ -1,7 +1,7 @@
 //! Native Windows UIA installer. Fail closed on ambiguous controls, windows or
 //! package identities. No keyboard injection, preference edits, or removal.
-use super::{err,Result,local_artifacts::prepare};
-use std::{env,fs,path::{Path,PathBuf},process::Command,thread,time::{Duration,Instant}};
+use super::{err,Result,local_artifacts::{prepare,NAME}};
+use std::{env,path::{Path,PathBuf},process::Command,thread,time::{Duration,Instant}};
 use windows::{core::BSTR,Win32::{Foundation::HWND,System::Com::*,UI::{Accessibility::*,WindowsAndMessaging::*}}};
 #[link(name="kernel32")]
 extern "system"{

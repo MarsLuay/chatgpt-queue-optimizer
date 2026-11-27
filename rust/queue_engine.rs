@@ -453,6 +453,7 @@ pub extern "C" fn cpo_rollover_generation(generation: u32, rebound: u32) -> u32 
 // JSON string serialization uses UTF-16 to preserve JavaScript strings,
 // including lone surrogates. The host supplies bounded chunks without
 // splitting surrogate pairs. Output matches well-formed JSON.stringify.
+#[cfg(target_arch = "wasm32")]
 const JSON_OUTPUT_CAP: usize = CHUNK * 6;
 fn escape_json(input: &[u16], output: &mut [u16]) -> usize {
     let mut i = 0;
@@ -2509,6 +2510,38 @@ mod presentation_batch {
             36=>generic_provider_response(f),
             37=>wait_observation(f),
             38=>bounded_group(f),
+            39=>{ // One settings pass, preserving absent fields and defaults.
+                if f.len()%3!=0{return None;}
+                let mut out=Vec::new();
+                for row in f.chunks_exact(3){
+                    let key=number(row[0]) as u32;
+                    let kind=number(row[1]) as u32;
+                    if kind==0{out.push(Vec::new());continue;}
+                    let n=number(row[2]);
+                    let value=match key{
+                        0..=3=>super::cpo_setting_number(key,n),
+                        4|5|10|11=>super::cpo_setting_bool(1,kind.saturating_sub(1)),
+                        6..=9=>super::cpo_setting_bool(0,kind.saturating_sub(1)),
+                        _=>return None
+                    };
+                    out.push(ascii(&value.to_string()));
+                }
+                Some(out)
+            },
+            40=>{ // Installer writes only missing/invalid defaults, not user preferences.
+                if f.len()!=9{return None;}
+                let defaults=[1,50,25,1,0,0,1,1,0];
+                let mut out=Vec::new();
+                for (i,v) in f.iter().enumerate(){
+                    if i==4{
+                        let n=number(v);
+                        if n==0.0||matches!(n,15.0|30.0|60.0){out.push(Vec::new());}
+                        else{out.push(ascii("0"));}
+                    }else if eq(v,"1"){out.push(Vec::new());}
+                    else{out.push(ascii(&defaults[i].to_string()));}
+                }
+                Some(out)
+            },
             _=>None
         }
     }

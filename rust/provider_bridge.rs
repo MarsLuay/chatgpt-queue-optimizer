@@ -1,6 +1,8 @@
 //! Provider cache decisions and last-turn observation. DOM handles remain
 //! call-local and browser-owned. No cached text or DOM pointer lives here.
-use super::{cpo_cache_valid,cpo_cache_ttl,cpo_dom_last_assistant};
+use super::{cpo_cache_valid,cpo_cache_ttl};
+#[cfg(target_arch="wasm32")]
+use super::cpo_dom_last_assistant;
 struct Tokens{next:u32}
 impl Tokens{
     const fn new()->Self{Self{next:1}}

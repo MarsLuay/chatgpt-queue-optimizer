@@ -56,6 +56,7 @@ const FORBIDDEN_TAG: u32 = 4;
 const HAS_MARKER: u32 = 8;
 const HAS_FORM: u32 = 16;
 const HAS_INPUT_OR_FORM: u32 = 32;
+#[cfg(target_arch="wasm32")]
 const THREAD_BOTTOM: u32 = 64;
 const FALLBACK_CONTENT: u32 = 128;
 
@@ -1174,6 +1175,7 @@ fn raw_fact_matching_and_css_tokens(){
 
 // Source strings stay browser-owned. Inspect a bounded UTF-16 stream for
 // application-owned URLs; oversize attributes are protected without copying.
+#[cfg(target_arch="wasm32")]
 const MEDIA_LIMIT:u32=8192;
 const MEDIA_PREFIXES:[&[u8];3]=[b"blob:",b"data:",b"mediasource:"];
 struct MediaScan{boundary:bool,mask:u8,position:usize}

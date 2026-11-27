@@ -1,6 +1,8 @@
 //! Reader state and action guards. One instance per history reader WASM.
 //! Browser handles and awaited effects stay outside linear memory.
-use super::{cpo_reader_buttons,cpo_reader_move,cpo_reader_batch,cpo_reader_continue,cpo_reader_partial,MAX_TURNS,MAX_BYTES,PAGE};
+use super::{cpo_reader_buttons,cpo_reader_move,cpo_reader_batch,MAX_TURNS,MAX_BYTES,PAGE};
+#[cfg(target_arch="wasm32")]
+use super::{cpo_reader_continue,cpo_reader_partial};
 
 struct Reader { ready:bool, busy:bool, page:u32, count:u32, bytes:u32, total:u32, batch:u32, partial:bool }
 impl Reader {

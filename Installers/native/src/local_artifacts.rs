@@ -4,7 +4,7 @@ use std::{fs,path::{Path,PathBuf},io::Read};
 use sha2::{Digest,Sha256};
 use base64::Engine;
 use serde_json::Value;
-const NAME:&str="ChatGPT Queue + Optimizer";
+pub(super) const NAME:&str="ChatGPT Queue + Optimizer";
 const KEY:&str="MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0cV7LPS/vHIVWJGrcghAd2TIgknmbP4Xdq+INlbS8W638gPxBGtZRe0pyh8op8zzg0JrtctPBk7+AKZEg/5Iaa3J8xzh10uWiPUg3w4cqS3FlKeDfCYTzXzUtY3BgX4XlUKy+D8lSBioarW02Q+tY8+TdVB3B0BE7mNIswKCkiKwKSA/2DlkboEE7BdhWnFu8C8XBI7u+uco2xDgvaGdUCn28MEwfI8lxgkTIW6+Sn99pKS4wDQEMKlCGpRevxAg3mD5MBYZoA2C2v8vDfCBNw+4TvlrWuKUb7X5cg0PME1SDq03lWqHxJgXYDm5XHrn6dNO7Wbc4MlstG0XzqxlyQIDAQAB";
 pub(super) fn prepare(repo:&Path,firefox:bool)->Result<(PathBuf,String)>{
     let expected:Value=serde_json::from_slice(&fs::read(repo.join("manifest.json"))?)?;

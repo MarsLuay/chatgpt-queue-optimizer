@@ -787,25 +787,32 @@ const HOST:&str=r####"(() => {
         // structured-clone values that the fast scalar path does not accept.
         return durableObject(raw,1,now,id);
     }
-    function settings(source,mode='optimizer') {
+    const settingKeys=['windowSize','batchSize','resourceBudget','inactiveTabMinutes','enabled','autoScroll','offscreenRendering','adaptiveBudget','evictPausedMedia','queueUnlimitedRetryWait','queueDeepResearchAware','queueDeliveryTimeoutRefresh'];
+    function settings(source,mode='optimizer'){
         if(!core)return null;
+        const indices=mode==='queue'?[9,10,11]:[0,1,2,3,4,5,6,7,8];
+        const fields=[];
+        for(const i of indices){
+            const key=settingKeys[i],value=source[key],present=Object.prototype.hasOwnProperty.call(source,key);
+            const kind=!present?0:i<4?1:value===true?3:value===false?2:1;
+            fields.push(i,kind,i<4&&present?Number(value):0);
+        }
+        const values=batch(39,fields);
+        if(values?.length!==indices.length)return null;
         const out={};
-        const bool=(key,defaultValue)=> {
-            if(Object.prototype.hasOwnProperty.call(source,key)){
-                out[key]=core.cpo_setting_bool(Number(defaultValue),source[key]===true?2:source[key]===false?1:0)===1;
-            }
-        };
-        try{
-            if(mode==='queue'){
-                bool('queueUnlimitedRetryWait',false);bool('queueDeepResearchAware',true);bool('queueDeliveryTimeoutRefresh',true);
-            }else{
-                for(const [i,key] of ['windowSize','batchSize','resourceBudget','inactiveTabMinutes'].entries()){
-                    if(Object.prototype.hasOwnProperty.call(source,key))out[key]=core.cpo_setting_number(i,Number(source[key]))>>>0;
-                }
-                for(const key of ['enabled','autoScroll','offscreenRendering','adaptiveBudget','evictPausedMedia'])bool(key,key==='enabled'||key==='autoScroll');
-            }
-            return out;
-        }catch(error){fail(error);return null;}
+        for(let i=0;i<indices.length;i++)if(values[i]!=='')out[settingKeys[indices[i]]]=indices[i]<4?Number(values[i]):values[i]==='1';
+        return out;
+    }
+    function installationDefaults(source){
+        const keys=['enabled','windowSize','batchSize','autoScroll','inactiveTabMinutes','queueUnlimitedRetryWait','queueDeepResearchAware','queueDeliveryTimeoutRefresh','resourceBudget'];
+        const fields=keys.map((key,i)=>i===4?(source[key]===0?'0':String(Number(source[key])||'invalid')):Number(typeof source[key]===(i===1||i===2||i===8?'number':'boolean')));
+        // resourceBudget is reserved here; preserve the existing install schema.
+        fields[8]=1;
+        const values=batch(40,fields);
+        if(values?.length!==keys.length)return null;
+        const out={};
+        for(let i=0;i<8;i++)if(values[i]!=='')out[keys[i]]=i===1||i===2||i===4?Number(values[i]):values[i]==='1';
+        return out;
     }
     function scheduledActions(status) {
         return call('cpo_popup_schedule_actions',[Math.max(0,['','pending','firing','completed','failed','cancelled'].indexOf(status))]);
@@ -1249,7 +1256,7 @@ const HOST:&str=r####"(() => {
             (Number(!!job.waitForIdleBeforeSend) << 6);
         return call('cpo_queue_next', [flags, phase, job.queue.length]);
     }
-    const api = { diagnosticGroups, waitObservation, scheduledTransaction, scheduledRecoveryPlan, scheduledUpsertPlan, completedRunCount, workerCollection, backgroundWaitTimeout, genericProviderResponse, providerSurface, providerNavigation, providerTurnMetadata, invalidateProviderTurn, providerLastAssistant, providerGenerationState, providerMarker, providerButtons, providerGenerationText, providerDiagnostics, providerTurnSnapshot, providerBoundResponse, providerSemanticButton, classifyFailure, bindingDecision, scheduledMutation, sequenceName, validSequenceName, sequenceVariables, keyboardEvent, localDateParts, localDateMatches, localDateInput, timestampValid, timestampMath, batch, textBatch, scheduledSort, scheduledLookup, scheduledWithout, scheduledDue, identityKey, continuationHandoff, supportedTabs, popupStatus, popupRunningLabel, popupScheduledLabel, popupStats, providerCatalog, diagnosticText, diagnosticPick, sanitizeDiagnostic, createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
+    const api = { diagnosticGroups, waitObservation, scheduledTransaction, scheduledRecoveryPlan, scheduledUpsertPlan, completedRunCount, workerCollection, backgroundWaitTimeout, genericProviderResponse, providerSurface, providerNavigation, providerTurnMetadata, invalidateProviderTurn, providerLastAssistant, providerGenerationState, providerMarker, providerButtons, providerGenerationText, providerDiagnostics, providerTurnSnapshot, providerBoundResponse, providerSemanticButton, classifyFailure, bindingDecision, scheduledMutation, sequenceName, validSequenceName, sequenceVariables, keyboardEvent, localDateParts, localDateMatches, localDateInput, timestampValid, timestampMath, batch, textBatch, scheduledSort, scheduledLookup, scheduledWithout, scheduledDue, identityKey, continuationHandoff, supportedTabs, popupStatus, popupRunningLabel, popupScheduledLabel, popupStats, providerCatalog, diagnosticText, diagnosticPick, sanitizeDiagnostic, createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, installationDefaults, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
     globalThis.CpoQueueEngine = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();
