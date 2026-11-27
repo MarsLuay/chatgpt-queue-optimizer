@@ -10,6 +10,7 @@ mod recovery_effects;
 pub use recovery_effects::cpo_worker_outcome;
 mod background_schedule;
 mod worker_collections;
+mod diagnostic_records;
 mod scheduled_transaction;
 mod durable_projection;
 #[no_mangle]

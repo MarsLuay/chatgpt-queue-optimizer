@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 38);
+    assert.equal(e.cpo_queue_abi(), 39);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -937,4 +937,14 @@ test('native legacy scalar projection and restoration share the wire normalizati
     assert.deepEqual(restored.value.queue,['next','\ud800']);assert.equal(restored.value.runId,'new-run');
     assert.equal(engine.projectDurable({...raw,isPaused:-0.25}).value.isPaused,true);
     assert.equal(engine.deserializeDurable({...raw,isPaused:1},1000).ok,false);
+});
+
+
+test('native diagnostic records serialize and enqueue exactly once',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});engine.install(instance.exports);
+    const entry=engine.appendDiagnostic('id','date',7,'warn','message',{redacted:true});
+    assert.deepEqual(entry,{id:'id',timestamp:'date',tabId:7,level:'warn',message:'message',details:{redacted:true}});
+    assert.deepEqual(engine.workerCollection(1),[entry]);assert.deepEqual(engine.workerCollection(1),[]);
+    const state=engine.diagnosticProviderSummary({hasTryAgainButton:true,matchedError:'  a\tb ',compatibilityState:'  ok '},{phase:'error',source:'test'});
+    assert.equal(state.hasError,true);assert.equal(state.hasTryAgainButton,true);assert.equal(state.matchedSignal,'a b');assert.equal(state.compatibilityState,'ok');
 });

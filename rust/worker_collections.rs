@@ -48,16 +48,20 @@ impl Worker{
         if input.capacity()<=256*1024{self.input=input;}
         result
     }
+    fn append_log(&mut self,entry:Vec<u8>)->bool{
+        if entry.len()>MAX_FRAME-16{return false;}
+        while self.log.len()>=MAX_LOG||self.log_bytes+entry.len()>MAX_FRAME-16{
+            let Some(mut old)=self.log.pop_front()else{return false;};self.log_bytes-=old.len();old.fill(0);
+        }
+        self.log_bytes+=entry.len();self.log.push_back(entry);true
+    }
     fn run_frame(&mut self,op:u32,token:u32,input:&[u8])->u32{
         let Some(f)=fields(input)else{return NONE;};
         match op{
             // Sanitized JSON object frames, retained only until flush.
             0=>{
                 if f.len()!=1||f[0].first()!=Some(&b'{')||f[0].last()!=Some(&b'}')||f[0].len()>MAX_FRAME-16{return NONE;}
-                while self.log.len()>=MAX_LOG||self.log_bytes+f[0].len()>MAX_FRAME-16{
-                    let Some(old)=self.log.pop_front()else{return NONE;};self.log_bytes-=old.len();
-                }
-                self.log_bytes+=f[0].len();self.log.push_back(f[0].to_vec());1
+                if self.append_log(f[0].to_vec()){1}else{NONE}
             },
             1=>{
                 self.output.push(b'[');
@@ -69,6 +73,7 @@ impl Worker{
             },
             2=>{
                 let Some(epoch)=self.log_epoch.checked_add(1).filter(|n|*n!=NONE)else{return NONE;};
+                for entry in &mut self.log{entry.fill(0);}
                 self.log.clear();self.log_bytes=0;self.log_epoch=epoch;epoch
             },
             3=>self.log_epoch,
@@ -201,6 +206,15 @@ impl Worker{
                 if f.len()<n{return NONE;}
                 let Some(projected)=super::durable_projection::project_raw(&f[..n],&f[n..])else{return NONE;};
                 self.output=projected;u32::try_from(self.output.len()).unwrap_or(NONE)
+            },
+            18=>{
+                let Some(entry)=super::diagnostic_records::log_record(&f)else{return NONE;};
+                if !self.append_log(entry.clone()){return NONE;}
+                self.output=entry;self.output.len() as u32
+            },
+            19=>{
+                let Some(entry)=super::diagnostic_records::provider_summary(&f)else{return NONE;};
+                self.output=entry;self.output.len() as u32
             },
             _=>NONE
         }

@@ -94,7 +94,7 @@ const HOST:&str=r####"(() => {
             try{
                 const result=e.cpo_worker_dispatch(op,token)>>>0;
                 if(result===0xffffffff)return null;
-                if(op!==1&&op!==10&&op!==12&&op!==13&&op!==17)return result;
+                if(op!==1&&op!==10&&op!==12&&op!==13&&op!==17&&op!==18&&op!==19)return result;
                 return JSON.parse(workerDecoder.decode(new Uint8Array(e.memory.buffer,e.cpo_worker_output()>>>0,result)));
             }finally{e.cpo_worker_wipe();}
         }catch(error){fail(error);return null;}
@@ -1140,6 +1140,19 @@ const HOST:&str=r####"(() => {
             try{return String.fromCharCode(...units);}finally{units.fill(0);}
         }catch(error){fail(error);return null;}
     }
+    function appendDiagnostic(id,timestamp,tabId,level,message,details){
+        return workerCollection(18,0,[id,timestamp,tabId,level,message,details].map(v=>JSON.stringify(v)??'null'));
+    }
+    function diagnosticProviderSummary(state={},response={}){
+        state=state||{};response=response||{};
+        const flags=Number(response.generating===true||state.generating===true)|
+            (Number(response.deepResearchActive===true||state.deepResearchActive===true)<<1)|
+            (Number(state.hasError===true)<<2)|(Number(state.hasTryAgainButton===true)<<3)|
+            (Number(state.hasDeliveryTimedOut===true)<<4)|(Number(state.conversationCapacityReached===true)<<5)|
+            (Number(state.requiresNewConversation===true)<<6);
+        return workerCollection(19,0,[String(flags),...[response.phase,state.phase,response.source,state.compatibilityState,
+            state.matchedSignals?.error,state.matchedError].map(v=>JSON.stringify(String(v||'')))]);
+    }
     function diagnosticGroups(groups,limit=160){
         const fields=[];
         for(const group of groups)fields.push(limit,group.length,...group.map(v=>v?String(v):''));
@@ -1279,7 +1292,7 @@ const HOST:&str=r####"(() => {
             (Number(!!job.waitForIdleBeforeSend) << 6);
         return call('cpo_queue_next', [flags, phase, job.queue.length]);
     }
-    const api = { diagnosticGroups, waitObservation, scheduledTransaction, scheduledRecoveryPlan, scheduledUpsertPlan, completedRunCount, workerCollection, backgroundWaitTimeout, genericProviderResponse, providerSurface, providerNavigation, providerTurnMetadata, invalidateProviderTurn, providerLastAssistant, providerGenerationState, providerMarker, providerButtons, providerGenerationText, providerDiagnostics, providerTurnSnapshot, providerBoundResponse, providerSemanticButton, classifyFailure, bindingDecision, scheduledMutation, sequenceName, validSequenceName, sequenceVariables, keyboardEvent, localDateParts, localDateMatches, localDateInput, timestampValid, timestampMath, batch, textBatch, scheduledSort, scheduledLookup, scheduledWithout, scheduledDue, identityKey, continuationHandoff, supportedTabs, popupStatus, popupRunningLabel, popupScheduledLabel, popupStats, providerCatalog, diagnosticText, diagnosticPick, sanitizeDiagnostic, createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, installationDefaults, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
+    const api = { appendDiagnostic, diagnosticProviderSummary, diagnosticGroups, waitObservation, scheduledTransaction, scheduledRecoveryPlan, scheduledUpsertPlan, completedRunCount, workerCollection, backgroundWaitTimeout, genericProviderResponse, providerSurface, providerNavigation, providerTurnMetadata, invalidateProviderTurn, providerLastAssistant, providerGenerationState, providerMarker, providerButtons, providerGenerationText, providerDiagnostics, providerTurnSnapshot, providerBoundResponse, providerSemanticButton, classifyFailure, bindingDecision, scheduledMutation, sequenceName, validSequenceName, sequenceVariables, keyboardEvent, localDateParts, localDateMatches, localDateInput, timestampValid, timestampMath, batch, textBatch, scheduledSort, scheduledLookup, scheduledWithout, scheduledDue, identityKey, continuationHandoff, supportedTabs, popupStatus, popupRunningLabel, popupScheduledLabel, popupStats, providerCatalog, diagnosticText, diagnosticPick, sanitizeDiagnostic, createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, installationDefaults, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
     globalThis.CpoQueueEngine = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();

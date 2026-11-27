@@ -1928,30 +1928,10 @@ function collectDeliveryDiagnostics(job, extra = {}) {
         deliveryState,submissionAckSource,terminalAckSource,...turnIdentity,lastResponsePhase,commandFingerprint,turnIdentity};
 }
 
-function summarizeProviderState(state = {}, responseState = {}) {
-    /** @type {Record<string, any>} */
-    const generation = state && typeof state === 'object' ? state : {};
-    /** @type {Record<string, any>} */
-    const response = responseState && typeof responseState === 'object' ? responseState : {};
-    /** @type {Record<string, any>} */
-    const matchedSignals = generation.matchedSignals && typeof generation.matchedSignals === 'object'
-        ? generation.matchedSignals
-        : {};
-
-    return {
-        phase: String(response.phase || generation.phase || ''),
-        source: String(response.source || ''),
-        generating: response.generating === true || generation.generating === true,
-        deepResearchActive: response.deepResearchActive === true || generation.deepResearchActive === true,
-        hasError: generation.hasError === true || response.phase === 'error',
-        hasTryAgainButton: generation.hasTryAgainButton === true,
-        hasDeliveryTimedOut: generation.hasDeliveryTimedOut === true,
-        conversationCapacityReached: generation.conversationCapacityReached === true,
-        requiresNewConversation: generation.requiresNewConversation === true,
-        compatibilityState: boundedDiagnosticValue(generation.compatibilityState || ''),
-        matchedSignal: boundedDiagnosticValue(
-            matchedSignals.error || generation.matchedError || response.source || ''
-        )
+function summarizeProviderState(state={},responseState={}){
+    return globalThis.CpoQueueEngine?.diagnosticProviderSummary(state,responseState)||{
+        phase:'',source:'',generating:false,deepResearchActive:false,hasError:false,hasTryAgainButton:false,
+        hasDeliveryTimedOut:false,conversationCapacityReached:false,requiresNewConversation:false,compatibilityState:'',matchedSignal:''
     };
 }
 
@@ -3079,14 +3059,10 @@ function notifyRuntime(message) {
 }
 
 function logQueueEvent(tabId, level, message, details = {}) {
-    const entry = {
-        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-        timestamp: new Date().toISOString(),
-        tabId: tabId || '',
-        level: level || 'info',
-        message: message || 'Queue event',
-        details: sanitizeLogValue(details)
-    };
+    const id=Date.now()+'-'+Math.random().toString(16).slice(2);
+    const timestamp=new Date().toISOString(),safeDetails=sanitizeLogValue(details);
+    const nativeEntry=globalThis.CpoQueueEngine?.appendDiagnostic(id,timestamp,tabId||'',level||'info',message||'Queue event',safeDetails);
+    const entry=nativeEntry||{id,timestamp,tabId:tabId||'',level:level||'info',message:message||'Queue event',details:safeDetails};
 
     const consoleMessage = `[ChatGPT Queue] ${entry.message}`;
 
@@ -3098,7 +3074,7 @@ function logQueueEvent(tabId, level, message, details = {}) {
         console.log(consoleMessage, entry.details);
     }
 
-    if(workerCollection(0,0,[JSON.stringify(entry)])!==1){
+    if(!nativeEntry&&workerCollection(0,0,[JSON.stringify(entry)])!==1){
         emergencyQueueLogEntries.push(entry);
         if(emergencyQueueLogEntries.length>MAX_QUEUE_DEBUG_LOG_ENTRIES)emergencyQueueLogEntries.shift();
     }
