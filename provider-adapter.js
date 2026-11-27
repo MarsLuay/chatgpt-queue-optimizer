@@ -711,6 +711,11 @@
             this._turnScanCache = new WeakMap();
             this._turnListCache = null;
             this._turnListCacheTimer = null;
+            this._nativeMessageDiscovery = null;
+        }
+
+        setNativeMessageDiscovery(discover) {
+            this._nativeMessageDiscovery = typeof discover === 'function' ? discover : null;
         }
 
         clearTurnListCache() {
@@ -821,6 +826,12 @@
                 };
             }
 
+            // The browser execution module returns null only when unavailable
+            // or failed; an empty successful result is authoritative.
+            if (this._nativeMessageDiscovery) {
+                const native = this._nativeMessageDiscovery(this, doc, mainRoot);
+                if (native) return native;
+            }
             const collected = [];
             let matchedSelector = null;
             const combinedSelector = this.selectors.messages.join(',');
