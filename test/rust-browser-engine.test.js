@@ -23,7 +23,7 @@ async function engine(optimizer = owner()) {
         cpo: { host: (op, a, b, c) => bridge.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
     });
     bridge.exports = result.instance.exports;
-    assert.equal(bridge.exports.cpo_browser_abi(), 6);
+    assert.equal(bridge.exports.cpo_browser_abi(), 7);
     return bridge;
 }
 
@@ -311,4 +311,38 @@ test('native sequence import and substitution preserve supported formats', {skip
     assert.equal(bridge.eventReady(1,true),true);
     assert.equal(bridge.eventReady(2,false),false);
     assert.equal(bridge.context,null);
+});
+
+test('native recovery reveals partially mutated turns and recovers moved media without overwriting new sources', {skip}, async()=>{
+    const optimizer=owner();
+    const bridge=await engine(optimizer);
+    const classes=new Set(['cpo-hidden','cpo-offscreen']);
+    const img=element({src:'old.png',srcset:'old2.png 2x'});
+    const moved=element({src:'moved.png'});
+    const changed=element({src:'original.png'});
+    const turn={classList:{contains:key=>classes.has(key),add:key=>classes.add(key),remove:key=>classes.delete(key)},
+        querySelectorAll:selector=>selector==='img'?[img]:[]};
+    assert.equal(optimizer.stashSources(img,['src','srcset']),true);
+    assert.equal(optimizer.stashSources(moved,['src']),true);
+    assert.equal(optimizer.stashSources(changed,['src']),true);
+    changed.setAttribute('src','application-new.png');
+    assert.equal(bridge.restoreWindow([turn]),true);
+    assert.equal(classes.size,0);
+    assert.equal(img.getAttribute('src'),'old.png');
+    assert.equal(img.getAttribute('srcset'),'old2.png 2x');
+    assert.equal(bridge.restoreJournal([...optimizer.mediaJournal]),true);
+    assert.equal(moved.getAttribute('src'),'moved.png');
+    assert.equal(changed.getAttribute('src'),'application-new.png');
+    assert.equal(optimizer.mediaJournal.size,0);
+    assert.equal(bridge.context,null);
+});
+
+test('emergency journal rollback works with an unavailable WASM runtime',()=>{
+    const optimizer=owner();
+    const img=element({src:'old.png'});
+    optimizer.stashSources(img,['src']);
+    assert.equal(img.hasAttribute('src'),false);
+    optimizer.restoreMediaJournal();
+    assert.equal(img.getAttribute('src'),'old.png');
+    assert.equal(optimizer.mediaJournal.size,0);
 });
