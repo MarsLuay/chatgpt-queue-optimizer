@@ -81,6 +81,22 @@ fn inspect(bytes:&[u8])->Result<BTreeMap<String,Signature>>{
     if exports.get("cpo_browser_abi").map(|s|s.params.len())!=Some(0){return Err(err("Missing browser ABI version function"));}
     Ok(exports)
 }
+pub(super) fn queue_exports(bytes:&[u8])->Result<Vec<String>>{
+    if !bytes.starts_with(b"\0asm\x01\0\0\0"){return Err(err("Invalid queue WASM header"));}
+    let mut file=Reader::new(&bytes[8..]);let mut names=std::collections::BTreeSet::new();let mut memory=false;
+    while !file.end(){
+        let section=file.byte()?;let length=file.leb()? as usize;let mut s=Reader::new(file.take(length)?);
+        if section!=7{continue;}
+        for _ in 0..s.leb()?{
+            let name=s.name()?;let kind=s.byte()?;let _index=s.leb()?;
+            if name=="memory"&&kind==2{memory=true;}
+            if name.starts_with("cpo_")&&(kind!=0||!names.insert(name.to_owned())){return Err(err("Invalid queue WASM export"));}
+        }
+        if !s.end(){return Err(err("Invalid queue export framing"));}
+    }
+    if !memory||!names.contains("cpo_queue_abi"){return Err(err("Missing queue WASM ABI or memory"));}
+    Ok(names.into_iter().collect())
+}
 fn verify_bridge(source:&str,exports:&BTreeMap<String,Signature>)->Result<()>{
     // Catch a missing export before packaging. Only browser-core receivers
     // are inspected, excluding unrelated queue-engine string dispatch.

@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 20);
+    assert.equal(e.cpo_queue_abi(), 21);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -627,4 +627,23 @@ test('generic provider response delegates lazy observation and complete projecti
     assert.equal(error.state.source,'delivery-timeout');
     assert.equal(error.state.generating,false);
     assert.equal(engine.genericProviderResponse(binding,{generating:true}).state.phase,'active');
+});
+
+test('bulk queue operations commit one revision and use native dispatch',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    const jobs=engine.createLiveJobs();
+    jobs.set(1,{tabId:1,queue:['b'],isRunning:true});
+    const job=jobs.get(1);
+    const epoch=jobs.revision();
+    assert.equal(job.queue.push('c','d'),3);
+    assert.equal(jobs.revision(),epoch+1);
+    assert.equal(job.queue.unshift('a','a2'),5);
+    job.queue.splice(2,0,'insert');
+    assert.deepEqual([...job.queue],['a','a2','insert','b','c','d']);
+    assert.equal(engine.next(job,false),9);
+    assert.equal(job.queue.shift(),'a');
+    assert.equal(engine.confirmed(job),0);
+    assert.throws(()=>job.queue.push('valid',123),/string/);
+    assert.deepEqual([...job.queue],['a2','insert','b','c','d']);
 });

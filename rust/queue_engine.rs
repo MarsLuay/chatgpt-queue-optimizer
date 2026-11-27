@@ -1,11 +1,13 @@
 //! Queue execution decisions and streaming legacy-compatible UTF-16 fingerprints.
 
 mod browser_api;
+mod queue_schema;
+use queue_schema::DURABLE_FIELDS;
 use browser_api::API_EVENTS;
 pub use browser_api::{cpo_api_mode,cpo_api_path,cpo_injection_route,cpo_async_transition};
 
 #[no_mangle]
-pub extern "C" fn cpo_queue_abi() -> u32 { 20 }
+pub extern "C" fn cpo_queue_abi() -> u32 { queue_schema::ABI }
 
 const OFFSET: u32 = 2166136261;
 const PRIME: u32 = 16777619;
@@ -513,60 +515,7 @@ pub extern "C" fn cpo_tab_close_action(flags: u32) -> u32 {
 // The durable schema is native-owned. The browser receives only field names,
 // conversion instructions and scalar results, never a retained copy of a job.
 // Mode 0 projects a live job, mode 1 reconstructs a stored job.
-struct DurableField { name: &'static str, project: u32, restore: u32 }
-const DURABLE_FIELDS: &[DurableField] = &[
-    DurableField { name: "tabId", project: 18, restore: 18 },
-    DurableField { name: "provider", project: 8, restore: 8 },
-    DurableField { name: "conversationId", project: 2, restore: 2 },
-    DurableField { name: "conversationType", project: 9, restore: 9 },
-    DurableField { name: "targetKey", project: 10, restore: 10 },
-    DurableField { name: "queue", project: 6, restore: 6 },
-    DurableField { name: "currentMessage", project: 7, restore: 7 },
-    DurableField { name: "isRunning", project: 13, restore: 13 },
-    DurableField { name: "isPaused", project: 4, restore: 3 },
-    DurableField { name: "isStopped", project: 14, restore: 14 },
-    DurableField { name: "pausedReason", project: 1, restore: 1 },
-    DurableField { name: "lastError", project: 1, restore: 1 },
-    DurableField { name: "runId", project: 11, restore: 11 },
-    DurableField { name: "totalMessages", project: 17, restore: 17 },
-    DurableField { name: "completedCount", project: 5, restore: 5 },
-    DurableField { name: "currentCommandNumber", project: 5, restore: 5 },
-    DurableField { name: "currentPhase", project: 12, restore: 12 },
-    DurableField { name: "waitForIdleBeforeSend", project: 3, restore: 3 },
-    DurableField { name: "deliveryTimeoutAttempts", project: 5, restore: 5 },
-    DurableField { name: "retryAttemptCount", project: 5, restore: 5 },
-    DurableField { name: "lastRetryableReason", project: 1, restore: 1 },
-    DurableField { name: "retryClass", project: 1, restore: 1 },
-    DurableField { name: "retryMode", project: 15, restore: 15 },
-    DurableField { name: "nextRetryDelayMs", project: 5, restore: 5 },
-    DurableField { name: "nextRetryAt", project: 5, restore: 5 },
-    DurableField { name: "retryExhausted", project: 3, restore: 3 },
-    DurableField { name: "waitStartedAt", project: 5, restore: 5 },
-    DurableField { name: "lastResearchProgressAt", project: 5, restore: 5 },
-    DurableField { name: "sawDeepResearch", project: 3, restore: 3 },
-    DurableField { name: "sawGenerating", project: 3, restore: 3 },
-    DurableField { name: "deliveryState", project: 1, restore: 1 },
-    DurableField { name: "commandId", project: 1, restore: 1 },
-    DurableField { name: "commandFingerprint", project: 1, restore: 1 },
-    DurableField { name: "submittedUserTurnId", project: 2, restore: 2 },
-    DurableField { name: "assistantTurnId", project: 2, restore: 2 },
-    DurableField { name: "submissionAckSource", project: 1, restore: 1 },
-    DurableField { name: "terminalAckSource", project: 1, restore: 1 },
-    DurableField { name: "lastResponsePhase", project: 1, restore: 1 },
-    DurableField { name: "rolloverInProgress", project: 3, restore: 3 },
-    DurableField { name: "rolloverStage", project: 1, restore: 1 },
-    DurableField { name: "rolloverReason", project: 1, restore: 1 },
-    DurableField { name: "rolloverFromConversationId", project: 2, restore: 2 },
-    DurableField { name: "rolloverToConversationId", project: 2, restore: 2 },
-    DurableField { name: "rolloverNavigationStarted", project: 3, restore: 3 },
-    DurableField { name: "rolloverRebindApplied", project: 3, restore: 3 },
-    DurableField { name: "handoffSubmitted", project: 3, restore: 3 },
-    DurableField { name: "handoffEstablished", project: 3, restore: 3 },
-    DurableField { name: "handoffFingerprint", project: 1, restore: 1 },
-    DurableField { name: "conversationGeneration", project: 5, restore: 5 },
-    DurableField { name: "startedAt", project: 16, restore: 16 },
-    DurableField { name: "updatedAt", project: 16, restore: 16 },
-];
+
 #[no_mangle]
 pub extern "C" fn cpo_durable_field_count() -> u32 { DURABLE_FIELDS.len() as u32 }
 #[no_mangle]
@@ -1055,6 +1004,66 @@ mod live_state {
             true
         }
 
+        // Atomic length-prefixed queue update. The host supplies JSON string
+        // bytes so ECMAScript lone-surrogate semantics remain unchanged.
+        fn bulk(&mut self,id:u32,op:u32,index:u32)->u32 {
+            let input=std::mem::take(&mut self.input);
+            let Some(job)=self.jobs.get_mut(&id) else{return 0;};
+            if !matches!(op,1..=3)||op==3&&index as usize>job.queue.len(){return 0;}
+            let mut items=Vec::new();let mut at=0usize;
+            while at<input.len(){
+                let Some(header)=input.get(at..at+4) else{return 0;};
+                let len=u32::from_le_bytes(header.try_into().unwrap()) as usize;
+                at+=4;
+                let Some(end)=at.checked_add(len) else{return 0;};
+                let Some(value)=input.get(at..end) else{return 0;};
+                if len<2||value.first()!=Some(&b'"')||value.last()!=Some(&b'"'){return 0;}
+                items.push(value.to_vec());at=end;
+            }
+            let Some(length)=job.queue.len().checked_add(items.len()).and_then(|v|u32::try_from(v).ok()).and_then(|v|v.checked_add(1)) else{return 0;};
+            if items.is_empty(){return length;}
+            match op {
+                1=>job.queue.extend(items),
+                2=>for value in items.into_iter().rev(){job.queue.push_front(value);},
+                3=>{let mut tail=job.queue.split_off(index as usize);job.queue.extend(items);job.queue.append(&mut tail);},
+                _=>unreachable!()
+            }
+            self.changed(id);length
+        }
+        fn pop(&mut self,id:u32)->u32 {
+            self.output.fill(0);self.output.clear();
+            let Some(job)=self.jobs.get_mut(&id) else{return 0;};
+            let Some(value)=job.queue.pop_front() else{return 0;};
+            self.output=value;
+            self.changed(id);
+            u32::try_from(self.output.len()).ok().and_then(|v|v.checked_add(1)).unwrap_or(0)
+        }
+        fn decision(&self,id:u32,kind:u32,confirmed:u32)->u32 {
+            let Some(j)=self.jobs.get(&id) else{return u32::MAX;};
+            match kind {
+                0=>j.confirmed() as u32,
+                1=>{
+                    let phase=match j.get("currentPhase"){
+                        b"\"terminal\""=>1,b"\"waiting\""|b"\"awaiting-response\""|b"\"active-response\""=>2,
+                        b"\"retry-wait\""=>3,b"\"rollover-in-progress\""=>4,_=>0
+                    };
+                    let flags=(j.truth("isRunning") as u32)|((j.truth("isPaused") as u32)<<1)|
+                        ((j.truth("isStopped") as u32)<<2)|((j.truth("currentMessage") as u32)<<3)|
+                        (((confirmed!=0) as u32)<<4)|((j.truth("rolloverInProgress") as u32)<<5)|
+                        ((j.truth("waitForIdleBeforeSend") as u32)<<6);
+                    super::cpo_queue_next(flags,phase,j.queue.len() as u32)
+                },
+                2=>{
+                    let phase=match j.get("currentPhase"){b"\"waiting\""=>1,b"\"sending\""|b"\"awaiting-submission-ack\""=>2,b"\"terminal\""=>3,_=>0};
+                    let delivery=j.get("deliveryState");
+                    let flags=(confirmed!=0) as u32|(((delivery==b"\"terminal-awaiting-bookkeeping\"") as u32)<<1)|
+                        (((matches!(delivery,b"\"pre-click\""|b"\"unknown-acceptance\"")) as u32)<<2)|
+                        ((j.truth("currentMessage") as u32)<<3);
+                    super::cpo_restore_action(phase,flags)
+                },_=>u32::MAX
+            }
+        }
+
         // A complete transition validates its frame and preconditions before
         // changing the deque or fields, then advances the revision once.
         fn transaction(&mut self,id:u32,op:u32,arg:u32,now:f64)->bool{
@@ -1220,6 +1229,18 @@ mod live_state {
         STORE.with(|s| s.borrow_mut().mutate(id,field,op,index) as u32)
     }
     #[no_mangle]
+    pub extern "C" fn cpo_live_bulk(id:u32,op:u32,index:u32)->u32{
+        STORE.with(|s|s.borrow_mut().bulk(id,op,index))
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_live_pop(id:u32)->u32{
+        STORE.with(|s|s.borrow_mut().pop(id))
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_live_decision(id:u32,kind:u32,confirmed:u32)->u32{
+        STORE.with(|s|s.borrow().decision(id,kind,confirmed))
+    }
+    #[no_mangle]
     pub extern "C" fn cpo_live_transaction(id:u32,op:u32,arg:u32,now:f64)->u32{
         STORE.with(|s|s.borrow_mut().transaction(id,op,arg,now) as u32)
     }
@@ -1242,6 +1263,25 @@ mod live_state {
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[test]
+        fn bulk_mutations_are_ordered_and_atomic(){
+            let mut s=Store::default();let id=s.create();
+            fn frame(items:&[&[u8]])->Vec<u8>{
+                let mut out=Vec::new();
+                for item in items{out.extend_from_slice(&(item.len() as u32).to_le_bytes());out.extend_from_slice(item);}
+                out
+            }
+            s.input=frame(&[b"\"b\"",b"\"c\""]);
+            let epoch=s.epoch;assert_eq!(s.bulk(id,1,0),3);assert_eq!(s.epoch,epoch+1);
+            s.input=frame(&[b"\"a\"",b"\"a2\""]);assert_eq!(s.bulk(id,2,0),5);
+            s.input=frame(&[b"\"insert\""]);assert_eq!(s.bulk(id,3,2),6);
+            s.input=frame(&[b"\"valid\"",b"invalid"]);let epoch=s.epoch;
+            assert_eq!(s.bulk(id,1,0),0);assert_eq!(s.epoch,epoch);
+            s.read(id,QUEUE as u32,u32::MAX);assert_eq!(s.output,b"[\"a\",\"a2\",\"insert\",\"b\",\"c\"]");
+            assert_eq!(s.pop(id),4);assert_eq!(s.output,b"\"a\"");
+            s.input=b"true".to_vec();assert!(s.mutate(id,field("isRunning") as u32,0,0));
+            assert_eq!(s.decision(id,1,0),9);
+        }
         #[test]
         fn deque_order_and_checkpoint_invalidation() {
             let mut s = Store::default();
