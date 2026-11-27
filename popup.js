@@ -4,6 +4,16 @@
 function getPopupQueueStatusLabel(job = {}) {
     const status = String(job.status || '').trim().toLowerCase();
     const phase = String(job.currentPhase || '').trim().toLowerCase();
+    const either=values=>values.includes(status)||values.includes(phase);
+    const flags=Number(either(['complete','completed','done','finished'])) |
+        (Number(either(['failed','error']))<<1) | (Number(!!job.isPaused||status==='paused')<<2) |
+        (Number(either(['retrying','retry-wait','retry_wait']))<<3) |
+        (Number(['rollover-in-progress','rollover','conversation-rollover'].includes(phase)||!!job.rolloverInProgress)<<4) |
+        (Number(!!job.waitForIdleBeforeSend||['waiting-for-idle','wait-for-idle','waiting_idle'].includes(phase))<<5) |
+        (Number(['waiting','wait'].includes(phase))<<6) | (Number(['sending','send'].includes(phase))<<7) |
+        (Number(phase==='queued')<<8) | (Number(status==='stopped')<<9);
+    const native=globalThis.CpoQueueEngine?.call('cpo_popup_status',[flags]);
+    if(native!=null)return ['Complete','Failed','Paused','Retrying','New conversation','Waiting for idle','Waiting','Sending','Queued','Stopped','Running'][native];
 
     if (
         ['complete', 'completed', 'done', 'finished'].includes(status) ||
@@ -137,6 +147,7 @@ if (typeof module !== 'undefined' && module.exports) {
 }
 
 document.addEventListener('DOMContentLoaded', function () {
+    globalThis.CpoQueueEngine?.load();
     const queueToolTab = document.getElementById('queue-tool-tab');
     const scheduledToolTab = document.getElementById('scheduled-tool-tab');
     const optimizerToolTab = document.getElementById('optimizer-tool-tab');
@@ -1669,7 +1680,7 @@ document.addEventListener('DOMContentLoaded', function () {
         ].join('|');
         const now = Date.now();
 
-        if (signature === lastOptimizerLogSignature && now - lastOptimizerLogAt < dedupeMs) {
+        if ((globalThis.CpoQueueEngine?.numeric('cpo_log_duplicate',[Number(signature===lastOptimizerLogSignature),now-lastOptimizerLogAt,dedupeMs]) ?? Number(signature === lastOptimizerLogSignature && now - lastOptimizerLogAt < dedupeMs)) === 1) {
             return;
         }
 
@@ -1784,7 +1795,7 @@ document.addEventListener('DOMContentLoaded', function () {
     function updateMessagesToGoFooter(runningJobs) {
         if (!messagesToGoFooter) return;
 
-        const totalRemaining = Object.values(runningJobs || {}).reduce((sum, job) => {
+        const totalRemaining = globalThis.CpoQueueEngine?.remaining(runningJobs) ?? Object.values(runningJobs || {}).reduce((sum, job) => {
             return sum + Number(job.remaining || 0);
         }, 0);
 
@@ -2183,7 +2194,8 @@ The sequence should do the following: `;
         });
     }
 
-    function loadQueueSettings() {
+    async function loadQueueSettings() {
+        await globalThis.CpoQueueEngine?.load();
         if (!queueDeepResearchAware || !queueUnlimitedRetryWait || !queueDeliveryTimeoutRefresh) {
             return;
         }
@@ -2195,6 +2207,7 @@ The sequence should do the following: `;
                 queueDeliveryTimeoutRefresh: true
             },
             function (config) {
+                config=globalThis.CpoQueueEngine?.settings(config,'queue')??config;
                 queueDeepResearchAware.checked = config.queueDeepResearchAware !== false;
                 queueUnlimitedRetryWait.checked = config.queueUnlimitedRetryWait === true;
                 queueDeliveryTimeoutRefresh.checked = config.queueDeliveryTimeoutRefresh !== false;
@@ -2217,6 +2230,7 @@ The sequence should do the following: `;
     }
 
     async function loadOptimizerSettings() {
+        await globalThis.CpoQueueEngine?.load();
         if (
             !optimizerStatus ||
             !optimizerWindowSize ||
@@ -2241,6 +2255,7 @@ The sequence should do the following: `;
                 inactiveTabMinutes: 0
             },
             async function (config) {
+                config=globalThis.CpoQueueEngine?.settings(config)??config;
                 optimizerWindowSize.value = config.windowSize;
                 optimizerBatchSize.value = config.batchSize;
                 optimizerAutoScroll.checked = config.autoScroll;
@@ -2297,6 +2312,7 @@ The sequence should do the following: `;
                 newConfig.batchSize = 25;
             }
 
+            Object.assign(newConfig,globalThis.CpoQueueEngine?.settings(newConfig)??{});
             await setSyncStorage(newConfig);
 
             const tab = await getOptimizerTargetTab();
