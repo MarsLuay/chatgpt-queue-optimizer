@@ -21,10 +21,10 @@
                     cpo: { host: (op, a, b, c) => this.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
                 });
                 const core = result.instance.exports;
-                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 2 ||
+                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 3 ||
                     !['cpo_collect_resources', 'cpo_discover_messages', 'cpo_execute_media',
                         'cpo_apply_window', 'cpo_window_visible', 'cpo_capture_history', 'cpo_process_mutations',
-                        'cpo_cache_ttl', 'cpo_cache_valid', 'cpo_cache_nodes_valid', 'cpo_mutation_delay'].every(name => typeof core[name] === 'function')) {
+                        'cpo_cache_ttl', 'cpo_cache_valid', 'cpo_cache_nodes_valid', 'cpo_mutation_delay', 'cpo_provider_selectors'].every(name => typeof core[name] === 'function')) {
                     throw new Error('Browser WASM ABI mismatch');
                 }
                 this.exports = core;
@@ -133,6 +133,14 @@
         mutations(mutations, mode, empty = false, adapter = null) {
             return this.invoke({ mutations, adapter, dirty: new WeakSet() }, core =>
                 core.cpo_process_mutations(mutations.length, mode, Number(!!empty)) === 1);
+        }
+
+        providerSelectors(root, selectors, signalKey, predicate, firstOnly = false) {
+            return this.invoke({ root, selectors, signalKey, predicate, seen: new Set(), matches: [] }, (core,ctx) => {
+                const count = core.cpo_provider_selectors(selectors.length, Number(firstOnly));
+                if (count !== ctx.matches.length) throw new Error('Provider selector result mismatch');
+                return ctx.matches;
+            });
         }
 
         handle(node) {
@@ -384,6 +392,28 @@
                     return 1;
                 }
                 case 74: return Number(!!ctx.nodes[a] && ctx.nodes[a].isConnected !== false);
+                case 80: {
+                    const selector = ctx.selectors[a];
+                    try {
+                        ctx.candidates = [];
+                        if (ctx.root.matches?.(selector) || ctx.root.closest?.(selector) === ctx.root) ctx.candidates.push(ctx.root);
+                        if (typeof ctx.root.querySelectorAll === 'function') {
+                            for (const node of ctx.root.querySelectorAll(selector)) ctx.candidates.push(node);
+                        }
+                    } catch { ctx.candidates = []; }
+                    return ctx.candidates.length;
+                }
+                case 81: {
+                    const element = ctx.candidates[a];
+                    if (ctx.seen.has(element)) return 1;
+                    return !ctx.predicate || ctx.predicate(element,ctx.selectors[b]) ? 2 : 0;
+                }
+                case 82: {
+                    const element = ctx.candidates[a];
+                    ctx.seen.add(element);
+                    ctx.matches.push({element, selector: ctx.selectors[b], signalKey: ctx.signalKey});
+                    return 1;
+                }
                 default: throw new Error('Unknown Rust browser host operation: ' + op);
             }
         }
