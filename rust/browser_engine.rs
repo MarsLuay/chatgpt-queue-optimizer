@@ -35,6 +35,7 @@ pub use popup_controller::cpo_popup_control;
 pub use content_controller::{cpo_content_route,cpo_content_guard,cpo_content_history_offset,cpo_content_mutation};
 #[cfg(target_arch="wasm32")]
 pub use content_controller::cpo_content_control;
+#[cfg_attr(not(target_arch="wasm32"),allow(dead_code))]
 #[path="dom_facts.rs"]
 mod dom_facts;
 

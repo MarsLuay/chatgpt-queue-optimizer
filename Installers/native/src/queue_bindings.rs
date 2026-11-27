@@ -94,7 +94,7 @@ const HOST:&str=r####"(() => {
             try{
                 const result=e.cpo_worker_dispatch(op,token)>>>0;
                 if(result===0xffffffff)return null;
-                if(op!==1&&op!==10&&op!==12&&op!==13)return result;
+                if(op!==1&&op!==10&&op!==12&&op!==13&&op!==17)return result;
                 return JSON.parse(workerDecoder.decode(new Uint8Array(e.memory.buffer,e.cpo_worker_output()>>>0,result)));
             }finally{e.cpo_worker_wipe();}
         }catch(error){fail(error);return null;}
@@ -761,32 +761,55 @@ const HOST:&str=r####"(() => {
         if(!core)return null;
         try{return durableTrim(String(value??''));}catch(error){fail(error);return null;}
     }
-    function projectDurable(job){return durableObject(job,0);}
+    function marshalDurable(raw,mode){
+        if(!raw||typeof raw!=='object'||Array.isArray(raw))return null;
+        const read=name=>Object.prototype.hasOwnProperty.call(raw,name)?raw[name]:undefined;
+        const queue=read('queue');
+        if(queue!=null&&!Array.isArray(queue))return null;
+        const prompts=[];
+        for(const value of queue||[]){
+            if(typeof value!=='string')return null;
+            prompts.push(JSON.stringify(value));
+        }
+        const fields=[];
+        for(const field of schemaDescriptor){
+            if(field.name==='queue'){fields.push('');continue;}
+            const value=read(field.name),rule=mode===0?field.project:field.restore;
+            // Structured-clone truthiness for old projection-only flags.
+            // No coercion of objects into strings or counters.
+            if(mode===0&&[3,4,13,14].includes(rule)){
+                fields.push(value===true?'true':value===false?'false':value==null?'null':value?'1':'0');
+            }else{
+                if(value!=null&&typeof value!=='string'&&typeof value!=='boolean'&&!(typeof value==='number'&&Number.isFinite(value)))return null;
+                fields.push(value===undefined?'':JSON.stringify(value));
+            }
+        }
+        return {fields,prompts,missingRun:read('runId')==null||read('runId')===''};
+    }
+    function projectDurable(job){
+        if(!core)return null;
+        const wire=marshalDurable(job,0);
+        if(wire){
+            const value=workerCollection(17,0,[...wire.fields,...wire.prompts]);
+            if(value!=null)return {ok:true,value};
+        }
+        // Keep the unbounded per-field compatibility path for unusually large
+        // jobs and precise validation messages for invalid legacy fields.
+        return durableObject(job,0);
+    }
     function deserializeDurable(raw,now=Date.now(),createId=()=>crypto.randomUUID()){
         if(!core)return null;
         if(!raw||typeof raw!=='object'||Array.isArray(raw))return {ok:false,error:'Invalid durable job'};
         let generated,generatedOnce=false;
         const id=()=>{if(!generatedOnce){generated=createId();generatedOnce=true;}return generated;};
-        const queue=raw.queue;
-        const scalarSafe=schemaDescriptor.every(field=>{
-            if(field.name==='queue')return true;
-            const value=raw[field.name];
-            return value==null||typeof value==='string'||typeof value==='boolean'||typeof value==='number'&&Number.isFinite(value);
-        });
-        if(scalarSafe&&(queue==null||Array.isArray(queue))&&(queue||[]).every(v=>typeof v==='string')){
-            const fields=schemaDescriptor.map(field=>{
-                if(field.name==='queue')return '';
-                const value=Object.prototype.hasOwnProperty.call(raw,field.name)?raw[field.name]:undefined;
-                return value===undefined?'':JSON.stringify(value)??'';
-            });
-            const missingRun=raw.runId==null||raw.runId==='';
-            const restored=workerCollection(12,0,[String(now),'"__native_missing_run__"',...fields,...(queue||[]).map(v=>JSON.stringify(v))]);
-            if(restored!=null){if(missingRun)restored.runId=id();return {ok:true,value:restored};}
+        const wire=marshalDurable(raw,1);
+        if(wire){
+            const restored=workerCollection(12,0,[String(now),'"__native_missing_run__"',...wire.fields,...wire.prompts]);
+            if(restored!=null){if(wire.missingRun)restored.runId=id();return {ok:true,value:restored};}
         }
-        // Preserve compatibility with legacy numeric strings and uncommon
-        // structured-clone values that the fast scalar path does not accept.
         return durableObject(raw,1,now,id);
     }
+
     const settingKeys=['windowSize','batchSize','resourceBudget','inactiveTabMinutes','enabled','autoScroll','offscreenRendering','adaptiveBudget','evictPausedMedia','queueUnlimitedRetryWait','queueDeepResearchAware','queueDeliveryTimeoutRefresh'];
     function settings(source,mode='optimizer'){
         if(!core)return null;

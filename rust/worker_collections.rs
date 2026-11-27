@@ -40,8 +40,16 @@ impl Worker{
     }
     fn run(&mut self,op:u32,token:u32)->u32{
         self.output.fill(0);self.output.clear();
-        let input=std::mem::take(&mut self.input);
-        let Some(f)=fields(&input)else{return NONE;};
+        let mut input=std::mem::take(&mut self.input);
+        let result=self.run_frame(op,token,&input);
+        input.fill(0);input.clear();
+        // Retain small transfer buffers for subsequent polling. Do not retain
+        // a large one-off checkpoint or scheduler allocation indefinitely.
+        if input.capacity()<=256*1024{self.input=input;}
+        result
+    }
+    fn run_frame(&mut self,op:u32,token:u32,input:&[u8])->u32{
+        let Some(f)=fields(input)else{return NONE;};
         match op{
             // Sanitized JSON object frames, retained only until flush.
             0=>{
@@ -187,6 +195,12 @@ impl Worker{
                 if self.submission_tabs.get(&session.tab)==Some(&token){self.submission_tabs.remove(&session.tab);}
                 if let Some(ids)=self.baseline.remove(&token){self.baseline_bytes-=ids.iter().map(Vec::len).sum::<usize>();}
                 1
+            },
+            17=>{
+                let n=super::DURABLE_FIELDS.len();
+                if f.len()<n{return NONE;}
+                let Some(projected)=super::durable_projection::project_raw(&f[..n],&f[n..])else{return NONE;};
+                self.output=projected;u32::try_from(self.output.len()).unwrap_or(NONE)
             },
             _=>NONE
         }

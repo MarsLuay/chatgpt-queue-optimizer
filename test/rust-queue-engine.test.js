@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 37);
+    assert.equal(e.cpo_queue_abi(), 38);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -924,4 +924,17 @@ test('batched settings preserve absent keys and install defaults',{skip},async()
     assert.deepEqual(engine.settings({queueUnlimitedRetryWait:true,queueDeepResearchAware:null},'queue'),{queueUnlimitedRetryWait:true,queueDeepResearchAware:true});
     assert.deepEqual(engine.installationDefaults({enabled:false,windowSize:80,batchSize:30,autoScroll:false,inactiveTabMinutes:15,queueUnlimitedRetryWait:true,queueDeepResearchAware:false,queueDeliveryTimeoutRefresh:false}),{});
     assert.deepEqual(engine.installationDefaults({}),{enabled:true,windowSize:50,batchSize:25,autoScroll:true,inactiveTabMinutes:0,queueUnlimitedRetryWait:false,queueDeepResearchAware:true,queueDeliveryTimeoutRefresh:true});
+});
+
+
+test('native legacy scalar projection and restoration share the wire normalization',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});engine.install(instance.exports);
+    const raw={tabId:'0x8',queue:['  next  ','\ud800'],completedCount:'0b10',isRunning:true,isPaused:false};
+    const projected=engine.projectDurable(raw);assert.equal(projected.ok,true);
+    assert.equal(projected.value.tabId,8);assert.equal(projected.value.completedCount,2);
+    assert.deepEqual(projected.value.queue,raw.queue);
+    const restored=engine.deserializeDurable(raw,1000,()=> 'new-run');assert.equal(restored.ok,true);
+    assert.deepEqual(restored.value.queue,['next','\ud800']);assert.equal(restored.value.runId,'new-run');
+    assert.equal(engine.projectDurable({...raw,isPaused:-0.25}).value.isPaused,true);
+    assert.equal(engine.deserializeDurable({...raw,isPaused:1},1000).ok,false);
 });

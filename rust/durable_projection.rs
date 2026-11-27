@@ -1,6 +1,6 @@
 //! Native projection of canonical live-job JSON scalars into durable JSON.
 //! No external JSON dependency. The browser supplies JSON.stringify scalars
-//! on mutation; unusual legacy numeric strings use the existing compatibility path.
+//! on mutation; legacy numeric strings are normalized in Rust.
 use super::{DURABLE_FIELDS,cpo_durable_default,cpo_durable_number,cpo_durable_boolean};
 use std::collections::VecDeque;
 const NULL:&[u8]=b"null";
@@ -29,17 +29,8 @@ fn radix(s:&str,base:u32)->Option<f64>{
     Some(n as f64)
 }
 fn decode_numeric_string(v:&[u8])->Option<String>{
-    let v=trim_json(v)?;let text=std::str::from_utf8(body(&v)?).ok()?;
-    let mut chars=text.chars();let mut out=Vec::new();
-    while let Some(c)=chars.next(){
-        if c!='\\'{let mut units=[0;2];out.extend_from_slice(c.encode_utf16(&mut units));continue;}
-        let unit=match chars.next()?{
-            'u'=>{let mut n=0u16;for _ in 0..4{n=(n<<4)|chars.next()?.to_digit(16)? as u16;}n},
-            't'=>9,'n'=>10,'r'=>13,'f'=>12,'b'=>8,'"'=>34,'\\'=>92,'/'=>47,_=>return None
-        };
-        out.push(unit);
-    }
-    String::from_utf16(&out).ok()
+    let v=trim_json(v)?;
+    String::from_utf16(&super::command_identity::decode_units(&v)?).ok()
 }
 fn body(v:&[u8])->Option<&[u8]>{if string(v){Some(&v[1..v.len()-1])}else{None}}
 fn append(out:&mut Vec<u8>,first:&mut bool,name:&str,value:&[u8]){
@@ -58,7 +49,7 @@ fn trim_json(v:&[u8])->Option<Vec<u8>>{
             let escape=*bytes.get(i+1)?;i+=2;
             let unit=match escape{
                 b'u'=>{let hex=text.get(i..i+4)?;i+=4;u16::from_str_radix(hex,16).ok()?},
-                b't'=>9,b'n'=>10,b'v'=>11,b'f'=>12,b'r'=>13,b'b'=>8,
+                b't'=>9,b'n'=>10,b'f'=>12,b'r'=>13,b'b'=>8,
                 b'"'=>34,b'\\'=>92,b'/'=>47,_=>return None
             };
             super::whitespace(unit)
@@ -85,6 +76,12 @@ pub(super) fn restore(fields:&[&[u8]],prompts:&[&[u8]],now:f64,run_id:&[u8])->Op
         if text!=EMPTY{queue.push_back(text);}
     }
     project_mode(&scalars,&queue,1,now,run_id)
+}
+pub(super) fn project_raw(fields:&[&[u8]],prompts:&[&[u8]])->Option<Vec<u8>>{
+    if fields.len()!=DURABLE_FIELDS.len(){return None;}
+    let scalars=fields.iter().map(|v|if v.is_empty(){None}else{Some(v.to_vec())}).collect::<Vec<_>>();
+    let queue=prompts.iter().map(|v|v.to_vec()).collect::<VecDeque<_>>();
+    project(&scalars,&queue)
 }
 pub(super) fn project(fields:&[Option<Vec<u8>>],queue:&VecDeque<Vec<u8>>)->Option<Vec<u8>>{
     project_mode(fields,queue,0,0.0,EMPTY)
@@ -114,7 +111,7 @@ fn project_mode(fields:&[Option<Vec<u8>>],queue:&VecDeque<Vec<u8>>,mode:u32,now:
                 // Canonical booleans, absent/null, and legacy truthiness of
                 // scalar strings/numbers. Non-scalar values fall back.
                 if mode==1&&(v!=TRUE&&v!=FALSE&&v!=NULL||rule==14&&v==TRUE){return None;}
-                if v!=TRUE&&v!=FALSE&&v!=NULL&&!string(v)&&numeric(v).is_none(){return None;}
+                if v!=TRUE&&v!=FALSE&&v!=NULL&&!string(v)&&!std::str::from_utf8(v).ok().and_then(|s|s.parse::<f64>().ok()).is_some_and(f64::is_finite){return None;}
                 let b=(v==TRUE) as u32|(((v==FALSE) as u32)<<1)|((present(v) as u32)<<2)|(((read("isPaused")==TRUE) as u32)<<3);
                 if cpo_durable_boolean(rule,mode,b)==1{TRUE.to_vec()}else{FALSE.to_vec()}
             },
@@ -200,5 +197,6 @@ mod tests{
         assert_eq!(numeric(b"\"\\uFEFF0x10\\t\""),Some(16));
         assert_eq!(numeric(b"\"0b101\""),Some(5));
         assert_eq!(numeric(b"\"-0x10\""),None);
+        set(&mut f,"isPaused",b"-0.25");assert!(String::from_utf8(project(&f,&q).unwrap()).unwrap().contains("\"isPaused\":true"));
     }
 }
