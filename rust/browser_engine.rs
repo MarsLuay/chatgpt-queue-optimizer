@@ -20,7 +20,7 @@ fn h(op: u32, a: u32, b: u32, c: u32) -> u32 {
 }
 
 #[no_mangle]
-pub extern "C" fn cpo_browser_abi() -> u32 { 2 }
+pub extern "C" fn cpo_browser_abi() -> u32 { 3 }
 
 const MAX_TURNS: u32 = 32;
 const MAX_NODES: u32 = 512;
@@ -357,6 +357,28 @@ pub extern "C" fn cpo_process_mutations(count: u32, mode: u32, empty: u32) -> u3
         if mode == 0 && structural { break; }
     }
     structural as u32
+}
+
+// Provider selectors are compatibility data. Rust owns selector-priority
+// traversal, duplicate elimination and early termination; the host exposes
+// DOM queries and the provider-specific predicate as opaque primitives.
+// Ops 80 query selector, 81 candidate status (seen/allowed),
+// 82 accept node. A failed query is treated as empty, as before.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_provider_selectors(count: u32, first_only: u32) -> u32 {
+    let mut accepted = 0u32;
+    for selector in 0..count {
+        let candidates = h(80,selector,0,0);
+        for candidate in 0..candidates {
+            let flags = h(81,candidate,selector,0);
+            if flags & 3 != 2 { continue; }
+            h(82,candidate,selector,0);
+            accepted = accepted.saturating_add(1);
+            if first_only != 0 { return accepted; }
+        }
+    }
+    accepted
 }
 
 #[cfg(test)]
