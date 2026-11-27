@@ -402,6 +402,18 @@ pub extern "C" fn cpo_wait_settle(flags: u32) -> u32 {
     else { 0 }
 }
 
+// Native admission of rollover effects after asynchronous browser results.
+#[no_mangle]
+pub extern "C" fn cpo_rollover_effect(stage:u32,flags:u32)->u32{
+    if flags&1==0{return 0;}
+    match stage{
+        0=>if flags&2!=0{1}else{2}, // identity resolved
+        1=>if flags&2!=0&&flags&4!=0{1}else{2}, // validated handoff target
+        2=>if flags&2!=0{1}else{2}, // handoff send
+        3=>if flags&6!=0{1}else{2}, // wait complete or capacity signal
+        _=>0
+    }
+}
 // Rollover execution stages. flags: owned=1 supported=2 started=4
 // identity checkpoint=8 rebound=16 fresh=32 navigation issued=64
 // handoff submitted=128 established=256 handoff present=512.
@@ -1304,7 +1316,7 @@ mod live_state {
                     for name in ["retryMode","lastError","retryClass","lastRetryableReason"]{if let Some(v)=value(name){job.set(name,v);}}
                 },
                 9=>{ // authorized rollover rebind, generation advances once
-                    if !job.truth("rolloverInProgress"){return false;}
+                    if !job.truth("rolloverInProgress")||!job.truth("isRunning")||job.truth("isPaused")||job.truth("isStopped"){return false;}
                     for name in ["provider","conversationId","conversationType","targetKey"]{if value(name).is_none(){return false;}}
                     let target_id=value("conversationId").unwrap();
                     let kind=match value("conversationType").unwrap(){b"\"existing\""=>1,b"\"new\""=>2,_=>0};
@@ -1448,6 +1460,17 @@ mod live_state {
                         },
                         _=>return false
                     }
+                },
+                19=>{ // Rollover new->existing promotion, without a second generation increment.
+                    if !job.truth("isRunning")||job.truth("isPaused")||job.truth("isStopped")||
+                        !job.truth("rolloverInProgress")||!job.truth("rolloverRebindApplied")||
+                        job.get("conversationType")!=b"\"new\""{return false;}
+                    let Some(target)=value("conversationId")else{return false;};
+                    let Some(key)=value("targetKey")else{return false;};
+                    if !present(target)||!present(key)||target==job.get("rolloverFromConversationId")||
+                        value("provider")!=Some(job.get("provider")){return false;}
+                    job.set("conversationId",target);job.set("conversationType",b"\"existing\"");
+                    job.set("targetKey",key);job.set("rolloverToConversationId",target);
                 },
                 _=>return false
             }

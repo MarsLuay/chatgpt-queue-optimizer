@@ -258,7 +258,7 @@ async function validateJobTargetConversation(tabId, job) {
                 applyAuthorizedConversationRebind(job, currentIdentity);
                 await updateRunningJobsStorage({ force: true });
             } else if (job.conversationType === 'new' && currentIdentity.type === 'existing' && currentIdentity.conversationId) {
-                jobs.transaction(job,0,0,{conversationId:currentIdentity.conversationId,conversationType:'existing',targetKey:currentIdentity.key,rolloverToConversationId:currentIdentity.conversationId});
+                jobs.transaction(job,19,0,{provider:currentIdentity.provider,conversationId:currentIdentity.conversationId,targetKey:currentIdentity.key});
                 await updateRunningJobsStorage({ force: true });
             }
             return { ok: true, currentIdentity, rolloverRebind: true };
@@ -392,6 +392,7 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
 
     const supported = !!(adapter && typeof adapter.isFreshConversationIdentity === 'function' && newConversationUrl);
     const owned = () => jobs.processing(job,2)===1;
+    const effectAdmission=(stage,ok=false,other=false)=>requiredQueueDecision(globalThis.CpoQueueEngine?.call('cpo_rollover_effect',[stage,Number(owned())|(Number(ok)<<1)|(Number(other)<<2)]));
     const rolloverNext = (stage, fresh = false, present = false) =>
         jobs.rollover(job,stage,Number(supported)|(Number(fresh)<<1)|(Number(present)<<2));
     const initialAction = rolloverNext(0);
@@ -449,10 +450,9 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
             await updateRunningJobsStorage({ force: true });
 
             const confirmed = await confirmFreshConversationIdentity(tabId, job, adapter, fromConversationId);
-            if (confirmed.interrupted || jobs.get(tabId) !== job || job.isStopped || job.isPaused || !job.isRunning) {
-                return { action: 'return' };
-            }
-            if (!confirmed.ok) {
+            const identityOutcome=effectAdmission(0,confirmed.ok&&!confirmed.interrupted);
+            if(confirmed.interrupted||identityOutcome===0)return {action:'return'};
+            if(identityOutcome===2){
                 pauseJob(tabId, 'Could not confirm a fresh ChatGPT conversation after maximum-length rollover.', {
                     phase: 'rollover',
                     failureClass: 'conversation-max-length'
@@ -480,8 +480,9 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
     if (handoffAction === 7 || handoffAction === 10) {
         // A persisted checkpoint is not permission to send into a different chat.
         const validation = await validateJobTargetConversation(tabId, job);
-        if (!owned()) return { action: 'return' };
-        if (!validation.ok || (job.conversationId && validation.currentIdentity?.conversationId !== job.conversationId)) {
+        const targetOutcome=effectAdmission(1,validation.ok,!job.conversationId||validation.currentIdentity?.conversationId===job.conversationId);
+        if(targetOutcome===0)return {action:'return'};
+        if(targetOutcome===2){
             pauseJob(tabId, 'Rollover target identity could not be verified before handoff.', { phase: 'rollover-handoff', failureClass: 'conversation-max-length' });
             return { action: 'return' };
         }
@@ -511,16 +512,16 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
             if (!owned()) return { action: 'return' };
             if (rolloverNext(4,false,alreadyPresent) === 8) {
                 const beforeHandoff = await validateJobTargetConversation(tabId, job);
-                if (!owned()) return { action: 'return' };
-                if (!beforeHandoff.ok || (job.conversationId && beforeHandoff.currentIdentity?.conversationId !== job.conversationId)) {
+                const sendTargetOutcome=effectAdmission(1,beforeHandoff.ok,!job.conversationId||beforeHandoff.currentIdentity?.conversationId===job.conversationId);
+                if(sendTargetOutcome===0)return {action:'return'};
+                if(sendTargetOutcome===2){
                     pauseJob(tabId, 'Rollover target changed before continuation submission.', { phase: 'rollover-handoff', failureClass: 'conversation-max-length' });
                     return { action: 'return' };
                 }
                 const sendResult = await sendPromptToSpecificTab(tabId, handoffText, job);
-                if (jobs.get(tabId) !== job || job.isStopped || job.isPaused || !job.isRunning) {
-                    return { action: 'return' };
-                }
-                if (!sendResult.ok) {
+                const sendOutcome=effectAdmission(2,sendResult.ok);
+                if(sendOutcome===0)return {action:'return'};
+                if(sendOutcome===2){
                     pauseJob(tabId, sendResult.error || 'Could not establish continuation handoff in the new conversation.', {
                         phase: 'rollover-handoff',
                         failureClass: sendResult.details?.failureClass || 'conversation-max-length'
@@ -543,10 +544,9 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
             maxWaitMs: Math.min(Number(QUEUE_WAIT_POLICY.responseMaxWaitMs) || 60000, 60000),
             checkIntervalMs: Number(QUEUE_WAIT_POLICY.checkIntervalMs) || 1000
         });
-        if (jobs.get(tabId) !== job || job.isStopped || job.isPaused || !job.isRunning) {
-            return { action: 'return' };
-        }
-        if (!handoffWait.ok && !isConversationCapacityFailure(handoffWait)) {
+        const waitOutcome=effectAdmission(3,handoffWait.ok,isConversationCapacityFailure(handoffWait));
+        if(waitOutcome===0)return {action:'return'};
+        if(waitOutcome===2){
             pauseJob(tabId, handoffWait.error || 'Continuation handoff did not complete in the new conversation.', {
                 phase: 'rollover-handoff',
                 failureClass: handoffWait.details?.failureClass || 'conversation-max-length'
@@ -2388,8 +2388,9 @@ async function waitForSubmissionAck(tabId, { expectedText, beforeSnapshot, timeo
     const startedAt = Date.now();
     const beforeIds=(beforeSnapshot?.userTurns||[]).map(turn=>turn.turnId).filter(id=>typeof id==='string'&&id.length>0).map(id=>JSON.stringify(id));
     const supportsTurnAck = provider?.supportsCommandTurnAck !== false;
-    const baseline=supportsTurnAck?workerCollection(4,0,beforeIds):0;
-    if(supportsTurnAck&&!baseline)return {ok:false,error:'Native submission baseline unavailable.',details:{failureClass:'submission-unconfirmed'}};
+    const baseline=workerCollection(14,0,[String(tabId),String(startedAt),String(timeout),...(supportsTurnAck?beforeIds:[])]);
+    if(!baseline)return {ok:false,error:'Native submission polling lease unavailable.',details:{failureClass:'submission-unconfirmed'}};
+    const pollAdmission=()=>workerCollection(15,baseline,[String(tabId),String(Date.now()),String(Number(job?jobs.processing(job,2)!==1:!!jobs.get(tabId)))]);
     try{
     if (job) {
         if(jobs.processing(job,2)!==1)return {ok:false,error:'Queue ownership changed.',details:{failureClass:'user-stop'}};
@@ -2399,10 +2400,7 @@ async function waitForSubmissionAck(tabId, { expectedText, beforeSnapshot, timeo
 
     while (true) {
         const liveJob = jobs.get(tabId);
-        const cancelled = job ? jobs.processing(job,2)!==1 : !!liveJob;
-        const elapsed = Date.now() - startedAt;
-        const poll = globalThis.CpoQueueEngine?.numeric('cpo_submission_poll', [elapsed, timeout, Number(cancelled)]) ??
-            0;
+        const poll=pollAdmission()??0;
         if (poll === 0) break;
         if (poll === 2) {
             return {
@@ -2427,7 +2425,7 @@ async function waitForSubmissionAck(tabId, { expectedText, beforeSnapshot, timeo
             const selected=workerCollection(5,baseline,fields);
             if(selected==null)return {ok:false,error:'Native submission acknowledgment unavailable.',details:{failureClass:'submission-unconfirmed'}};
             const matched=selected>0?turns[selected-1]:null;
-            if(job?jobs.processing(job,2)!==1:!!jobs.get(tabId))continue;
+            if(pollAdmission()!==1)continue;
 
             if (matched) {
                 if (liveJob) {
@@ -2454,7 +2452,7 @@ async function waitForSubmissionAck(tabId, { expectedText, beforeSnapshot, timeo
                 const response = await sendTabMessage(tabId, { type: 'CHECK_GENERATION_STATE' });
                 const state = response?.state || {};
                 const generating = !!(state.generating || state.deepResearchActive);
-                if(job?jobs.processing(job,2)!==1:!!jobs.get(tabId))continue;
+                if(pollAdmission()!==1)continue;
                 if ((globalThis.CpoQueueEngine?.call('cpo_submission_ack', [Number(generating) << 4]) ?? 0) === 2) {
                     if (liveJob) {
                         if(jobs.processing(liveJob,2)!==1)return {ok:false,error:'Queue ownership changed.',details:{failureClass:'user-stop'}};
@@ -2487,7 +2485,7 @@ async function waitForSubmissionAck(tabId, { expectedText, beforeSnapshot, timeo
             supportsCommandTurnAck: supportsTurnAck
         }
     };
-    }finally{if(baseline)workerCollection(6,baseline);}
+    }finally{workerCollection(16,baseline);}
 }
 
 async function sendPromptToSpecificTab(tabId, text, expectedJob = jobs.get(tabId)) {

@@ -12,6 +12,16 @@ struct Worker{
     log:VecDeque<Vec<u8>>,log_bytes:usize,log_epoch:u32,
     next:u32,baseline:BTreeMap<u32,BTreeSet<Vec<u8>>>,baseline_bytes:usize,
     scheduled:BTreeMap<Vec<u8>,u32>,
+    submissions:BTreeMap<u32,Submission>,
+    submission_tabs:BTreeMap<u32,u32>,
+}
+struct Submission{tab:u32,started:f64,timeout:f64}
+fn parse_num(v:&[u8])->Option<f64>{
+    let n=std::str::from_utf8(v).ok()?.parse::<f64>().ok()?;
+    n.is_finite().then_some(n)
+}
+fn parse_tab(v:&[u8])->Option<u32>{
+    std::str::from_utf8(v).ok()?.parse::<u32>().ok().filter(|n|*n!=0)
 }
 fn fields(input:&[u8])->Option<Vec<&[u8]>>{
     let mut out=Vec::new();let mut at=0usize;
@@ -78,6 +88,7 @@ impl Worker{
                 fallback
             },
             6=>{
+                if self.submissions.contains_key(&token){return 0;}
                 if let Some(ids)=self.baseline.remove(&token){
                     self.baseline_bytes-=ids.iter().map(Vec::len).sum::<usize>();1
                 }else{0}
@@ -141,6 +152,41 @@ impl Worker{
             13=>{
                 let Some(result)=super::scheduled_transaction::transact(&f,token,&mut self.scheduled,&mut self.next)else{return NONE;};
                 self.output=result;u32::try_from(self.output.len()).unwrap_or(NONE)
+            },
+            // Acquire a bounded, exclusive per-tab submission polling lease.
+            // Its token also owns the baseline, even for generation-only providers.
+            14=>{
+                if f.len()<3||self.baseline.len()>=MAX_SESSIONS{return NONE;}
+                let Some(tab)=parse_tab(f[0])else{return NONE;};
+                let Some(started)=parse_num(f[1])else{return NONE;};
+                let Some(timeout)=parse_num(f[2])else{return NONE;};
+                if started<0.0||timeout<=0.0||self.submission_tabs.contains_key(&tab)||f[3..].iter().any(|v|!id(v)){return NONE;}
+                let ids:BTreeSet<Vec<u8>>=f[3..].iter().map(|v|v.to_vec()).collect();
+                let bytes=ids.iter().map(Vec::len).sum::<usize>();
+                if self.baseline_bytes.saturating_add(bytes)>MAX_BASELINE_BYTES{return NONE;}
+                let Some(n)=self.token()else{return NONE;};
+                self.baseline_bytes+=bytes;
+                self.baseline.insert(n,ids);
+                self.submissions.insert(n,Submission{tab,started,timeout});
+                self.submission_tabs.insert(tab,n);
+                n
+            },
+            // Poll admission is valid only for this lease and tab. Recheck after
+            // asynchronous observations, before accepting a matching turn.
+            15=>{
+                if f.len()!=3{return NONE;}
+                let Some(session)=self.submissions.get(&token)else{return NONE;};
+                if parse_tab(f[0])!=Some(session.tab)||self.submission_tabs.get(&session.tab)!=Some(&token){return NONE;}
+                let Some(now)=parse_num(f[1])else{return NONE;};
+                if now<session.started{return 0;}
+                let cancelled=match f[2]{b"0"=>0,b"1"=>1,_=>return NONE};
+                super::cpo_submission_poll(now-session.started,session.timeout,cancelled)
+            },
+            16=>{
+                let Some(session)=self.submissions.remove(&token)else{return 0;};
+                if self.submission_tabs.get(&session.tab)==Some(&token){self.submission_tabs.remove(&session.tab);}
+                if let Some(ids)=self.baseline.remove(&token){self.baseline_bytes-=ids.iter().map(Vec::len).sum::<usize>();}
+                1
             },
             _=>NONE
         }

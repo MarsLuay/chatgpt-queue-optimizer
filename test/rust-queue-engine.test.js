@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 32);
+    assert.equal(e.cpo_queue_abi(), 33);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -856,4 +856,20 @@ test('native command claim computes exact identity without host prompt transfer'
     jobs.transaction(job,18,3);assert.equal(job.currentPhase,'awaiting-response');assert.equal(job.submittedUserTurnId,'user-1');
     assert.equal(job.commandFingerprint,legacy(prompt));
     jobs.delete(7);assert.throws(()=>jobs.transaction(job,18,3));
+});
+
+
+test('native submission leases enforce exclusive tab ownership and polling deadlines',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});engine.install(instance.exports);
+    const w=engine.workerCollection;
+    const lease=w(14,0,['7','1000','100','"old"']);assert.ok(lease);
+    assert.equal(w(14,0,['7','1001','100']),null);
+    assert.equal(w(15,lease,['7','1100','0']),1);assert.equal(w(15,lease,['7','1101','0']),0);
+    assert.equal(w(15,lease,['7','1001','1']),2);assert.equal(w(15,lease,['8','1001','0']),null);
+    assert.equal(w(5,lease,['"old"','1','0','"new"','1','0']),2);
+    assert.equal(w(6,lease),0);assert.equal(w(16,lease),1);assert.equal(w(15,lease,['7','1001','0']),null);
+    const replacement=w(14,0,['7','2000','100']);assert.ok(replacement&&replacement!==lease);
+    assert.equal(w(16,lease),0);assert.equal(w(16,replacement),1);
+    const e=instance.exports;assert.equal(e.cpo_rollover_effect(1,7),1);assert.equal(e.cpo_rollover_effect(1,3),2);
+    assert.equal(e.cpo_rollover_effect(3,5),1);assert.equal(e.cpo_rollover_effect(3,6),0);
 });
