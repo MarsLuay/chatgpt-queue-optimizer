@@ -11,7 +11,7 @@ if "%RESULT%"=="0" (
     echo [SUCCESS] Local installation workflow completed.
 ) else (
     echo [ERROR] Local installation failed with exit code %RESULT%.
-    echo Review the setup diagnostics above.
+    echo Copy the full installer log printed above when reporting an error.
 )
 echo Log directory: "%REPO_ROOT%build\logs"
 echo.
