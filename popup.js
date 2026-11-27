@@ -2352,7 +2352,7 @@ The sequence should do the following: `;
 
                 await executeScript({
                     target: { tabId },
-                    files: ['content.js']
+                    files: ['rust-browser-bridge.js', 'content.js']
                 });
 
                 await sleep(250);
@@ -2428,6 +2428,7 @@ The sequence should do the following: `;
             `Target: ${cleanTabTitle(tab.title)}`,
             `Total messages: ${response.messageCount}`,
             `Optimizer engine: ${response.debugInfo?.optimizerEngine ?? 'Unknown'}`,
+            `Browser execution engine: ${response.debugInfo?.browserEngine ?? 'Unknown'}`,
             `Hidden: ${response.hiddenCount}`,
             `Visible: ${response.visibleCount}`,
             `Container: ${response.debugInfo?.containerFound ? 'Found' : 'Missing'}`,
