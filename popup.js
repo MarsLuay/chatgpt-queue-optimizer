@@ -146,8 +146,23 @@ if (typeof module !== 'undefined' && module.exports) {
     };
 }
 
-document.addEventListener('DOMContentLoaded', function () {
-    globalThis.CpoQueueEngine?.load();
+document.addEventListener('DOMContentLoaded', async function () {
+    const ui = new globalThis.CpoRustBrowserBridge(null);
+    const [uiReady,queueReady]=await Promise.all([ui.load(),globalThis.CpoQueueEngine?.load()]);
+    if(!uiReady||!queueReady){
+        const status=document.getElementById('status-indicator');
+        if(status){status.hidden=false;status.textContent='Required Rust modules unavailable. Rebuild and reinstall the extension.';}
+        for(const input of document.querySelectorAll('button,input,textarea,select'))input.disabled=true;
+        return;
+    }
+    function renderNative(kind,root,rows,limit=rows.length,dispatch=()=>{}){
+        if(ui.renderUI(kind,root,rows,limit,dispatch)!==true){
+            const status=document.getElementById('status-indicator');
+            if(status){status.hidden=false;status.textContent='Native UI failed. Reopen the extension popup.';}
+            return false;
+        }
+        return true;
+    }
     const queueToolTab = document.getElementById('queue-tool-tab');
     const scheduledToolTab = document.getElementById('scheduled-tool-tab');
     const optimizerToolTab = document.getElementById('optimizer-tool-tab');
@@ -728,66 +743,14 @@ document.addEventListener('DOMContentLoaded', function () {
             return dueDiff || Number(a?.createdAt || 0) - Number(b?.createdAt || 0);
         });
 
-        scheduledItemsList.textContent = '';
-
-        if (sortedItems.length === 0) {
-            const empty = document.createElement('div');
-            empty.className = 'instance-empty';
-            empty.textContent = 'No scheduled messages';
-            scheduledItemsList.appendChild(empty);
-            return;
-        }
-
-        sortedItems.forEach((item) => {
-            const row = document.createElement('div');
-            row.className = 'scheduled-row';
-
-            const main = document.createElement('div');
-            main.className = 'scheduled-row-main';
-
-            const info = document.createElement('div');
-            info.className = 'scheduled-info';
-            info.textContent = formatScheduledItemText(item, titleMap[String(item.tabId)]);
-
-            const badge = document.createElement('span');
-            badge.className = `scheduled-status-badge ${String(item.status || '').toLowerCase()}`;
-            badge.textContent = getScheduledStatusLabel(item.status);
-            info.appendChild(document.createElement('br'));
-            info.appendChild(badge);
-
-            const actions = document.createElement('div');
-            actions.className = 'scheduled-actions';
-
-            const actionMask=globalThis.CpoQueueEngine?.scheduledActions(item.status)??((item.status==='pending'?1:0)|(item.status==='failed'||item.status==='cancelled'?2:0)|(item.status!=='firing'?4:0));
-            if (actionMask & 1) {
-                const cancelButton = document.createElement('button');
-                cancelButton.type = 'button';
-                cancelButton.textContent = 'Cancel';
-                cancelButton.addEventListener('click', () => updateScheduledItem('cancelScheduledMessage', item.id));
-                actions.appendChild(cancelButton);
-            }
-
-            if (actionMask & 2) {
-                const retryButton = document.createElement('button');
-                retryButton.type = 'button';
-                retryButton.textContent = 'Retry';
-                retryButton.addEventListener('click', () => retryScheduledItem(item));
-                actions.appendChild(retryButton);
-            }
-
-            if (actionMask & 4) {
-                const deleteButton = document.createElement('button');
-                deleteButton.type = 'button';
-                deleteButton.className = 'scheduled-delete-btn';
-                deleteButton.textContent = 'Delete';
-                deleteButton.addEventListener('click', () => updateScheduledItem('deleteScheduledMessage', item.id));
-                actions.appendChild(deleteButton);
-            }
-
-            main.appendChild(info);
-            main.appendChild(actions);
-            row.appendChild(main);
-            scheduledItemsList.appendChild(row);
+        const rows=sortedItems.map(item=>({fields:[formatScheduledItemText(item,titleMap[String(item.tabId)]),
+            getScheduledStatusLabel(item.status),String(item.status||'').toLowerCase()],
+            flags:globalThis.CpoQueueEngine.scheduledActions(item.status)??0}));
+        renderNative(2,scheduledItemsList,rows,rows.length,(action,index)=>{
+            const item=sortedItems[index];if(!item)return;
+            if(action===4)updateScheduledItem('cancelScheduledMessage',item.id);
+            else if(action===5)retryScheduledItem(item);
+            else if(action===6)updateScheduledItem('deleteScheduledMessage',item.id);
         });
     }
 
@@ -1257,10 +1220,9 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     addMessageButton.addEventListener('click', function () {
-        const message = newMessageInput.value.trim();
+        const message = globalThis.CpoQueueEngine.trim(newMessageInput.value);
 
-        if (message) {
-            messages.push(message);
+        if (message && ui.sequenceEdit(messages,0,0,message)===true) {
             newMessageInput.value = '';
             saveMessages();
             updateMessagesList();
@@ -1273,82 +1235,28 @@ document.addEventListener('DOMContentLoaded', function () {
     const MESSAGE_RENDER_CHUNK = 100;
     let renderedMessageLimit = MESSAGE_RENDER_CHUNK;
     function updateMessagesList() {
-        messageList.textContent = '';
-        const rendered = Math.min(messages.length, renderedMessageLimit);
-        const fragment = document.createDocumentFragment();
-
-        messages.slice(0, rendered).forEach((msg, index) => {
-            const div = document.createElement('div');
-            div.className = 'message-item';
-            div.style.display = 'flex';
-            div.style.alignItems = 'center';
-            div.style.justifyContent = 'space-between';
-            div.style.gap = '6px';
-            div.style.marginBottom = '6px';
-
-            const text = document.createElement('span');
-            text.textContent = `${index + 1}: ${msg}`;
-            text.style.flex = '1';
-            text.style.overflowWrap = 'anywhere';
-
-            const controls = document.createElement('div');
-            controls.style.display = 'flex';
-            controls.style.gap = '4px';
-
-            const editButton = document.createElement('button');
-            editButton.textContent = 'Edit';
-            editButton.style.width = 'auto';
-            editButton.style.padding = '4px 6px';
-            editButton.style.fontSize = '10px';
-
-            editButton.addEventListener('click', function () {
-                const updated = prompt('Edit message:', msg);
-
-                if (updated === null) return;
-
-                if (!updated.trim()) {
-                    showErrorStatus('Message cannot be empty.', 'message-empty');
-                    return;
-                }
-
-                messages[index] = updated.trim();
-                saveMessages();
-                updateMessagesList();
-            });
-
-            const removeButton = document.createElement('button');
-            removeButton.textContent = '×';
-            removeButton.style.width = 'auto';
-            removeButton.style.padding = '4px 7px';
-            removeButton.style.fontSize = '12px';
-            removeButton.style.background = 'var(--danger)';
-            removeButton.style.color = '#ffffff';
-
-            removeButton.addEventListener('click', function () {
-                messages.splice(index, 1);
-                saveMessages();
-                updateMessagesList();
-            });
-
-            controls.appendChild(editButton);
-            controls.appendChild(removeButton);
-
-            div.appendChild(text);
-            div.appendChild(controls);
-            fragment.appendChild(div);
+        const rendered=Math.min(messages.length,renderedMessageLimit);
+        const rows=messages.slice(0,rendered).map((msg,index)=>({fields:[`${index+1}: ${msg}`]}));
+        // Only visible prompts are materialized into DOM data. The extra
+        // descriptor supplies the load-more label without copying all prompts.
+        if(rendered<messages.length)rows.push({fields:['',`Show next ${Math.min(MESSAGE_RENDER_CHUNK,messages.length-rendered)} prompts (${rendered} of ${messages.length} shown)`]});
+        renderNative(0,messageList,rows,rendered,(action,index)=>{
+            if(action===3){
+                renderedMessageLimit=ui.nextLimit(messages.length,renderedMessageLimit)??renderedMessageLimit;
+                updateMessagesList();return;
+            }
+            if(index>=messages.length)return;
+            if(action===1){
+                const updated=prompt('Edit message:',messages[index]);
+                if(updated===null)return;
+                const value=globalThis.CpoQueueEngine.trim(updated);
+                if(!value){showErrorStatus('Message cannot be empty.','message-empty');return;}
+                if(ui.sequenceEdit(messages,1,index,value)!==true)return;
+            }else if(action===2){
+                if(ui.sequenceEdit(messages,2,index)!==true)return;
+            }else return;
+            saveMessages();updateMessagesList();refreshVarDropdown();
         });
-        if (rendered < messages.length) {
-            const more = document.createElement('button');
-            more.type = 'button';
-            more.className = 'message-list-load-more';
-            more.textContent = `Show next ${Math.min(MESSAGE_RENDER_CHUNK, messages.length - rendered)} prompts (${rendered} of ${messages.length} shown)`;
-            more.addEventListener('click', () => {
-                renderedMessageLimit += MESSAGE_RENDER_CHUNK;
-                updateMessagesList();
-            });
-            fragment.appendChild(more);
-        }
-        messageList.appendChild(fragment);
     }
 
     function setSequenceEditMode(sequenceName) {
@@ -1368,38 +1276,13 @@ document.addEventListener('DOMContentLoaded', function () {
     function updateSequenceDropdown(shouldLoadFirstSequence = true, newSeqName) {
         const names = Object.keys(savedSequences);
 
-        sequenceDropdown.textContent = '';
+        if(!renderNative(1,sequenceDropdown,names.map(name=>({fields:[name]}))))return;
+        const choice=ui.sequenceSelection(Number(!!(newSeqName&&Object.hasOwn(savedSequences,newSeqName)))|
+            (Number(shouldLoadFirstSequence)<<1)|(Number(!!(selectedSequenceName&&Object.hasOwn(savedSequences,selectedSequenceName)))<<2),names.length);
+        if(choice===0){selectedSequenceName='';setSequenceEditMode('');return;}
+        if(choice==null)return;
 
-        if (names.length === 0) {
-            const opt = document.createElement('option');
-            opt.disabled = true;
-            opt.selected = true;
-            opt.textContent = 'Save a sequence first';
-            sequenceDropdown.appendChild(opt);
-
-            selectedSequenceName = '';
-            setSequenceEditMode('');
-            return;
-        }
-
-        names.forEach(seq => {
-            const opt = document.createElement('option');
-            opt.value = seq;
-            opt.textContent = seq;
-            sequenceDropdown.appendChild(opt);
-        });
-
-        const separator = document.createElement('option');
-        separator.disabled = true;
-        separator.textContent = '────────────';
-        sequenceDropdown.appendChild(separator);
-
-        const editOpt = document.createElement('option');
-        editOpt.value = EDIT_SEQUENCE_VALUE;
-        editOpt.textContent = 'Edit selected sequence...';
-        sequenceDropdown.appendChild(editOpt);
-
-        if (newSeqName && savedSequences[newSeqName]) {
+        if (choice===1) {
             selectedSequenceName = newSeqName;
             sequenceDropdown.value = newSeqName;
             messages = [...savedSequences[newSeqName]];
@@ -1409,7 +1292,7 @@ document.addEventListener('DOMContentLoaded', function () {
             return;
         }
 
-        if (shouldLoadFirstSequence) {
+        if (choice===3 && shouldLoadFirstSequence) {
             selectedSequenceName = names[0];
             sequenceDropdown.value = names[0];
             messages = [...savedSequences[names[0]]];
@@ -1419,17 +1302,14 @@ document.addEventListener('DOMContentLoaded', function () {
             return;
         }
 
-        const keepName =
-            selectedSequenceName && savedSequences[selectedSequenceName]
-                ? selectedSequenceName
-                : names[0];
+        const keepName = choice===2 ? selectedSequenceName : names[0];
 
         selectedSequenceName = keepName;
         sequenceDropdown.value = keepName;
     }
 
     clearMessagesButton.addEventListener('click', function () {
-        messages = [];
+        if(ui.sequenceEdit(messages,3)!==true)return;
         saveMessages();
         updateMessagesList();
         refreshVarDropdown();
@@ -1452,8 +1332,9 @@ document.addEventListener('DOMContentLoaded', function () {
 
         const name = prompt('Enter a name for this sequence:');
 
-        if (name && name.trim()) {
-            const cleanName = name.trim();
+        if (name && globalThis.CpoQueueEngine.trim(name)) {
+            const cleanName = globalThis.CpoQueueEngine.trim(name);
+            if(['__proto__','constructor','prototype',EDIT_SEQUENCE_VALUE].includes(cleanName)){showErrorStatus('Reserved sequence name.');return;}
 
             savedSequences[cleanName] = [...messages];
 
@@ -1574,22 +1455,9 @@ document.addEventListener('DOMContentLoaded', function () {
         statusIndicator.setAttribute('role', kind === 'error' || kind === 'warning' ? 'alert' : 'status');
         statusIndicator.setAttribute('aria-live', kind === 'error' || kind === 'warning' ? 'assertive' : 'polite');
         statusIndicator.setAttribute('aria-atomic', 'true');
-        statusIndicator.replaceChildren();
-
-        const messageElement = document.createElement('span');
-        messageElement.className = 'popup-status-message';
-        messageElement.textContent = text;
-        statusIndicator.appendChild(messageElement);
-
-        if (persistent) {
-            const dismissButton = document.createElement('button');
-            dismissButton.type = 'button';
-            dismissButton.className = 'popup-status-dismiss';
-            dismissButton.textContent = 'Dismiss';
-            dismissButton.setAttribute('aria-label', 'Dismiss status message');
-            dismissButton.addEventListener('click', dismissPopupStatus);
-            statusIndicator.appendChild(dismissButton);
-        }
+        renderNative(7,statusIndicator,[{fields:[text],flags:Number(persistent)}],1,action=>{
+            if(action===9)dismissPopupStatus();
+        });
 
         statusIndicator.hidden = false;
 
@@ -1705,48 +1573,14 @@ document.addEventListener('DOMContentLoaded', function () {
     function renderQueueLog(logs) {
         if (!queueLogList) return;
 
-        queueLogList.textContent = '';
-
-        const recentLogs = (Array.isArray(logs) ? logs : [])
-            .slice(-30)
-            .toReversed();
-
-        if (recentLogs.length === 0) {
-            const empty = document.createElement('div');
-            empty.className = 'queue-log-empty';
-            empty.textContent = 'No automation logs yet';
-            queueLogList.appendChild(empty);
-            return;
-        }
-
-        recentLogs.forEach((log) => {
-            const entry = document.createElement('div');
-            const level = ['error', 'warn', 'success', 'info'].includes(log.level) ? log.level : 'info';
-            entry.className = `queue-log-entry ${level}`;
-
-            const meta = document.createElement('div');
-            meta.className = 'queue-log-meta';
-            const source = log.details?.source ? ` | ${String(log.details.source).toUpperCase()}` : '';
-            meta.textContent = `${formatLogTime(log.timestamp)} | ${level.toUpperCase()}${source}${log.tabId ? ` | Tab ${log.tabId}` : ''}`;
-
-            const message = document.createElement('div');
-            message.className = 'queue-log-message';
-            message.textContent = log.message || 'Queue event';
-
-            entry.appendChild(meta);
-            entry.appendChild(message);
-
-            const detailsText = formatLogDetails(log.details);
-
-            if (detailsText) {
-                const details = document.createElement('div');
-                details.className = 'queue-log-details';
-                details.textContent = detailsText;
-                entry.appendChild(details);
-            }
-
-            queueLogList.appendChild(entry);
+        const rows=(Array.isArray(logs)?logs:[]).slice(-30).map(log=>{
+            const level=['error','warn','success','info'].includes(log.level)?log.level:'info';
+            const source=log.details?.source?' | '+String(log.details.source).toUpperCase():'';
+            const details=formatLogDetails(log.details);
+            return {fields:[`${formatLogTime(log.timestamp)} | ${level.toUpperCase()}${source}${log.tabId?' | Tab '+log.tabId:''}`,
+                log.message||'Queue event',details,level],flags:Number(!!details)};
         });
+        renderNative(4,queueLogList,rows);
     }
 
     function formatQueueLogForCopy(logs) {
@@ -1911,85 +1745,24 @@ document.addEventListener('DOMContentLoaded', function () {
         const entries = Object.entries(runningJobs || {});
         const titleMap = await getTabTitleMap();
 
-        runningInstancesList.textContent = '';
-
-        if (entries.length === 0) {
-            const empty = document.createElement('div');
-            empty.className = 'instance-empty';
-            empty.textContent = 'No running instances';
-            runningInstancesList.appendChild(empty);
-
-            if (stopAllInstancesButton) {
-                stopAllInstancesButton.style.display = 'none';
-            }
-
-            return;
-        }
-
-        entries.forEach(([tabId, job]) => {
-            const row = document.createElement('div');
-            row.className = 'instance-row';
-
-            const info = document.createElement('div');
-            info.className = 'instance-info';
-
-            const tabTitle = titleMap[tabId] || 'ChatGPT';
-            info.textContent = formatPopupRunningInstanceText(tabTitle, job);
-
-            const controls = document.createElement('div');
-            controls.style.display = 'flex';
-            controls.style.gap = '4px';
-            controls.style.alignItems = 'center';
-
-            if (job.isPaused) {
-                const retryButton = document.createElement('button');
-                retryButton.className = 'instance-stop-btn';
-                retryButton.textContent = 'Retry';
-                retryButton.style.background = 'var(--accent-2)';
-                retryButton.style.color = 'var(--accent-2-text)';
-
-                retryButton.addEventListener('click', function () {
-                    chrome.runtime.sendMessage({
-                        action: 'retryPausedJob',
-                        tabId: Number(tabId)
-                    }, function (response) {
-                        if (response && response.ok) {
-                            showTempStatus(`Retry requested for "${tabTitle}".`);
-                        } else {
-                            showErrorStatus(response?.error || 'Could not retry paused queue.');
-                        }
-
-                        refreshRunningJobsStatus();
-                    });
-                });
-
-                controls.appendChild(retryButton);
-            }
-
-            const stopButton = document.createElement('button');
-            stopButton.className = 'instance-stop-btn';
-            stopButton.textContent = 'Stop';
-
-            stopButton.addEventListener('click', function () {
-                chrome.runtime.sendMessage({
-                    action: 'stopSequence',
-                    tabId: Number(tabId)
-                }, function () {
-                    showTempStatus(`Stop requested for "${tabTitle}".`);
+        const rows=entries.map(([tabId,job])=>({fields:[formatPopupRunningInstanceText(titleMap[tabId]||'ChatGPT',job)],flags:Number(!!job.isPaused)}));
+        renderNative(3,runningInstancesList,rows,rows.length,(action,index)=>{
+            const entry=entries[index];if(!entry)return;
+            const [tabId]=entry;
+            const tabTitle=titleMap[tabId]||'ChatGPT';
+            if(action===7){
+                chrome.runtime.sendMessage({action:'retryPausedJob',tabId:Number(tabId)},response=>{
+                    if(response?.ok)showTempStatus(`Retry requested for "${tabTitle}".`);
+                    else showErrorStatus(response?.error||'Could not retry paused queue.');
                     refreshRunningJobsStatus();
                 });
-            });
-
-            controls.appendChild(stopButton);
-
-            row.appendChild(info);
-            row.appendChild(controls);
-            runningInstancesList.appendChild(row);
+            }else if(action===8){
+                chrome.runtime.sendMessage({action:'stopSequence',tabId:Number(tabId)},()=>{
+                    showTempStatus(`Stop requested for "${tabTitle}".`);refreshRunningJobsStatus();
+                });
+            }
         });
-
-        if (stopAllInstancesButton) {
-            stopAllInstancesButton.style.display = 'block';
-        }
+        if(stopAllInstancesButton)stopAllInstancesButton.style.display=entries.length?'block':'none';
     }
 
     async function copyTextToClipboard(text) {
@@ -2438,11 +2211,6 @@ The sequence should do the following: `;
     }
 
     function renderOptimizerStats(tab, response) {
-        optimizerStats.replaceChildren();
-
-        const label = document.createElement('strong');
-        label.textContent = 'Stats:';
-
         const lines = [
             `Target: ${cleanTabTitle(tab.title)}`,
             `Total messages: ${response.messageCount}`,
@@ -2478,12 +2246,7 @@ The sequence should do the following: `;
                 `Browser JS heap (not tab RAM): ${mib(resources.usedJsHeapBytes)}`
             );
         }
-        optimizerStats.appendChild(label);
-
-        lines.forEach((line) => {
-            optimizerStats.appendChild(document.createElement('br'));
-            optimizerStats.appendChild(document.createTextNode(line));
-        });
+        renderNative(5,optimizerStats,lines.map(line=>({fields:[line]})));
     }
 
     if (optimizerIdleMinutes) optimizerIdleMinutes.addEventListener('change', scheduleOptimizerAutoSave);
