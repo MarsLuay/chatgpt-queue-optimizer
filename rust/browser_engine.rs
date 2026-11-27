@@ -20,7 +20,7 @@ fn h(op: u32, a: u32, b: u32, c: u32) -> u32 {
 }
 
 #[no_mangle]
-pub extern "C" fn cpo_browser_abi() -> u32 { 10 }
+pub extern "C" fn cpo_browser_abi() -> u32 { 11 }
 
 #[cfg(target_arch = "wasm32")]
 mod sequence;
@@ -865,3 +865,21 @@ pub extern "C" fn cpo_first_matching_selector(count:u32)->u32{
     for i in 0..count{if h(160,i,0,0)!=0{return i+1;}}
     0
 }
+
+ // Combined DOM-ordered turn discovery first, selector-priority fallback
+ // only on query failure. Node identity is an opaque host primitive.
+ #[cfg(target_arch="wasm32")]
+ #[no_mangle]
+ pub extern "C" fn cpo_provider_turns(selectors:u32)->u32{
+    let combined=h(167,0,0,0);
+    let mut accepted=0u32;
+    if combined!=u32::MAX{
+        for i in 0..combined{if h(169,i,0,0)==1{accepted=accepted.saturating_add(1);}}
+    }else{
+        for selector in 0..selectors{
+            let count=h(168,selector,0,0);
+            for i in 0..count{if h(169,i,0,0)==1{accepted=accepted.saturating_add(1);}}
+        }
+    }
+    accepted
+ }

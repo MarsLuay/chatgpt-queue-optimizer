@@ -298,3 +298,7 @@ ChatGPT command-turn snapshot construction, synthetic turn IDs, user/assistant a
 ### Native provider observation (queue ABI 15; browser ABI 10)
 
 `rust/provider_observation.rs` owns provider semantic marker matching, stop/retry classification, generation text interpretation, turn ID generation and user/assistant association, response source classification, and compatibility diagnostics. The browser engine walks event ancestors, normalizes turn nodes and controls composer reads/writes and click effects. The former provider adapter source is removed; the browser-dependent registry and remaining DOM observation/record projection bindings live in `rust-browser-bridge.js`. Weak DOM references, selectors and browser object access still require host bindings. Existing browser-only test fixtures must initialize the native engines. Full native ownership of every observation traversal is not yet established; native compilation and live provider parity remain unverified.
+
+### Native turn discovery and complete generation-state settlement (queue ABI 16; browser ABI 11)
+
+The Rust browser engine selects combined DOM-order turn discovery or individual-selector fallback and deduplicates results using opaque DOM identities. The Rust queue engine now combines native text observations with stop, streaming, spinner, error and retry signals to settle generation state for all three providers in one batch. The already removed standalone adapter stays removed; remaining browser bindings live in the bridge. Native compilation and live browser parity remain unverified.

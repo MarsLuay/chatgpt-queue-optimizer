@@ -23,7 +23,7 @@ async function engine(optimizer = owner()) {
         cpo: { host: (op, a, b, c) => bridge.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
     });
     bridge.exports = result.instance.exports;
-    assert.equal(bridge.exports.cpo_browser_abi(), 10);
+    assert.equal(bridge.exports.cpo_browser_abi(), 11);
     return bridge;
 }
 
@@ -354,4 +354,13 @@ test('Rust intersection transition only expands on a newly armed visible edge',{
     assert.equal(bridge.intersection(2),1);
     assert.equal(bridge.intersection(1|4|8|16),3);
     assert.equal(bridge.context,null);
+});
+
+test('native turn discovery uses DOM order and deduplicates selector fallback',{skip},async()=>{
+    const bridge=await engine();
+    const a={},b={};
+    const root={querySelectorAll(selector){if(selector==='a,b')return [b,a];throw new Error('unexpected selector');}};
+    assert.deepEqual(bridge.providerTurns(root,['a','b']),[b,a]);
+    const fallback={querySelectorAll(selector){if(selector==='a,b')throw new Error('invalid combined query');return selector==='a'?[a,b]:[b];}};
+    assert.deepEqual(bridge.providerTurns(fallback,['a','b']),[a,b]);
 });

@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 15);
+    assert.equal(e.cpo_queue_abi(), 16);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -542,4 +542,21 @@ test('native semantic observation spans all supported providers',{skip},async()=
     assert.equal(observation.deep,true);
     assert.equal(observation.error,'conversation-max-length');
     assert.deepEqual(engine.providerDiagnostics(7,0,true),['empty-conversation']);
+});
+
+test('native provider generation state resolves errors, capacity, retry and progress',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    const deep=engine.providerGenerationState(1,' Deep research  ','',1);
+    assert.equal(deep.generating,true);
+    assert.equal(deep.deepResearchActive,true);
+    assert.equal(deep.statusText,'Deep research');
+    const capacity=engine.providerGenerationState(1,'','maximum length for this conversation',17);
+    assert.equal(capacity.capacity,true);
+    assert.equal(capacity.hasTryAgainButton,false);
+    assert.equal(capacity.error,'conversation-max-length');
+    const external=engine.providerGenerationState(2,'Thinking','There was an error',0);
+    assert.equal(external.hasKnownError,true);
+    assert.equal(external.deepResearchActive,false);
+    assert.equal(external.research,'thinking');
 });

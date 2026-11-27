@@ -104,3 +104,22 @@ mod additional_provider_tests{
         assert_eq!(run(29,&["7","0","1"]),vec!["empty-conversation"]);
     }
 }
+
+ // Complete generation decision: DOM facts plus native text observation.
+ // Bits: stop=1, streaming=2, spinner=4, assistant error=8, retry=16.
+ fn provider_generation_state(f:&[&[u16]])->Option<Vec<Vec<u16>>>{
+    if f.len()!=4{return None;}
+    let provider=number(f[0]) as u32;
+    let dom=number(f[3]) as u32;
+    let assistant=ascii(if dom&8!=0{"1"}else{"0"});
+    let mut result=provider_generation_text(&[f[0],f[1],f[2],&assistant])?;
+    let tool=!result[1].is_empty()||(provider==1&&dom&4!=0);
+    let capacity=eq(&result[6],"1");
+    let error=!result[2].is_empty();
+    let retry=dom&16!=0&&!capacity;
+    let flags=(dom&3)|(u32::from(tool)<<2)|(u32::from(error)<<3)|(u32::from(retry)<<4)|(u32::from(eq(&result[4],"1"))<<5)|(u32::from(capacity)<<6);
+    let state=super::cpo_generation_state(flags);
+    let facts=u32::from(tool)|(u32::from(error)<<1)|(u32::from(retry)<<2);
+    result.push(ascii(&state.to_string()));result.push(ascii(&facts.to_string()));
+    Some(result)
+ }
