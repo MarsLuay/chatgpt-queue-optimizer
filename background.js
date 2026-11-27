@@ -4374,33 +4374,11 @@ function flushQueueDebugLogs() {
 }
 
 function readLocalStorage(keys) {
-    return new Promise((resolve, reject) => {
-        chrome.storage.local.get(keys, (data) => {
-            const lastError = chrome.runtime.lastError;
-
-            if (lastError) {
-                reject(new Error(lastError.message || 'Storage read failed.'));
-                return;
-            }
-
-            resolve(data || {});
-        });
-    });
+    return globalThis.CpoBrowserApi.invoke('localGet',keys).then(data=>data||{});
 }
 
 function writeLocalStorage(items) {
-    return new Promise((resolve, reject) => {
-        chrome.storage.local.set(items, () => {
-            const lastError = chrome.runtime.lastError;
-
-            if (lastError) {
-                reject(new Error(lastError.message || 'Storage write failed.'));
-                return;
-            }
-
-            resolve();
-        });
-    });
+    return globalThis.CpoBrowserApi.invoke('localSet',items);
 }
 
 async function getQueueSettings() {
@@ -4424,39 +4402,19 @@ async function getQueueSettings() {
 }
 
 function readSyncStorage(defaults) {
-    return new Promise((resolve, reject) => {
-        chrome.storage.sync.get(defaults, (data) => {
-            const lastError = chrome.runtime.lastError;
-
-            if (lastError) {
-                reject(new Error(lastError.message || 'Sync storage read failed.'));
-                return;
-            }
-
-            resolve(data || {});
-        });
-    });
+    return globalThis.CpoBrowserApi.invoke('syncGet',defaults).then(data=>data||{});
 }
 
 function getTab(tabId) {
-    return extensionApiPromise(
-        (done) => chrome.tabs.get(tabId, done),
-        () => chrome.tabs.get(tabId)
-    );
+    return globalThis.CpoBrowserApi.invoke('tabGet',tabId);
 }
 
-function updateTabUrl(tabId, url) {
-    return extensionApiPromise(
-        (done) => chrome.tabs.update(tabId, { url }, done),
-        () => chrome.tabs.update(tabId, { url })
-    );
+function updateTabUrl(tabId,url) {
+    return globalThis.CpoBrowserApi.invoke('tabUpdate',tabId,{url});
 }
 
 function queryTabs(queryInfo) {
-    return extensionApiPromise(
-        (done) => chrome.tabs.query(queryInfo, done),
-        () => chrome.tabs.query(queryInfo)
-    ).then((tabs) => Array.isArray(tabs) ? tabs : []);
+    return globalThis.CpoBrowserApi.invoke('tabQuery',queryInfo).then(tabs=>Array.isArray(tabs)?tabs:[]);
 }
 
 async function getActiveTab() {
@@ -4481,18 +4439,12 @@ async function getActiveTab() {
     return null;
 }
 
-function sendTabMessage(tabId, message) {
-    return extensionApiPromise(
-        (done) => chrome.tabs.sendMessage(tabId, message, done),
-        () => chrome.tabs.sendMessage(tabId, message)
-    );
+function sendTabMessage(tabId,message) {
+    return globalThis.CpoBrowserApi.invoke('tabSend',tabId,message);
 }
 
 function createTab(createProperties) {
-    return extensionApiPromise(
-        (done) => chrome.tabs.create(createProperties, done),
-        () => chrome.tabs.create(createProperties)
-    );
+    return globalThis.CpoBrowserApi.invoke('tabCreate',createProperties);
 }
 
 async function openExtensionPopupPage() {
