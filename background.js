@@ -191,6 +191,8 @@ let scheduledStorageWrite = Promise.resolve();
 
 if (typeof importScripts === 'function') {
     importScripts('utils.js', 'rust-queue-bridge.js', 'provider-adapter.js');
+} else if(typeof require==='function'&&!globalThis.CpoBrowserApi) {
+    require('./utils.js');
 }
 
 let providerAdapterRegistry = typeof globalThis !== 'undefined' ? globalThis.ProviderAdapterRegistry : null;
@@ -3082,9 +3084,6 @@ async function sendPromptToSpecificTab(tabId, text, expectedJob = jobs.get(tabId
         const provider = getActiveProviderAdapter(tabUrl) ||
             getActiveProviderAdapter(job?.provider) ||
             getActiveProviderAdapter('chatgpt');
-        const providerName = provider?.name || 'Provider';
-
-
         const beforeInspect = await inspectTabCommandTurns(tabId, {
             expectedText: text,
             expectedFingerprint: job?.commandFingerprint || fingerprintCommandTextForJob(text)
@@ -3098,9 +3097,7 @@ async function sendPromptToSpecificTab(tabId, text, expectedJob = jobs.get(tabId
 
         const ownsSubmission = () => !job || (jobs.get(tabId) === job && job.isRunning && !job.isStopped && !job.isPaused);
         const stageDecision = (stage, flags) => globalThis.CpoQueueEngine?.call('cpo_submission_stage',
-            [stage, flags | Number(ownsSubmission())]) ??
-            (!ownsSubmission() ? 0 : stage === 0 ? 1 : stage === 1 && (flags & 4) ? 2 :
-                stage === 2 && (flags & 8) ? 3 : 0);
+            [stage, flags | Number(ownsSubmission())]) ?? 0;
         if (stageDecision(0, Number(!!beforeInspect.ok) << 1) !== 1) {
             return { ok: false, error: 'Queue stopped or paused before submission.', details: { failureClass: 'non-retryable' } };
         }
