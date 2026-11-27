@@ -5,7 +5,7 @@
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! { core::arch::wasm32::unreachable() }
 
 #[no_mangle]
-pub extern "C" fn cpo_queue_abi() -> u32 { 6 }
+pub extern "C" fn cpo_queue_abi() -> u32 { 7 }
 
 const OFFSET: u32 = 2166136261;
 const PRIME: u32 = 16777619;
@@ -708,9 +708,49 @@ pub extern "C" fn cpo_log_sensitive(len:u32)->u32 {
     sensitive_key(unsafe {core::slice::from_raw_parts(cpo_fingerprint_buffer() as *const u16,len as usize)}) as u32
 }
 
+// Browser message/API dispatch tables. Unknown names never authorize effects.
+const CONTENT_EVENTS: &[&[u8]] = &[b"GET_NATIVE_SUBMISSION_CAPABILITY",b"NATIVE_SUBMIT_PROMPT",b"TOGGLE_OPTIMIZER",b"UPDATE_CONFIG",b"CPO_HISTORY_BATCH",b"CAN_DISCARD_INACTIVE_TAB",b"GET_STATUS",b"GET_CONVERSATION_IDENTITY",b"CHECK_GENERATION_STATE",b"GET_COMMAND_TURN_SNAPSHOT",b"GET_COMMAND_RESPONSE_STATE",b"INSPECT_GENERATION_STATE",b"CLICK_RETRY_BUTTON",b"RELOAD_PAGE",b"GET_ENTER_DIAGNOSTICS",b"DEBUG_MESSAGES"];
+const BACKGROUND_EVENTS: &[&[u8]] = &[b"authorizeNativeQueueClick",b"discardHistorySource",b"startSequence",b"enqueueMessage",b"retryPausedJob",b"stopSequence",b"stopAllSequences",b"getRunningJobs",b"getQueueDebugLogs",b"clearQueueDebugLogs",b"logAutomationEvent",b"scheduleMessage",b"listScheduledMessages",b"cancelScheduledMessage",b"deleteScheduledMessage",b"retryScheduledMessage"];
+const API_EVENTS: &[&[u8]] = &[b"localGet",b"localSet",b"syncGet",b"syncSet",b"tabGet",b"tabQuery",b"tabUpdate",b"tabCreate",b"tabSend",b"runtimeSend",b"tabDiscard",b"tabReload"];
+fn event_code(domain:u32, input:&[u16])->u32 {
+    let table=match domain {0=>CONTENT_EVENTS,1=>BACKGROUND_EVENTS,2=>API_EVENTS,_=>return 0};
+    table.iter().position(|name|ascii_eq(input,name)).map_or(0,|i|i as u32+1)
+}
+#[cfg(target_arch="wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_event_code(domain:u32,len:u32)->u32 {
+    if len as usize>CHUNK{return 0;}
+    event_code(domain,unsafe{core::slice::from_raw_parts(cpo_fingerprint_buffer() as *const u16,len as usize)})
+}
+// Content event capability: 0 bootstrap/read-only, 1 observation,
+// 2 action, 3 snapshot, 4 safety.
+#[no_mangle]
+pub extern "C" fn cpo_content_event_kind(code:u32)->u32 {
+    match code {2|13=>2,5=>3,6=>4,9..=12=>1,_=>0}
+}
+// API selection: promise API first, callback API second. Refuse unknown
+// operation/argument count and never retry a mutating operation.
+#[no_mangle]
+pub extern "C" fn cpo_api_mode(code:u32,argc:u32,flags:u32)->u32 {
+    let expected=match code{1..=6|8|10|11=>1,7|9=>2,12=>1,_=>return 0};
+    if argc!=expected{return 0;}
+    if flags&1!=0{1}else if flags&2!=0{2}else{0}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn browser_event_dispatch() {
+        assert_eq!(event_code(0,&"CPO_HISTORY_BATCH".encode_utf16().collect::<Vec<_>>()),5);
+        assert_eq!(event_code(1,&"stopSequence".encode_utf16().collect::<Vec<_>>()),6);
+        assert_eq!(event_code(2,&"tabSend".encode_utf16().collect::<Vec<_>>()),9);
+        assert_eq!(event_code(2,&"constructor".encode_utf16().collect::<Vec<_>>()),0);
+        assert_eq!(cpo_content_event_kind(5),3);
+        assert_eq!(cpo_api_mode(9,2,3),1);
+        assert_eq!(cpo_api_mode(9,2,2),2);
+        assert_eq!(cpo_api_mode(9,1,3),0);
+    }
     #[test]
     fn application_policies() {
         assert_eq!(cpo_setting_number(0,900.0),500);
