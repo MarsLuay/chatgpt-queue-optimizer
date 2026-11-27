@@ -11,7 +11,7 @@ async function nativeStore() {
     const store = new CpoHistoryStore(null);
     const result = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     store.core = result.instance.exports;
-    assert.equal(store.core.cpo_history_abi(), 1);
+    assert.equal(store.core.cpo_history_abi(), 2);
     return store;
 }
 
@@ -98,4 +98,22 @@ test('history transport creates, appends, finalizes, pages and deletes via nativ
         if (oldRange === undefined) delete global.IDBKeyRange;
         else global.IDBKeyRange = oldRange;
     }
+});
+
+test('compressed rows are smaller and readable with and without WASM', { skip }, async () => {
+    const store = await nativeStore();
+    const row = { index: 0, role: 'assistant', text: 'Repeated Unicode text 🌍 café. '.repeat(500), truncated: false };
+    const record = store.prepareRow(row, 0, 0);
+    assert.equal(Buffer.from(record.stored.subarray(0, 4)).toString('ascii'), 'CPO2');
+    assert.ok(record.stored.length < Buffer.byteLength(row.text));
+    assert.deepEqual(store.decodeRow(record.stored, 0), row);
+    const fallback = new CpoHistoryStore(null);
+    assert.deepEqual(fallback.decodeRow(record.stored, 0), row);
+    const bad = record.stored.slice();
+    bad[16] = 128; bad[17] = 0; bad[18] = 0;
+    assert.throws(() => store.decodeRow(bad, 0), /Corrupt/);
+    assert.throws(() => fallback.decodeRow(bad, 0), /Corrupt/);
+    const scratch = new Uint8Array(store.core.memory.buffer, store.core.cpo_history_output(),
+        store.core.cpo_history_capacity());
+    assert.ok(scratch.every(byte => byte === 0));
 });
