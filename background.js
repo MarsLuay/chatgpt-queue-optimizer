@@ -561,7 +561,7 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
             await updateRunningJobsStorage({ force: true });
 
             if (!alreadyPresent) {
-                const sendResult = await sendPromptToSpecificTab(tabId, handoffText);
+                const sendResult = await sendPromptToSpecificTab(tabId, handoffText, job);
                 if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
                     return { action: 'return' };
                 }
@@ -1916,9 +1916,9 @@ async function handleProcessSending(tabId, job) {
 
     await updateRunningJobsStorage({ force: true });
 
-    const sendResult = await sendPromptToSpecificTab(tabId, job.currentMessage);
+    const sendResult = await sendPromptToSpecificTab(tabId, job.currentMessage, job);
 
-    if (!jobs.has(tabId) || job.isStopped) {
+    if (jobs.get(tabId) !== job || job.isStopped || job.isPaused || !job.isRunning) {
         return { action: 'return' };
     }
 
@@ -2879,11 +2879,11 @@ async function inspectTabCommandTurns(tabId, { expectedText, expectedFingerprint
 
 /**
  * @param {number} tabId
- * @param {{ expectedText?: string, beforeSnapshot?: { userTurns?: Array<{ turnId?: string, matchedExpected?: boolean, fingerprint?: string }>, latestUserTurnId?: string|null, matchedUserTurnId?: string|null, conversationId?: string|null }, timeoutMs?: number, pollMs?: number }} [options]
+ * @param {{ expectedJob?: QueueJob, expectedText?: string, beforeSnapshot?: { userTurns?: Array<{ turnId?: string, matchedExpected?: boolean, fingerprint?: string }>, latestUserTurnId?: string|null, matchedUserTurnId?: string|null, conversationId?: string|null }, timeoutMs?: number, pollMs?: number }} [options]
  */
-async function waitForSubmissionAck(tabId, { expectedText, beforeSnapshot, timeoutMs, pollMs } = {}) {
+async function waitForSubmissionAck(tabId, { expectedText, beforeSnapshot, timeoutMs, pollMs, expectedJob = jobs.get(tabId) } = {}) {
+    const job = expectedJob;
     await globalThis.CpoQueueEngine?.load();
-    const job = jobs.get(tabId);
     const provider = getActiveProviderAdapter(job?.provider) || getActiveProviderAdapter('chatgpt');
     const timeout = Number(timeoutMs) > 0 ? Number(timeoutMs) : QUEUE_WAIT_POLICY.submissionAckTimeoutMs;
     const interval = Number(pollMs) > 0 ? Number(pollMs) : QUEUE_WAIT_POLICY.submissionAckPollMs;
@@ -2991,7 +2991,7 @@ async function waitForSubmissionAck(tabId, { expectedText, beforeSnapshot, timeo
     };
 }
 
-async function sendPromptToSpecificTab(tabId, text) {
+async function sendPromptToSpecificTab(tabId, text, expectedJob = jobs.get(tabId)) {
     try {
         await globalThis.CpoQueueEngine?.load();
         let tabUrl = '';
@@ -3002,7 +3002,8 @@ async function sendPromptToSpecificTab(tabId, text) {
             tabUrl = '';
         }
 
-        const job = jobs.get(tabId);
+        const job = expectedJob;
+        if (job && jobs.get(tabId) !== job) return { ok: false, error: 'Queue ownership changed.', details: { failureClass: 'user-stop' } };
         const provider = getActiveProviderAdapter(tabUrl) ||
             getActiveProviderAdapter(job?.provider) ||
             getActiveProviderAdapter('chatgpt');
@@ -3374,7 +3375,8 @@ async function sendPromptToSpecificTab(tabId, text) {
             expectedText: text,
             beforeSnapshot: beforeInspect.snapshot,
             timeoutMs: QUEUE_WAIT_POLICY.submissionAckTimeoutMs,
-            pollMs: QUEUE_WAIT_POLICY.submissionAckPollMs
+            pollMs: QUEUE_WAIT_POLICY.submissionAckPollMs,
+            expectedJob: job
         });
 
         if (stageDecision(2, Number(!!ack.ok) << 3) !== 3) {
