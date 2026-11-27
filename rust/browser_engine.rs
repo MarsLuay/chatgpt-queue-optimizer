@@ -252,6 +252,12 @@ pub extern "C" fn cpo_cache_nodes_valid(kind: u32, age: u32, count: u32) -> u32 
 #[no_mangle]
 pub extern "C" fn cpo_mutation_delay() -> u32 { 700 }
 
+#[no_mangle]
+pub extern "C" fn cpo_window_visible(total: u32, target: u32, manual: u32, previous: u32, allow_shrink: u32) -> u32 {
+    let desired = total.min(target.max(manual));
+    if desired < previous && allow_shrink == 0 { total.min(previous) } else { desired }
+}
+
 fn window_action(index: u32, total: u32, visible: u32, offscreen: bool) -> u32 {
     let start = total.saturating_sub(visible);
     if index < start { 1 }
@@ -358,6 +364,9 @@ mod tests {
     use super::*;
     #[test]
     fn window_and_cache_policy() {
+        assert_eq!(cpo_window_visible(100, 8, 33, 50, 1), 33);
+        assert_eq!(cpo_window_visible(100, 8, 0, 33, 0), 33);
+        assert_eq!(cpo_window_visible(100, 8, 0, 33, 1), 8);
         assert_eq!(window_action(89, 100, 10, true), 1);
         assert_eq!(window_action(90, 100, 10, true), 2);
         assert_eq!(window_action(92, 100, 10, true), 0);
