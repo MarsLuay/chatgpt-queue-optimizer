@@ -1,4 +1,14 @@
-/**
+//! Build-generated popup browser adapter. Rust owns refresh generations,
+//! active panel and notification state, pagination and action decisions.
+use super::Result;
+use std::{fs,path::Path};
+pub const OUTPUT:&str="popup.js";
+pub fn generate(stage:&Path)->Result<()>{
+    fs::write(stage.join(OUTPUT),String::from("// @generated Rust popup controller host. DO NOT EDIT.\n")+HOST)?;
+    println!("Generated {OUTPUT} from Rust popup controller");
+    Ok(())
+}
+const HOST:&str=r####"/**
  * @param {RunningJobSnapshot|Record<string, unknown>} [job]
  */
 function requirePopupNative(value){
@@ -65,6 +75,10 @@ document.addEventListener('DOMContentLoaded', async function () {
         for(const input of document.querySelectorAll('button,input,textarea,select'))input.disabled=true;
         return;
     }
+    const facts=(...values)=>values.reduce((flags,value,index)=>flags|(Number(!!value)<<index),0);
+    const epoch=channel=>requirePopupNative(ui.popupControl(0,channel));
+    const current=(channel,token)=>ui.popupControl(1,channel,token)===1;
+    const control=(op,a=0,b=0)=>requirePopupNative(ui.popupControl(op,a,b));
     function renderNative(kind,root,rows,limit=rows.length,dispatch=()=>{}){
         if(ui.renderUI(kind,root,rows,limit,dispatch)!==true){
             const status=document.getElementById('status-indicator');
@@ -158,7 +172,7 @@ document.addEventListener('DOMContentLoaded', async function () {
     let lastOptimizerLogAt = 0;
     let scheduledStatusTimer = null;
     let popupStatusTimer = null;
-    let activePopupStatus = null;
+    let activePopupStatusKey = '';
     let dismissedPopupStatusKey = '';
 
     const EDIT_SEQUENCE_VALUE = '__edit_selected_sequence__';
@@ -337,6 +351,7 @@ document.addEventListener('DOMContentLoaded', async function () {
         }
 
         if (changes.queueDebugLogs) {
+            epoch(4);
             renderQueueLog(Array.isArray(changes.queueDebugLogs.newValue) ? changes.queueDebugLogs.newValue : []);
         }
 
@@ -377,61 +392,38 @@ document.addEventListener('DOMContentLoaded', async function () {
     }
 
     function activateToolPanel(activeTab, activePanel) {
-        [queueToolTab, scheduledToolTab, optimizerToolTab, settingsToolTab].forEach((tab) => {
-            if (tab) {
-                tab.classList.toggle('active', tab === activeTab);
-            }
-        });
-
-        [queueToolPanel, scheduledToolPanel, optimizerToolPanel, settingsToolPanel].forEach((panel) => {
-            if (panel) {
-                panel.classList.toggle('active', panel === activePanel);
-            }
-        });
+        const tabs=[queueToolTab,scheduledToolTab,optimizerToolTab,settingsToolTab];
+        const panels=[queueToolPanel,scheduledToolPanel,optimizerToolPanel,settingsToolPanel];
+        const index=tabs.indexOf(activeTab);
+        if(index<0||panels[index]!==activePanel||control(4,index)!==1)return;
+        const selected=control(5);
+        tabs.forEach((tab,i)=>tab?.classList.toggle('active',i===selected));
+        panels.forEach((panel,i)=>panel?.classList.toggle('active',i===selected));
     }
 
     async function populateTargetTabSelect(selectEl) {
-        if (!selectEl) return;
-
-        const previousValue = selectEl.value || 'current';
-
-        selectEl.textContent = '';
-
-        const currentOption = document.createElement('option');
-        currentOption.value = 'current';
-        currentOption.textContent = 'Current supported tab';
-        selectEl.appendChild(currentOption);
-
-        const activeTab = await getActiveTab();
-        const chatgptTabs = await getAllChatGPTTabs();
-
-        chatgptTabs.forEach(tab => {
-            if (!tab.id) return;
-
-            const option = document.createElement('option');
-            option.value = String(tab.id);
-            option.textContent = cleanTabTitle(tab.title || 'Supported tab');
-            selectEl.appendChild(option);
-        });
-
-        const optionValues = Array.from(selectEl.options).map(opt => opt.value);
-
-        if (previousValue !== 'current' && optionValues.includes(previousValue)) {
-            selectEl.value = previousValue;
-            return;
+        if(!selectEl)return;
+        const channel=selectEl===scheduledTargetTabSelect?1:0;
+        const token=epoch(channel);
+        const [activeTab,chatgptTabs]=await Promise.all([getActiveTab(),getAllChatGPTTabs()]);
+        if(!current(channel,token))return;
+        // Preserve the latest user selection, even if it changed during lookup.
+        const previousValue=selectEl.value||'current';
+        const choice=ui.popupTarget(facts(previousValue!=='current'&&chatgptTabs.some(tab=>String(tab.id)===previousValue),
+            activeTab&&isSupportedProviderUrl(getTabUrl(activeTab)),chatgptTabs[0]?.id));
+        if(choice==null)return;
+        const options=[];
+        const currentOption=document.createElement('option');
+        currentOption.value='current';currentOption.textContent='Current supported tab';
+        options.push(currentOption);
+        for(const tab of chatgptTabs){
+            if(!tab.id)continue;
+            const option=document.createElement('option');
+            option.value=String(tab.id);option.textContent=cleanTabTitle(tab.title||'Supported tab');
+            options.push(option);
         }
-
-        if (activeTab && isSupportedProviderUrl(getTabUrl(activeTab))) {
-            selectEl.value = 'current';
-            return;
-        }
-
-        if (chatgptTabs.length > 0 && chatgptTabs[0].id) {
-            selectEl.value = String(chatgptTabs[0].id);
-            return;
-        }
-
-        selectEl.value = 'current';
+        selectEl.replaceChildren(...options);
+        selectEl.value=choice===1?previousValue:choice===3?String(chatgptTabs[0].id):'current';
     }
 
     async function refreshTargetTabs() {
@@ -444,6 +436,7 @@ document.addEventListener('DOMContentLoaded', async function () {
 
     function showScheduledStatus(message, kind = 'info', duration = 3000) {
         if (!scheduledStatusIndicator) return;
+        const token=epoch(7);
 
         if (scheduledStatusTimer !== null) {
             clearTimeout(scheduledStatusTimer);
@@ -472,6 +465,7 @@ document.addEventListener('DOMContentLoaded', async function () {
 
         if (duration > 0 && normalizedKind !== 'error') {
             scheduledStatusTimer = setTimeout(() => {
+                if(!current(7,token))return;
                 scheduledStatusTimer = null;
                 scheduledStatusIndicator.hidden = true;
                 scheduledStatusIndicator.textContent = '';
@@ -556,10 +550,11 @@ document.addEventListener('DOMContentLoaded', async function () {
         }).catch(() => ({}));
     }
 
-    async function renderScheduledItems(items) {
+    async function renderScheduledItems(items,token) {
         if (!scheduledItemsList) return;
 
         const titleMap = await getScheduledTargetTitleMap();
+        if(!current(2,token))return;
         const sortedItems=globalThis.CpoQueueEngine.scheduledSort(Array.isArray(items)?items:[]);
         if(sortedItems==null)throw new Error('Native scheduled collection unavailable');
 
@@ -576,15 +571,19 @@ document.addEventListener('DOMContentLoaded', async function () {
 
     async function refreshScheduledItems() {
         if (!scheduledItemsList) return;
+        const token=epoch(2);
 
         try {
             const response = await sendScheduledRuntimeMessage({ action: 'listScheduledMessages' });
+            if(!current(2,token))return;
             if (!response.ok) {
                 throw new Error(response.error || 'Could not read scheduled messages.');
             }
-            await renderScheduledItems(response.items);
+            await renderScheduledItems(response.items,token);
         } catch (error) {
-            renderScheduledItems([]);
+            if(!current(2,token))return;
+            await renderScheduledItems([],token);
+            if(!current(2,token))return;
             showScheduledStatus(error.message || 'Could not read scheduled messages.', 'error', 0);
         }
     }
@@ -637,17 +636,19 @@ document.addEventListener('DOMContentLoaded', async function () {
             const message = scheduledMessageInput?.value.trim() || '';
             const dueTs = parseScheduledLocalDateTime(scheduledDueAtInput?.value || '');
 
-            if (!message) {
+            const decision=ui.popupScheduleGuard(facts(message,dueTs,globalThis.CpoQueueEngine.timestampMath(6,dueTs??0,Date.now())===1));
+            if(decision==null)return;
+            if (decision===1) {
                 showScheduledStatus('Type a message before scheduling.', 'error', 0);
                 return;
             }
 
-            if (!dueTs) {
+            if (decision===2) {
                 showScheduledStatus('Choose a valid local date and time.', 'error', 0);
                 return;
             }
 
-            if (globalThis.CpoQueueEngine.timestampMath(6,dueTs,Date.now())!==1) {
+            if (decision===3) {
                 showScheduledStatus('Choose a future local date and time.', 'error', 0);
                 return;
             }
@@ -844,7 +845,9 @@ document.addEventListener('DOMContentLoaded', async function () {
         const runningJobs = await getRunningJobs();
         const selectedJob = runningJobs[String(tab.id)];
 
-        if (selectedJob) {
+        const action=ui.popupSendAction(facts(selectedJob,messages.length));
+        if(action==null)return;
+        if (action===1) {
             chrome.runtime.sendMessage({
                 action: 'stopSequence',
                 tabId: tab.id
@@ -865,7 +868,7 @@ document.addEventListener('DOMContentLoaded', async function () {
             return;
         }
 
-        if (messages.length === 0) {
+        if (action===0) {
             showErrorStatus('No sequence messages to send. Open "Make a sequence" and add messages first.', 'sequence-empty');
             return;
         }
@@ -1014,6 +1017,7 @@ document.addEventListener('DOMContentLoaded', async function () {
                     return;
                 }
 
+                epoch(4);
                 renderQueueLog([]);
                 showTempStatus('Queue log cleared.');
             });
@@ -1034,16 +1038,15 @@ document.addEventListener('DOMContentLoaded', async function () {
     // Rendering thousands of saved prompts at once can freeze the popup.
     // Keep all prompts in memory/storage; only the displayed rows are bounded.
     const MESSAGE_RENDER_CHUNK = 100;
-    let renderedMessageLimit = MESSAGE_RENDER_CHUNK;
     function updateMessagesList() {
-        const rendered=Math.min(messages.length,renderedMessageLimit);
+        const rendered=control(2,messages.length);
         const rows=messages.slice(0,rendered).map((msg,index)=>({fields:[`${index+1}: ${msg}`]}));
         // Only visible prompts are materialized into DOM data. The extra
         // descriptor supplies the load-more label without copying all prompts.
         if(rendered<messages.length)rows.push({fields:['',`Show next ${Math.min(MESSAGE_RENDER_CHUNK,messages.length-rendered)} prompts (${rendered} of ${messages.length} shown)`]});
         renderNative(0,messageList,rows,rendered,(action,index)=>{
             if(action===3){
-                renderedMessageLimit=ui.nextLimit(messages.length,renderedMessageLimit)??renderedMessageLimit;
+                control(3,messages.length);
                 updateMessagesList();return;
             }
             if(index>=messages.length)return;
@@ -1258,7 +1261,9 @@ document.addEventListener('DOMContentLoaded', async function () {
             popupStatusTimer = null;
         }
 
-        activePopupStatus = { key, kind, persistent, source };
+        const token=epoch(6);
+        activePopupStatusKey=key;
+        control(6,facts(true,persistent,source==='queue'));
         statusIndicator.className = `popup-status popup-status-${kind}`;
         statusIndicator.dataset.statusKind = kind;
         statusIndicator.setAttribute('role', kind === 'error' || kind === 'warning' ? 'alert' : 'status');
@@ -1273,7 +1278,7 @@ document.addEventListener('DOMContentLoaded', async function () {
         const duration = Number(options.duration ?? (persistent ? 0 : 2000));
         if (!persistent && duration > 0) {
             popupStatusTimer = setTimeout(() => {
-                if (activePopupStatus?.key === key) {
+                if (current(6,token)) {
                     clearPopupStatus();
                     refreshRunningJobsStatus();
                 }
@@ -1290,8 +1295,8 @@ document.addEventListener('DOMContentLoaded', async function () {
     }
 
     function dismissPopupStatus() {
-        if (activePopupStatus?.persistent && activePopupStatus.source === 'queue') {
-            dismissedPopupStatusKey = activePopupStatus.key;
+        if ((control(8)&7)===7) {
+            dismissedPopupStatusKey = activePopupStatusKey;
         }
 
         clearPopupStatus();
@@ -1303,7 +1308,9 @@ document.addEventListener('DOMContentLoaded', async function () {
             popupStatusTimer = null;
         }
 
-        activePopupStatus = null;
+        epoch(6);
+        control(7);
+        activePopupStatusKey='';
 
         if (resetDismissed) {
             dismissedPopupStatusKey = '';
@@ -1325,11 +1332,10 @@ document.addEventListener('DOMContentLoaded', async function () {
     function refreshQueueLog() {
         if (!queueLogList) return;
 
+        const token=epoch(4);
         getQueueLogEntries()
-            .then(renderQueueLog)
-            .catch(() => {
-                renderQueueLog([]);
-            });
+            .then(logs=>{if(current(4,token))renderQueueLog(logs);})
+            .catch(()=>{if(current(4,token))renderQueueLog([]);});
     }
 
     function getQueueLogEntries() {
@@ -1447,13 +1453,17 @@ document.addEventListener('DOMContentLoaded', async function () {
     }
 
     async function refreshRunningJobsStatus() {
+        const token=epoch(3);
         chrome.runtime.sendMessage({ action: 'getRunningJobs' }, async function (response) {
+            if(!current(3,token))return;
             if (chrome.runtime.lastError) {
                 stopAutomationButton.style.display = 'none';
                 setSendSequenceButtonMode(false);
                 updateMessagesToGoFooter({});
-                await renderRunningInstances({});
-                showErrorStatus(chrome.runtime.lastError.message || 'Could not read running jobs.', 'running-jobs-error');
+                const error=chrome.runtime.lastError.message||'Could not read running jobs.';
+                await renderRunningInstances({},token);
+                if(!current(3,token))return;
+                showErrorStatus(error,'running-jobs-error');
                 return;
             }
 
@@ -1461,30 +1471,31 @@ document.addEventListener('DOMContentLoaded', async function () {
             const runningCount = Object.keys(runningJobs).length;
 
             updateMessagesToGoFooter(runningJobs);
-            await renderRunningInstances(runningJobs);
+            await renderRunningInstances(runningJobs,token);
+            if(!current(3,token))return;
 
             if (runningCount === 0) {
                 stopAutomationButton.style.display = 'none';
                 setSendSequenceButtonMode(false);
-                if (activePopupStatus?.source === 'queue') {
+                if (control(8)&4) {
                     clearPopupStatus({ resetDismissed: true });
                 }
                 return;
             }
 
             const selectedTabId = await getSelectedTabIdForStatus();
+            if(!current(3,token))return;
             const selectedTabJob = selectedTabId ? runningJobs[selectedTabId] : null;
 
             stopAutomationButton.style.display = 'none';
 
-            if (activePopupStatus?.persistent && activePopupStatus.source !== 'queue') {
-                return;
-            }
+            const view=ui.popupQueueView(facts(runningCount,selectedTabJob,selectedTabJob?.isPaused||selectedTabJob?.status==='failed',(control(8)&6)===2));
+            if(view==null||view===1)return;
 
-            if (selectedTabJob) {
+            if (view===3||view===4) {
                 setSendSequenceButtonMode(true);
 
-                if (selectedTabJob.isPaused || selectedTabJob.status === 'failed') {
+                if (view===3) {
                     const reason = selectedTabJob.lastError || selectedTabJob.pausedReason;
                     const reasonText = reason ? ` ${reason}` : '';
                     showPopupStatus(`Queue ${getPopupQueueStatusLabel(selectedTabJob).toLowerCase()}. Remaining: ${selectedTabJob.remaining}.${reasonText}`, {
@@ -1546,11 +1557,12 @@ document.addEventListener('DOMContentLoaded', async function () {
         return titleMap;
     }
 
-    async function renderRunningInstances(runningJobs) {
+    async function renderRunningInstances(runningJobs,token) {
         if (!runningInstancesList) return;
 
         const entries = Object.entries(runningJobs || {});
         const titleMap = await getTabTitleMap();
+        if(!current(3,token))return;
 
         const rows=entries.map(([tabId,job])=>({fields:[formatPopupRunningInstanceText(titleMap[tabId]||'ChatGPT',job)],flags:Number(!!job.isPaused)}));
         renderNative(3,runningInstancesList,rows,rows.length,(action,index)=>{
@@ -1792,9 +1804,11 @@ The sequence should do the following: `;
     }
 
     async function scheduleOptimizerAutoSave() {
+        const token=epoch(8);
         clearTimeout(optimizerAutoSaveTimer);
 
         optimizerAutoSaveTimer = setTimeout(async function () {
+            if(!current(8,token))return;
             if (!optimizerWindowSize || !optimizerBatchSize || !optimizerAutoScroll) return;
 
             const newConfig = {
@@ -1818,8 +1832,10 @@ The sequence should do the following: `;
 
             Object.assign(newConfig,globalThis.CpoQueueEngine?.settings(newConfig)??{});
             await setSyncStorage(newConfig);
+            if(!current(8,token))return;
 
             const tab = await getOptimizerTargetTab();
+            if(!current(8,token))return;
 
             if (!tab) {
                 setOptimizerStatus('Settings saved. No ChatGPT tab selected/open.', 'disabled');
@@ -1832,14 +1848,17 @@ The sequence should do the following: `;
 
             try {
                 await ensureOptimizerContentScript(tab.id);
+                if(!current(8,token))return;
 
                 await sendOptimizerMessage(tab.id, {
                     type: 'UPDATE_CONFIG',
                     config: newConfig
                 });
+                if(!current(8,token))return;
 
                 await refreshOptimizerStatus();
             } catch (error) {
+                if(!current(8,token))return;
                 setOptimizerStatus('Settings saved. Optimizer not loaded on selected tab.', 'disabled');
                 logOptimizerEvent('error', 'Optimizer config update failed.', {
                     action: 'UPDATE_CONFIG',
@@ -1886,6 +1905,7 @@ The sequence should do the following: `;
     }
 
     async function refreshOptimizerStatus() {
+        const token=epoch(5);
         if (
             !optimizerStatus ||
             !optimizerToggle ||
@@ -1895,6 +1915,7 @@ The sequence should do the following: `;
         }
 
         const tab = await getOptimizerTargetTab();
+        if(!current(5,token))return;
 
         if (!tab) {
             setOptimizerStatus('No ChatGPT tab selected/open', 'disabled');
@@ -1908,6 +1929,7 @@ The sequence should do the following: `;
 
         try {
             const response = await ensureOptimizerContentScript(tab.id);
+            if(!current(5,token))return;
 
             if (response && response.enabled) {
                 setOptimizerStatus('Optimizer Active', 'enabled');
@@ -1922,6 +1944,7 @@ The sequence should do the following: `;
                 optimizerStats.style.display = 'none';
             }
         } catch (error) {
+            if(!current(5,token))return;
             setOptimizerStatus(`Optimizer not loaded: ${error.message}`, 'disabled');
             optimizerToggle.textContent = 'Enable';
             optimizerStats.style.display = 'none';
@@ -2045,3 +2068,4 @@ The sequence should do the following: `;
         }
     }, 15000);
 });
+"####;

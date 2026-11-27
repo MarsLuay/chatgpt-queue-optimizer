@@ -546,3 +546,19 @@ test('native content controller rejects concurrent submissions and stale bind ge
     assert.equal(bridge.contentRoute(1|4|16|32),0);
     assert.equal(bridge.contentRoute(1|4|8|16|32),2);
 });
+
+
+test('native popup generations and bounded rendering reject stale UI results',{skip},async()=>{
+    const bridge=await engine();
+    const a=bridge.popupControl(0,3),b=bridge.popupControl(0,2);
+    assert.equal(bridge.popupControl(1,3,a),1);
+    const newer=bridge.popupControl(0,3);
+    assert.notEqual(a,newer);assert.equal(bridge.popupControl(1,3,a),0);
+    assert.equal(bridge.popupControl(1,2,b),1);
+    assert.equal(bridge.popupControl(2,800),100);
+    assert.equal(bridge.popupControl(3,800),200);
+    assert.equal(bridge.popupTarget(7),1);
+    assert.equal(bridge.popupScheduleGuard(3),3);
+    assert.equal(bridge.popupSendAction(3),1);
+    assert.equal(bridge.popupQueueView(7),3);
+});

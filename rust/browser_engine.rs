@@ -24,6 +24,10 @@ pub extern "C" fn cpo_browser_abi() -> u32 { browser_abi::VERSION }
 #[path="browser_abi.rs"]
 mod browser_abi;
 mod content_controller;
+mod popup_controller;
+pub use popup_controller::{cpo_popup_target,cpo_popup_schedule_guard,cpo_popup_send_action,cpo_popup_queue_view};
+#[cfg(target_arch="wasm32")]
+pub use popup_controller::cpo_popup_control;
 pub use content_controller::{cpo_content_route,cpo_content_guard,cpo_content_history_offset,cpo_content_mutation};
 #[cfg(target_arch="wasm32")]
 pub use content_controller::cpo_content_control;

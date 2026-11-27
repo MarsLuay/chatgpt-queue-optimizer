@@ -307,6 +307,11 @@
         }
         nextLimit(total,shown) { return this.invoke({},core=>core.cpo_ui_next_limit(total,shown)>>>0); }
         sequenceSelection(flags,count) { return this.invoke({},core=>core.cpo_ui_sequence_select(flags,count)>>>0); }
+        popupControl(op,a=0,b=0){return this.invoke({},core=>core.cpo_popup_control(op,a,b)>>>0);}
+        popupTarget(flags){return this.invoke({},core=>core.cpo_popup_target(flags)>>>0);}
+        popupScheduleGuard(flags){return this.invoke({},core=>core.cpo_popup_schedule_guard(flags)>>>0);}
+        popupSendAction(flags){return this.invoke({},core=>core.cpo_popup_send_action(flags)>>>0);}
+        popupQueueView(flags){return this.invoke({},core=>core.cpo_popup_queue_view(flags)>>>0);}
 
         handle(node) {
             if (!node) return 0;

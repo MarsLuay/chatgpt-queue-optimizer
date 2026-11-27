@@ -113,6 +113,7 @@ module.exports = [
             'rust-browser-bindings.js',
             'rust-queue-bridge.js',
             'content.js',
+            'popup.js',
             'utils.js',
             'history-viewer.js',
             'history-store.js',

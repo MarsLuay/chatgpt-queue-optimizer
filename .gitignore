@@ -33,3 +33,4 @@ node_modules/
 /history-store.js
 /rust-queue-bridge.js
 /content.js
+/popup.js
