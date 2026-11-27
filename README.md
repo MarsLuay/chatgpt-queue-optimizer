@@ -314,3 +314,7 @@ The browser engine now drives the provider turn-observation loop, role classific
 ### Native generation observation scheduling (browser ABI 13)
 
 The browser engine controls generation observation stages and canonical-stop precedence. The bridge supplies scoped DOM queries and passes native semantic observations to the queue engine. Gemini and Claude now share one observation projection. Provider integration fixtures initialize real compiled WASM engines instead of relying on removed JavaScript fallbacks; the full test suite still requires validation and remaining fixture migration.
+
+### Native retry selection and compatibility observation (browser ABI 14)
+
+The browser engine now controls latest-turn retry precedence, alert traversal and reverse active-surface fallback, along with required-control diagnostics and optimizer-only message discovery. The host exposes browser queries and opaque DOM objects; the queue engine continues to own semantic matching and compatibility classification. Regression coverage is included, but native compilation and live browser parity remain unverified.

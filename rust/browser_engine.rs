@@ -20,7 +20,7 @@ fn h(op: u32, a: u32, b: u32, c: u32) -> u32 {
 }
 
 #[no_mangle]
-pub extern "C" fn cpo_browser_abi() -> u32 { 13 }
+pub extern "C" fn cpo_browser_abi() -> u32 { 14 }
 
 #[cfg(target_arch = "wasm32")]
 mod sequence;
@@ -1003,5 +1003,43 @@ pub extern "C" fn cpo_provider_observe_generation(provider:u32)->u32{
     if chat&&h(176,5,0,0)!=0{flags|=4;}
     h(176,6,provider,0);
     if h(176,7,provider,0)!=0{flags|=16;}
+    flags
+}
+
+
+// Native retry precedence: newest matching button in the latest turn,
+// then the first matching alert, then newest active-surface match.
+// Host query batches return only semantically eligible button handles.
+#[cfg(target_arch="wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_provider_retry()->u32{
+    let latest=h(177,0,0,0);
+    if latest>0{return h(178,latest-1,0,0);}
+    let alerts=h(177,1,0,0);
+    for alert in 0..alerts{
+        let count=h(177,2,alert,0);
+        if count>0{return h(178,count-1,0,0);}
+    }
+    let count=h(177,3,0,0);
+    for index in (0..count).rev(){
+        if h(178,index,1,0)==1{return 1;}
+    }
+    0
+}
+
+// The compatibility contract always observes root, composer and send
+// action in that order. Message discovery and route classification are
+// performed only for providers with conversation optimization support.
+#[cfg(target_arch="wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_provider_diagnostics(optimizer:u32)->u32{
+    let mut flags=0;
+    for signal in 0..3{
+        if h(179,signal,0,0)!=0{flags|=1<<signal;}
+    }
+    if optimizer!=0{
+        h(179,3,0,0);
+        if h(179,4,0,0)!=0{flags|=8;}
+    }
     flags
 }

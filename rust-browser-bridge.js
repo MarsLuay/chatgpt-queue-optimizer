@@ -21,11 +21,11 @@
                     cpo: { host: (op, a, b, c) => this.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
                 });
                 const core = result.instance.exports;
-                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 13 ||
+                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 14 ||
                     !['cpo_collect_resources', 'cpo_discover_messages', 'cpo_execute_media',
                         'cpo_apply_window', 'cpo_window_visible', 'cpo_capture_history', 'cpo_process_mutations',
                         'cpo_cache_ttl', 'cpo_cache_valid', 'cpo_cache_nodes_valid', 'cpo_mutation_delay', 'cpo_provider_selectors', 'cpo_dom_composer_write', 'cpo_dom_composer_read',
-                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool', 'cpo_ui_render', 'cpo_ui_sequence_edit', 'cpo_ui_next_limit', 'cpo_ui_sequence_select', 'cpo_ui_variables', 'cpo_ui_saved_sequence', 'cpo_sequence_import', 'cpo_sequence_substitute', 'cpo_event_ready','cpo_restore_window','cpo_restore_journal','cpo_intersection_transition','cpo_message_predicate','cpo_first_matching_selector','cpo_dom_event_ancestor','cpo_dom_normalize_turn','cpo_dom_last_assistant','cpo_provider_turns','cpo_provider_exact_text','cpo_provider_scan_turns','cpo_provider_observe_generation'].every(name => typeof core[name] === 'function')) {
+                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool', 'cpo_ui_render', 'cpo_ui_sequence_edit', 'cpo_ui_next_limit', 'cpo_ui_sequence_select', 'cpo_ui_variables', 'cpo_ui_saved_sequence', 'cpo_sequence_import', 'cpo_sequence_substitute', 'cpo_event_ready','cpo_restore_window','cpo_restore_journal','cpo_intersection_transition','cpo_message_predicate','cpo_first_matching_selector','cpo_dom_event_ancestor','cpo_dom_normalize_turn','cpo_dom_last_assistant','cpo_provider_turns','cpo_provider_exact_text','cpo_provider_scan_turns','cpo_provider_observe_generation','cpo_provider_retry','cpo_provider_diagnostics'].every(name => typeof core[name] === 'function')) {
                     throw new Error('Browser WASM ABI mismatch');
                 }
                 this.exports = core;
@@ -159,6 +159,20 @@
             return this.invoke({root,selectors,seen:new Set(),nodes:[]},(core,ctx)=>{
                 if(core.cpo_provider_turns(selectors.length)!==ctx.nodes.length)throw new Error('Native turn discovery count mismatch');
                 return ctx.nodes;
+            });
+        }
+        providerRetry(adapter,doc,turns){
+            const latest=turns.at(-1)||null;
+            return this.invoke({adapter,doc,turns,latest,members:new Set(turns),matches:[],alerts:[],result:null,selector:''},(core,ctx)=>{
+                const found=core.cpo_provider_retry()===1;
+                if(found!==!!ctx.result)throw new Error('Native retry selection mismatch');
+                return ctx.result||{element:null,selector:'',signalKey:'retryButton'};
+            });
+        }
+        providerDiagnostics(adapter,doc,optimizer){
+            return this.invoke({adapter,doc,diagnostics:{}},(core,ctx)=>{
+                const flags=core.cpo_provider_diagnostics(Number(optimizer))>>>0;
+                return {...ctx.diagnostics,flags:flags&7,valid:!!(flags&8)};
             });
         }
         providerObserveGeneration(adapter,doc,turns=[]){
@@ -646,6 +660,43 @@
                         }
                     }finally{this.context=outer;}
                 }
+                case 177:{
+                    const {adapter,doc,latest}=ctx;
+                    const outer=this.context;
+                    this.context=null;
+                    try{
+                        if(a===1){ctx.alerts=adapter.getSelectorNodes(doc,'errorAlerts');return ctx.alerts.length;}
+                        const root=a===0?latest:a===2?ctx.alerts[b]?.element:doc;
+                        ctx.selector=a===0?'retryButton.latestTurn':a===2?ctx.alerts[b]?.selector||'':'retryButton.semantic';
+                        ctx.matches=root?requireNative(globalThis.CpoQueueEngine?.providerButtons(1,1,Array.from(root.querySelectorAll?.('button')||[]))):[];
+                        return ctx.matches.length;
+                    }finally{this.context=outer;}
+                }
+                case 178:{
+                    const element=ctx.matches[a];
+                    if(!element)return 0;
+                    if(b&&!ctx.adapter.isActiveResponseNode(element,ctx.turns,ctx.latest,ctx.members))return 0;
+                    ctx.result={element,selector:ctx.selector,signalKey:'retryButton'};
+                    return 1;
+                }
+                case 179:{
+                    const {adapter,doc,diagnostics}=ctx;
+                    const outer=this.context;
+                    this.context=null;
+                    try{
+                        switch(a){
+                            case 0:diagnostics.root=adapter.getSelectorMatch(doc,'mainRoot');return Number(!!diagnostics.root.element);
+                            case 1:diagnostics.composer=adapter.getComposerMatch(doc);return Number(!!diagnostics.composer.element);
+                            case 2:diagnostics.sendAction=adapter.getSendActionMatch(doc);return Number(!!diagnostics.sendAction.element);
+                            case 3:diagnostics.discovery=adapter.getMessageDiscovery(doc,diagnostics.root.element);return 1;
+                            case 4:{
+                                const identity=adapter.getConversationIdentity(doc?.defaultView?.location||(typeof location!=='undefined'?location:''));
+                                return Number(identity.type==='new'||identity.type==='existing');
+                            }
+                            default:return 0;
+                        }
+                    }finally{this.context=outer;}
+                }
                 case 80: {
                     const selector = ctx.selectors[a];
                     try {
@@ -1127,9 +1178,10 @@
         }
 
         getCompatibilityDiagnostics(doc = (typeof document !== 'undefined' ? document : null)) {
-            const root = this.getSelectorMatch(doc, 'mainRoot');
-            const composer = this.getComposerMatch(doc);
-            const sendAction = this.getSendActionMatch(doc);
+            const empty={element:null,selector:''};
+            const {root,composer,sendAction}=doc&&this._nativeSelectorEngine
+                ? requireNative(this._nativeSelectorEngine.providerDiagnostics(this,doc,false))
+                : {root:empty,composer:empty,sendAction:empty};
             return {
                 provider: this.id,
                 root: summarizeSelectorMatch({ ...root, signalKey: 'mainRoot' }),
@@ -1511,15 +1563,8 @@
         }
 
         getCompatibilityDiagnostics(doc = (typeof document !== 'undefined' ? document : null)) {
-            const root = this.getSelectorMatch(doc, 'mainRoot');
-            const composer = this.getComposerMatch(doc);
-            const sendAction = this.getSendActionMatch(doc);
-            const discovery = this.getMessageDiscovery(doc, root.element);
-            const conversation = this.getConversationIdentity(
-                doc?.defaultView?.location || (typeof location !== 'undefined' ? location : '')
-            );
-            const flags=Number(!!root.element)|(Number(!!composer.element)<<1)|(Number(!!sendAction.element)<<2);
-            const [state,...requiredFailures]=requireNative(globalThis.CpoQueueEngine?.providerDiagnostics(flags,discovery.nodes.length,['new','existing'].includes(conversation.type)));
+            const {root,composer,sendAction,discovery,flags,valid}=requireNative(this._nativeSelectorEngine?.providerDiagnostics(this,doc,true));
+            const [state,...requiredFailures]=requireNative(globalThis.CpoQueueEngine?.providerDiagnostics(flags,discovery.nodes.length,valid));
 
             return {
                 provider: this.id,
@@ -1754,40 +1799,8 @@
             };
             if (!doc) return empty;
 
-            const matches=buttons=>requireNative(globalThis.CpoQueueEngine?.providerButtons(1,1,buttons));
-            const turns = this.getConversationTurns(doc);
-            const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
-
-            if (latestTurn) {
-                const turnButtons = Array.from(latestTurn.querySelectorAll('button'));
-                const foundInTurn = matches(turnButtons).at(-1);
-                if (foundInTurn) {
-                    return {
-                        element: foundInTurn,
-                        selector: 'retryButton.latestTurn',
-                        signalKey: 'retryButton'
-                    };
-                }
-            }
-
-            const alertMatches = this.getSelectorNodes(doc, 'errorAlerts');
-            for (const alertMatch of alertMatches) {
-                const alertButtons = Array.from(alertMatch.element.querySelectorAll('button'));
-                const foundInAlert = matches(alertButtons).at(-1);
-                if (foundInAlert) {
-                    return {
-                        element: foundInAlert,
-                        selector: alertMatch.selector,
-                        signalKey: 'retryButton'
-                    };
-                }
-            }
-
-            const allButtons = Array.from(doc.querySelectorAll('button'));
-            const fallback = matches(allButtons).reverse().find(btn=>this.isActiveResponseNode(btn,turns,latestTurn));
-            return fallback
-                ? { element: fallback, selector: 'retryButton.semantic', signalKey: 'retryButton' }
-                : empty;
+            const turns=this.getConversationTurns(doc);
+            return requireNative(this._nativeSelectorEngine?.providerRetry(this,doc,turns));
         }
 
         /** @param {Document | Element | null} [doc] */

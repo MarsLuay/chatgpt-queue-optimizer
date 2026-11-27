@@ -23,7 +23,7 @@ async function engine(optimizer = owner()) {
         cpo: { host: (op, a, b, c) => bridge.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
     });
     bridge.exports = result.instance.exports;
-    assert.equal(bridge.exports.cpo_browser_abi(), 13);
+    assert.equal(bridge.exports.cpo_browser_abi(), 14);
     return bridge;
 }
 
@@ -401,4 +401,45 @@ test('native observation orders canonical generation signals before fallback',{s
     assert.equal(result.signals.stopButton,'canonical-stop');
     assert.deepEqual(calls,['stopButton','streaming','status','spinner','errorAlerts','retry']);
     assert.equal(bridge.context,null);
+});
+
+test('native retry traversal prefers newest latest-turn match and avoids scanning alerts',{skip},async()=>{
+    const bridge=await engine();
+    const queue=require('../rust-queue-bridge.js');
+    queue.install(new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(path.join(__dirname,'..','optimizer_queue.wasm'))),{}).exports);
+    const button=(label)=>({getAttribute:key=>key==='aria-label'?label:null,innerText:label});
+    const first=button('Retry'),last=button('Try again');
+    const latest={querySelectorAll:()=>[first,last]};
+    const adapter={getSelectorNodes(){throw Error('alert scan unnecessary');},isActiveResponseNode(){throw Error('fallback scan unnecessary');}};
+    const doc={querySelectorAll(){throw Error('document scan unnecessary');}};
+    assert.deepEqual(bridge.providerRetry(adapter,doc,[latest]),{element:last,selector:'retryButton.latestTurn',signalKey:'retryButton'});
+    assert.equal(bridge.context,null);
+});
+test('native retry traversal checks ordered alerts and rejects historical fallback buttons',{skip},async()=>{
+    const bridge=await engine();
+    const queue=require('../rust-queue-bridge.js');
+    queue.install(new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(path.join(__dirname,'..','optimizer_queue.wasm'))),{}).exports);
+    const button=()=>({innerText:'Retry',getAttribute:()=>null});
+    const old=button(),live=button();
+    const doc={querySelectorAll:()=>[live,old]};
+    const empty={querySelectorAll:()=>[]};
+    let alerts=[{element:empty,selector:'first'},{element:{querySelectorAll:()=>[live]},selector:'second'}];
+    const adapter={getSelectorNodes:()=>alerts,isActiveResponseNode:node=>node===live};
+    assert.equal(bridge.providerRetry(adapter,doc,[empty]).selector,'second');
+    alerts=[];
+    assert.equal(bridge.providerRetry(adapter,doc,[empty]).element,live);
+    assert.equal(bridge.context,null);
+});
+test('native diagnostic scheduler observes required controls then discovery and route',{skip},async()=>{
+    const bridge=await engine();
+    const calls=[];
+    const root={};
+    const adapter={getSelectorMatch(){calls.push('root');return {element:root};},getComposerMatch(){calls.push('composer');return {element:null};},getSendActionMatch(){calls.push('send');return {element:{}};},getMessageDiscovery(_doc,element){assert.equal(element,root);calls.push('discovery');return {nodes:[]};},getConversationIdentity(){calls.push('identity');return {type:'new'};}};
+    const result=bridge.providerDiagnostics(adapter,{},true);
+    assert.equal(result.flags,5);
+    assert.equal(result.valid,true);
+    assert.deepEqual(calls,['root','composer','send','discovery','identity']);
+    calls.length=0;
+    assert.equal(bridge.providerDiagnostics(adapter,{},false).flags,5);
+    assert.deepEqual(calls,['root','composer','send']);
 });
