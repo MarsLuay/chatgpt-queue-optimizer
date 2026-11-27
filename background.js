@@ -70,6 +70,53 @@ function isIdleDiscardCandidate(tab, minutes, now = Date.now()) {
         now - tab.lastAccessed >= minutes * 60000;
 }
 
+// Explicit user request from the extension's local reader, not from a web page.
+async function discardHistorySource(request, sender) {
+    if (typeof chrome.tabs.discard !== 'function' ||
+        typeof sender?.url !== 'string' || sender.url.split('?')[0] !== chrome.runtime.getURL('history-viewer.html')) {
+        return { ok: false, error: 'Tab unloading is unavailable from this context.' };
+    }
+    const tabId = Number(request.tabId);
+    const expectedUrl = request.expectedUrl;
+    const expectedIdentity = request.expectedIdentity;
+    if (!Number.isSafeInteger(tabId) || tabId <= 0 || typeof expectedUrl !== 'string' ||
+        typeof expectedIdentity !== 'string' || !expectedIdentity ||
+        getActiveProviderAdapter(expectedUrl)?.id !== 'chatgpt') {
+        return { ok: false, error: 'Invalid source conversation.' };
+    }
+    const safeTab = tab => !!tab && tab.id === tabId && tab.url === expectedUrl &&
+        tab.active === false && tab.highlighted !== true && tab.discarded !== true &&
+        tab.pinned !== true && tab.audible !== true && tab.incognito !== true &&
+        tab.autoDiscardable !== false && tab.status === 'complete';
+    async function noWork() {
+        const [stored, scheduled] = await Promise.all([
+            readLocalStorage([QUEUE_DURABLE_STATE_KEY]), readScheduledMessages()
+        ]);
+        return !jobs.has(tabId) && !stored[QUEUE_DURABLE_STATE_KEY]?.[tabId] &&
+            !scheduled.some(item => Number(item.tabId) === tabId &&
+                (item.status === 'pending' || item.status === 'firing'));
+    }
+    try {
+        const before = await getTab(tabId);
+        if (!safeTab(before) || !await noWork()) return { ok: false, error: 'Source tab is active, protected, or has queue work.' };
+        const identity = await sendTabMessage(tabId, { type: 'GET_CONVERSATION_IDENTITY' });
+        if (identity?.identity?.key !== expectedIdentity) return { ok: false, error: 'Source conversation changed.' };
+        const safe = await sendTabMessage(tabId, { type: 'CAN_DISCARD_INACTIVE_TAB' });
+        if (!safe?.safe || !await noWork()) return { ok: false, error: 'Source has a draft, active response, upload, media, or pending work.' };
+        const after = await getTab(tabId);
+        if (!safeTab(after) || before.lastAccessed !== after.lastAccessed || jobs.has(tabId)) {
+            return { ok: false, error: 'Source tab state changed.' };
+        }
+        const discarded = await extensionApiPromise(
+            done => chrome.tabs.discard(tabId, done), () => chrome.tabs.discard(tabId)
+        );
+        const verified = discarded?.discarded === true || (await getTab(tabId))?.discarded === true;
+        return verified ? { ok: true } : { ok: false, error: 'Browser did not confirm that the tab was discarded.' };
+    } catch {
+        return { ok: false, error: 'Unable to verify or discard the source tab.' };
+    }
+}
+
 function configureIdleDiscardAlarm(minutes) {
     if (!chrome.alarms) return;
     chrome.alarms.clear(IDLE_DISCARD_ALARM_NAME);
@@ -620,6 +667,12 @@ chrome.runtime.onMessage.addListener(
      * @param {(response?: RuntimeMessageResponse) => void} sendResponse
      */
     (request, sender, sendResponse) => {
+        if (request.action === 'discardHistorySource') {
+            discardHistorySource(request, sender).then(sendResponse, () =>
+                sendResponse({ ok: false, error: 'Source tab unloading failed.' }));
+            return true;
+        }
+
         if (request.action === 'startSequence') {
             handleStartSequence(request, sendResponse);
             return true;
