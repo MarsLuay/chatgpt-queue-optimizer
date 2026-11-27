@@ -21,7 +21,7 @@ jobs:
       - name: Compile and test Rust optimizer
         run: |
           rustup target add wasm32-unknown-unknown
-          python Installers/build_optimizer.py
+          cargo run --release --manifest-path Installers/native/Cargo.toml -- build --repo-dir .
           rustc --edition=2021 --test rust/optimizer_core.rs -o build/optimizer-core-tests
           ./build/optimizer-core-tests
           rustc --edition=2021 --test rust/browser_engine.rs -o build/browser-engine-tests
@@ -40,3 +40,13 @@ jobs:
         run: npm run check
       - name: Run Python release tests
         run: python -m unittest discover -s Installers -p 'test_*.py'
+
+  windows-native:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile native Windows UI Automation backend
+        run: cargo check --manifest-path Installers/native/Cargo.toml --all-targets
+      - name: Test native release utility
+        run: cargo test --manifest-path Installers/native/Cargo.toml
