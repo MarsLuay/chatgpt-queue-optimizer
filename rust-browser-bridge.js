@@ -939,15 +939,6 @@
         const {type,conversationId,key}=providerSurface(adapter,locationOrUrl);
         return {provider:adapter.id,type,conversationId,key};
     }
-    function nativeResponse(generation, assistant, waiting = false, interrupted = false) {
-        const flags = [generation.conversationCapacityReached || generation.requiresNewConversation,
-            assistant?.hasErrorStop, generation.hasError, generation.hasDeliveryTimedOut,
-            generation.hasTryAgainButton, assistant?.errorSignal, waiting, interrupted,
-            assistant?.hasCompletedText, generation.generating, generation.deepResearchActive,
-            assistant?.streaming, assistant?.hasIncompleteToolTurn].reduce((mask,value,i) => mask | (Number(!!value)<<i),0);
-        return requireNative(globalThis.CpoQueueEngine?.call('cpo_response_class',[flags]));
-    }
-
     function requireNative(value){
         if(value==null)throw new Error('Required native provider policy unavailable.');
         return value;
@@ -1273,58 +1264,13 @@
          * @param {{ userTurnId?: string|null, assistantTurnId?: string|null, commandFingerprint?: string, conversationId?: string|null }} [binding]
          * @returns {{ phase: string, userTurnId: string|null, assistantTurnId: string|null, conversationId: string|null, generating: boolean, deepResearchActive: boolean, hasCompletedAssistant: boolean, toolTurnIncomplete?: boolean, source: string }}
          */
-        getCommandResponseState(doc, binding = {}) {
-            const generation = this.getGenerationState(doc);
-            const native = nativeResponse(generation, null);
-            if ([1,2,3,4,5,6].includes(native)) {
-                return {
-                    phase: 'error',
-                    userTurnId: binding.userTurnId || null,
-                    assistantTurnId: null,
-                    conversationId: binding.conversationId || null,
-                    generating: false,
-                    deepResearchActive: !!generation.deepResearchActive,
-                    hasCompletedAssistant: false,
-                    source: generation.hasDeliveryTimedOut ? 'delivery-timeout' : (generation.hasTryAgainButton ? 'retry-visible' : 'generation-error')
-                };
-            }
-            if ([10,12].includes(native)) {
-                return {
-                    phase: 'active',
-                    userTurnId: binding.userTurnId || null,
-                    assistantTurnId: null,
-                    conversationId: binding.conversationId || null,
-                    generating: !!generation.generating,
-                    deepResearchActive: !!generation.deepResearchActive,
-                    hasCompletedAssistant: false,
-                    source: generation.deepResearchActive ? 'deep-research' : 'generating'
-                };
-            }
-            const lastAssistant = typeof this.getLastAssistantTurn === 'function'
-                ? this.getLastAssistantTurn(doc)
-                : null;
-            if (nativeResponse(generation, {hasCompletedText: !!(lastAssistant?.isAssistant && lastAssistant?.hasCompletedText)}) === 13) {
-                return {
-                    phase: 'terminal',
-                    userTurnId: binding.userTurnId || null,
-                    assistantTurnId: binding.assistantTurnId || null,
-                    conversationId: binding.conversationId || null,
-                    generating: false,
-                    deepResearchActive: false,
-                    hasCompletedAssistant: true,
-                    source: 'assistant-turn-completed'
-                };
-            }
-            return {
-                phase: 'transient-idle',
-                userTurnId: binding.userTurnId || null,
-                assistantTurnId: null,
-                conversationId: binding.conversationId || null,
-                generating: false,
-                deepResearchActive: false,
-                hasCompletedAssistant: false,
-                source: 'unknown-idle'
-            };
+        getCommandResponseState(doc,binding={},generationState=null){
+            const generation=generationState||this.getGenerationState(doc);
+            const queue=globalThis.CpoQueueEngine;
+            const initial=requireNative(queue?.genericProviderResponse(binding,generation));
+            if(!initial.needsAssistant)return initial.state;
+            const assistant=this.getLastAssistantTurn(doc);
+            return requireNative(queue?.genericProviderResponse(binding,generation,true,!!(assistant?.isAssistant&&assistant?.hasCompletedText))).state;
         }
 
         getMainRoot(doc) {

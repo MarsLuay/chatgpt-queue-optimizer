@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const nativeFixture=require('./native-provider-fixture.js');
 
 // Helper to build a lightweight DOM tree for deterministic testing
 function createMockDOM() {
@@ -72,6 +73,16 @@ function createMockDOM() {
         child.parentElement = null;
       }
       return child;
+    }
+
+    compareDocumentPosition(other) {
+      if(other===this)return 0;
+      let root=this;while(root.parentElement)root=root.parentElement;
+      const order=[];
+      const visit=node=>{order.push(node);for(const child of node.children||[])visit(child);};
+      visit(root);
+      const left=order.indexOf(this),right=order.indexOf(other);
+      return right<0?1:left<right?4:2;
     }
 
     contains(node) {
@@ -289,6 +300,17 @@ function createMockDOM() {
     title: 'ChatGPT',
     readyState: 'complete',
     createElement(tag) { return new MockElement(tag); },
+    createTreeWalker(root) {
+      const textNodes=[];
+      const visit=node=>{
+        const text=String(node.textContent||node.innerText||'');
+        if(text)textNodes.push({length:text.length,substringData:(start,count)=>text.slice(start,start+count)});
+        else for(const child of node.children||[])visit(child);
+      };
+      visit(root);
+      let index=0;
+      return {nextNode:()=>textNodes[index++]||null};
+    },
     querySelector(sel) { return documentElement.querySelector(sel); },
     querySelectorAll(sel) { return documentElement.querySelectorAll(sel); },
     contains(node) {
@@ -375,7 +397,7 @@ function createMockDOM() {
 }
 
 // Setup global environment and load utils & content
-function setupTestEnv() {
+async function setupTestEnv() {
   process.env.NODE_ENV = 'test';
   const dom = createMockDOM();
   global.window = dom.window;
@@ -415,11 +437,14 @@ function setupTestEnv() {
     }
   };
 
+  nativeFixture.resourceTransport();
   require('../utils.js');
   require('../rust-browser-bridge.js');
   delete require.cache[require.resolve('../content.js')];
   const { ChatGPTOptimizer } = require('../content.js');
   const optimizer = dom.window.ChatGPTOptimizerInstance || new ChatGPTOptimizer();
+  await optimizer.initialization;
+  await optimizer.bootstrapReady;
 
   return {
     dom,
@@ -429,7 +454,7 @@ function setupTestEnv() {
   };
 }
 
-function setupGeminiTestEnv() {
+async function setupGeminiTestEnv() {
   process.env.NODE_ENV = 'test';
   const dom = createMockDOM();
   dom.window.location.href = 'https://gemini.google.com/app/test-conv';
@@ -472,14 +497,16 @@ function setupGeminiTestEnv() {
   };
 
   delete require.cache[require.resolve('../utils.js')];
-  delete require.cache[require.resolve('../rust-browser-bridge.js')];
   delete require.cache[require.resolve('../content.js')];
+  nativeFixture.resourceTransport();
   require('../utils.js');
   require('../rust-browser-bridge.js');
   const { ChatGPTOptimizer } = require('../content.js');
   // Force a fresh instance against the Gemini location
   delete dom.window.ChatGPTOptimizerInstance;
   const optimizer = new ChatGPTOptimizer();
+  await optimizer.initialization;
+  await optimizer.bootstrapReady;
 
   return {
     dom,
@@ -490,7 +517,7 @@ function setupGeminiTestEnv() {
 }
 
 test('Enter during active streaming queues message and blocks native steer', async () => {
-  const { dom, optimizer, sentMessages } = setupTestEnv();
+  const { dom, optimizer, sentMessages } = await setupTestEnv();
 
   // Create composer
   const composer = dom.document.createElement('div');
@@ -542,7 +569,7 @@ test('Enter during active streaming queues message and blocks native steer', asy
 });
 
 test('Enter during active non-streaming work (reasoning/thinking) queues message', async () => {
-  const { dom, optimizer, sentMessages } = setupTestEnv();
+  const { dom, optimizer, sentMessages } = await setupTestEnv();
 
   const composer = dom.document.createElement('div');
   composer.id = 'prompt-textarea';
@@ -579,7 +606,7 @@ test('Enter during active non-streaming work (reasoning/thinking) queues message
 });
 
 test('Enter during active non-streaming work (tool/research progress) queues message', async () => {
-  const { dom, optimizer, sentMessages } = setupTestEnv();
+  const { dom, optimizer, sentMessages } = await setupTestEnv();
 
   const composer = dom.document.createElement('div');
   composer.id = 'prompt-textarea';
@@ -611,7 +638,7 @@ test('Enter during active non-streaming work (tool/research progress) queues mes
 });
 
 test('Idle Enter remains native and is not queued', async () => {
-  const { dom, optimizer, sentMessages } = setupTestEnv();
+  const { dom, optimizer, sentMessages } = await setupTestEnv();
 
   const composer = dom.document.createElement('textarea');
   composer.id = 'prompt-textarea';
@@ -648,8 +675,8 @@ test('Idle Enter remains native and is not queued', async () => {
   assert.strictEqual(lastDiag.nativeSubmissionObserved, true);
 });
 
-test('Shift+Enter, modified Enter, and IME composition remain native', () => {
-  const { dom, optimizer, sentMessages } = setupTestEnv();
+test('Shift+Enter, modified Enter, and IME composition remain native', async () => {
+  const { dom, optimizer, sentMessages } = await setupTestEnv();
 
   const composer = dom.document.createElement('textarea');
   composer.id = 'prompt-textarea';
@@ -695,8 +722,8 @@ test('Shift+Enter, modified Enter, and IME composition remain native', () => {
   assert.strictEqual(sentMessages.filter(m => m.action === 'enqueueMessage').length, 0);
 });
 
-test('Non-composer Enter and #cpo-root Enter remain unaffected', () => {
-  const { dom, optimizer, sentMessages } = setupTestEnv();
+test('Non-composer Enter and #cpo-root Enter remain unaffected', async () => {
+  const { dom, optimizer, sentMessages } = await setupTestEnv();
 
   const stopButton = dom.document.createElement('button');
   stopButton.setAttribute('data-testid', 'stop-button');
@@ -726,7 +753,7 @@ test('Non-composer Enter and #cpo-root Enter remain unaffected', () => {
 });
 
 test('Enqueue failure keeps typed composer text recoverable and stops keypress leak', async () => {
-  const { dom, optimizer, setEnqueueResponse } = setupTestEnv();
+  const { dom, optimizer, setEnqueueResponse } = await setupTestEnv();
 
   const composer = dom.document.createElement('div');
   composer.id = 'prompt-textarea';
@@ -759,7 +786,7 @@ test('Enqueue failure keeps typed composer text recoverable and stops keypress l
 });
 
 test('Successful enqueue keeps a composer draft that changed before the queue ACK', async () => {
-  const { dom, optimizer, sentMessages } = setupTestEnv();
+  const { dom, optimizer, sentMessages } = await setupTestEnv();
 
   const composer = dom.document.createElement('div');
   composer.id = 'prompt-textarea';
@@ -794,7 +821,7 @@ test('Successful enqueue keeps a composer draft that changed before the queue AC
 });
 
 test('Rapid duplicate Enter is protected by in-flight and debounce rules', async () => {
-  const { dom, optimizer, sentMessages } = setupTestEnv();
+  const { dom, optimizer, sentMessages } = await setupTestEnv();
 
   const composer = dom.document.createElement('textarea');
   composer.id = 'prompt-textarea';
@@ -836,7 +863,7 @@ test('Rapid duplicate Enter is protected by in-flight and debounce rules', async
 });
 
 test('Default-prevented ownership behavior owns Enter in real composer during active work', async () => {
-  const { dom, optimizer, sentMessages } = setupTestEnv();
+  const { dom, optimizer, sentMessages } = await setupTestEnv();
 
   const composer = dom.document.createElement('div');
   composer.id = 'prompt-textarea';
@@ -869,7 +896,7 @@ test('Default-prevented ownership behavior owns Enter in real composer during ac
 });
 
 test('DEBUG_MESSAGES reports canonical signal diagnostics without message text', async () => {
-  const { dom, optimizer } = setupTestEnv();
+  const { dom, optimizer } = await setupTestEnv();
   await new Promise(resolve => { setTimeout(resolve, 20); });
   optimizer.config.enabled = false;
   const composer = dom.document.createElement('div');
@@ -893,8 +920,8 @@ test('DEBUG_MESSAGES reports canonical signal diagnostics without message text',
   assert.equal(JSON.stringify(response).includes('private prompt text'), false);
 });
 
-test('Historical page text does not create false active states', () => {
-  const { dom, optimizer } = setupTestEnv();
+test('Historical page text does not create false active states', async () => {
+  const { dom, optimizer } = await setupTestEnv();
 
   // Completed turn in history mentioning research keywords
   const oldTurn = dom.document.createElement('div');
@@ -908,8 +935,8 @@ test('Historical page text does not create false active states', () => {
   assert.strictEqual(state.hasActiveToolOrResearch, false);
 });
 
-test('Disabled or stale stop buttons do not create false active states', () => {
-  const { dom, optimizer } = setupTestEnv();
+test('Disabled or stale stop buttons do not create false active states', async () => {
+  const { dom, optimizer } = await setupTestEnv();
 
   const staleButton = dom.document.createElement('button');
   staleButton.setAttribute('data-testid', 'stop-button');
@@ -921,8 +948,8 @@ test('Disabled or stale stop buttons do not create false active states', () => {
   assert.strictEqual(state.hasActiveStopButton, false);
 });
 
-test('Active error state suppresses generating state', () => {
-  const { dom, optimizer } = setupTestEnv();
+test('Active error state suppresses generating state', async () => {
+  const { dom, optimizer } = await setupTestEnv();
 
   // Error alert
   const alert = dom.document.createElement('div');
@@ -936,7 +963,7 @@ test('Active error state suppresses generating state', () => {
 });
 
 test('Generation-end race: Enter right after generation ended remains native', async () => {
-  const { dom, optimizer, sentMessages } = setupTestEnv();
+  const { dom, optimizer, sentMessages } = await setupTestEnv();
 
   const composer = dom.document.createElement('textarea');
   composer.id = 'prompt-textarea';
@@ -959,7 +986,7 @@ test('Generation-end race: Enter right after generation ended remains native', a
 });
 
 test('Generation-end race: Enter right before generation ended is queued with waitForIdleBeforeStart', async () => {
-  const { dom, optimizer, sentMessages } = setupTestEnv();
+  const { dom, optimizer, sentMessages } = await setupTestEnv();
 
   const composer = dom.document.createElement('textarea');
   composer.id = 'prompt-textarea';
@@ -985,7 +1012,7 @@ test('Generation-end race: Enter right before generation ended is queued with wa
 });
 
 test('Gemini: Enter during active generation queues and clears composer only after success', async () => {
-  const { dom, optimizer, sentMessages } = setupGeminiTestEnv();
+  const { dom, optimizer, sentMessages } = await setupGeminiTestEnv();
 
   assert.equal(optimizer.provider?.id, 'gemini');
   assert.equal(optimizer.provider?.supportsOptimizer, false);
@@ -1017,8 +1044,8 @@ test('Gemini: Enter during active generation queues and clears composer only aft
   assert.equal(composer.textContent, '');
 });
 
-test('Gemini: idle Enter, Shift+Enter, and IME remain native', () => {
-  const { dom, sentMessages } = setupGeminiTestEnv();
+test('Gemini: idle Enter, Shift+Enter, and IME remain native', async () => {
+  const { dom, sentMessages } = await setupGeminiTestEnv();
 
   const composer = dom.document.createElement('div');
   composer.setAttribute('class', 'ql-editor');
@@ -1047,7 +1074,7 @@ test('Gemini: idle Enter, Shift+Enter, and IME remain native', () => {
 });
 
 test('Gemini: enqueue failure retains composer text', async () => {
-  const { dom, setEnqueueResponse } = setupGeminiTestEnv();
+  const { dom, setEnqueueResponse } = await setupGeminiTestEnv();
 
   const composer = dom.document.createElement('div');
   composer.setAttribute('class', 'ql-editor');
@@ -1070,7 +1097,7 @@ test('Gemini: enqueue failure retains composer text', async () => {
 
   assert.strictEqual(composer.textContent, 'Keep this draft');
 });
-function setupClaudeTestEnv() {
+async function setupClaudeTestEnv() {
   process.env.NODE_ENV = 'test';
   const dom = createMockDOM();
   dom.window.location.href = 'https://claude.ai/chat/test-conv';
@@ -1113,13 +1140,15 @@ function setupClaudeTestEnv() {
   };
 
   delete require.cache[require.resolve('../utils.js')];
-  delete require.cache[require.resolve('../rust-browser-bridge.js')];
   delete require.cache[require.resolve('../content.js')];
+  nativeFixture.resourceTransport();
   require('../utils.js');
   require('../rust-browser-bridge.js');
   const { ChatGPTOptimizer } = require('../content.js');
   delete dom.window.ChatGPTOptimizerInstance;
   const optimizer = new ChatGPTOptimizer();
+  await optimizer.initialization;
+  await optimizer.bootstrapReady;
 
   return {
     dom,
@@ -1130,7 +1159,7 @@ function setupClaudeTestEnv() {
 }
 
 test('Claude: Enter during active generation queues and clears composer only after success', async () => {
-  const { dom, optimizer, sentMessages } = setupClaudeTestEnv();
+  const { dom, optimizer, sentMessages } = await setupClaudeTestEnv();
 
   assert.equal(optimizer.provider?.id, 'claude');
   assert.equal(optimizer.provider?.supportsOptimizer, false);
@@ -1163,8 +1192,8 @@ test('Claude: Enter during active generation queues and clears composer only aft
   assert.equal(composer.textContent, '');
 });
 
-test('Claude: idle Enter, Shift+Enter, and IME remain native', () => {
-  const { dom, sentMessages } = setupClaudeTestEnv();
+test('Claude: idle Enter, Shift+Enter, and IME remain native', async () => {
+  const { dom, sentMessages } = await setupClaudeTestEnv();
 
   const composer = dom.document.createElement('div');
   composer.setAttribute('class', 'ProseMirror');
@@ -1198,7 +1227,7 @@ test('Claude: idle Enter, Shift+Enter, and IME remain native', () => {
 });
 
 test('Claude: enqueue failure retains composer text', async () => {
-  const { dom, setEnqueueResponse } = setupClaudeTestEnv();
+  const { dom, setEnqueueResponse } = await setupClaudeTestEnv();
 
   const composer = dom.document.createElement('div');
   composer.setAttribute('class', 'ProseMirror');
@@ -1229,7 +1258,7 @@ test('ChatGPT optimizer binds conversation routes and cleans up after SPA naviga
   assert.equal(css.includes('html.cpo-active *'), false);
   assert.equal(css.includes('.cpo-conversation-root.cpo-active'), true);
 
-  const { dom, optimizer } = setupTestEnv();
+  const { dom, optimizer } = await setupTestEnv();
   const observers = [];
   global.MutationObserver = class {
     constructor(cb) {
@@ -1308,8 +1337,8 @@ test('ChatGPT optimizer binds conversation routes and cleans up after SPA naviga
   assert.equal(optimizer.state.optimizerBound, true);
 });
 
-test('Load More preserves expanded window through repeated passes and resets on size change', () => {
-  const { dom, optimizer } = setupTestEnv();
+test('Load More preserves expanded window through repeated passes and resets on size change', async () => {
+  const { dom, optimizer } = await setupTestEnv();
   optimizer.config.enabled = true;
   optimizer.config.windowSize = 10;
   optimizer.config.batchSize = 5;
@@ -1343,6 +1372,7 @@ test('Load More preserves expanded window through repeated passes and resets on 
 });
 
 test('message deduplication is ancestor-based without reading large message strings', () => {
+  nativeFixture.initialize();
   const provider = require('../rust-browser-bridge.js').getProvider('chatgpt');
   const parent = { parentElement: null };
   const child = { parentElement: parent };
@@ -1351,8 +1381,8 @@ test('message deduplication is ancestor-based without reading large message stri
   assert.deepEqual(provider.removeDuplicates([child, parent, child, other]), [parent, other]);
 });
 
-test('streaming-only nested DOM changes skip expensive conversation rescans', () => {
-  const { dom, optimizer } = setupTestEnv();
+test('streaming-only nested DOM changes skip expensive conversation rescans', async () => {
+  const { dom, optimizer } = await setupTestEnv();
   optimizer.config.enabled = true;
   optimizer.state.optimizerBound = true;
   optimizer.state.lastMessageCount = 12;
@@ -1374,8 +1404,8 @@ test('streaming-only nested DOM changes skip expensive conversation rescans', ()
   clearTimeout(optimizer.refreshTimeout);
 });
 
-test('offscreen rendering is opt-in and cleared on optimizer disable', () => {
-  const { dom, optimizer } = setupTestEnv();
+test('offscreen rendering is opt-in and cleared on optimizer disable', async () => {
+  const { dom, optimizer } = await setupTestEnv();
   optimizer.config.enabled = true;
   optimizer.config.windowSize = 10;
   optimizer.config.offscreenRendering = true;
@@ -1423,8 +1453,8 @@ test('queue polling forwards a single generation-state snapshot to the provider'
   assert.deepEqual(result, { state, responseState: { phase: 'active' } });
 });
 
-test('optimizer refresh scans the message list only once when selecting its container', () => {
-  const { optimizer } = setupTestEnv();
+test('optimizer refresh scans the message list only once when selecting its container', async () => {
+  const { optimizer } = await setupTestEnv();
   optimizer.config.enabled = true;
   optimizer._isRefreshing = false;
   optimizer.getCurrentSurface = () => ({ optimizerEligible: true });

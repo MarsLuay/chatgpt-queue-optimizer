@@ -326,3 +326,7 @@ Provider host validation, route identity, conversation surface eligibility, fall
 ### Shared provider bindings and native DOM fact catalogs (queue ABI 19, browser ABI 15)
 
 Gemini and Claude share a single browser projection; supported providers share native identity, navigation and composer access. Native catalogs supply editor, exclusion, error and tool-state facts. The browser engine also owns deduplication of already-collected turn lists. Native callbacks and provider helpers share a lexical scope, correcting an earlier cross-scope binding defect. Compatibility constructors remain, and full generated binding migration and native test verification are outstanding.
+
+### Native generic response projection and asynchronous content fixtures (queue ABI 20)
+
+Generic-provider response settlement and the decision to inspect the last assistant now execute in Rust. Content integration fixtures load actual generated WASM from a local extension-resource transport and await production initialization and initial optimizer binding. DOM fixtures expose the text walker and ordering primitives used by native discovery. No live browser or Rust compiler verification has been completed.

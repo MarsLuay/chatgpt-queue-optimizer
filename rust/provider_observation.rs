@@ -283,3 +283,36 @@ fn provider_navigation(f:&[&[u16]])->Option<Vec<Vec<u16>>>{
     let provider=number(f[0]) as u32;
     Some(if provider==1{vec![ascii("1"),ascii("https://chatgpt.com/"),ascii("route")]}else{vec![ascii("0"),Vec::new(),ascii("unsupported")]})
 }
+
+
+// Generic provider response projection, including whether the last-assistant
+// observation is required. Initial calls omit that observation; only an idle
+// response requests it. No text or DOM handles cross this boundary.
+fn generic_provider_response(f:&[&[u16]])->Option<Vec<Vec<u16>>>{
+    if f.len()!=5{return None;}
+    let flags=number(f[0]) as u32;
+    let observed=eq(f[1],"1");
+    let code=super::cpo_response_class(flags);
+    let (phase,source,bits)=match code{
+        1..=6=>("error",if flags&8!=0{"delivery-timeout"}else if flags&16!=0{"retry-visible"}else{"generation-error"},u32::from(flags&1024!=0)<<1),
+        10|12=>("active",if flags&1024!=0{"deep-research"}else{"generating"},u32::from(flags&512!=0)|(u32::from(flags&1024!=0)<<1)),
+        13=>("terminal","assistant-turn-completed",4),
+        _ if !observed=>("transient-idle","unknown-idle",8),
+        _=>("transient-idle","unknown-idle",0)
+    };
+    Some(vec![ascii(phase),ascii(source),ascii(&bits.to_string()),f[2].to_vec(),if bits&4!=0{f[3].to_vec()}else{Vec::new()},f[4].to_vec()])
+}
+#[cfg(test)]
+#[test]
+fn generic_response_observation_is_lazy(){
+    let run=|flags:&str,observed:&str|{
+        let fields=[flags,observed,"u","a","c"].map(ascii);
+        let refs=fields.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        generic_provider_response(&refs).unwrap()
+    };
+    assert_eq!(run("0","0")[2],ascii("8"));
+    assert_eq!(run("0","1")[2],ascii("0"));
+    assert_eq!(run("256","1")[4],ascii("a"));
+    assert_eq!(run("512","0")[0],ascii("active"));
+    assert_eq!(run("520","0")[1],ascii("delivery-timeout"));
+}

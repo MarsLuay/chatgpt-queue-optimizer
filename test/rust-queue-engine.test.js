@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 19);
+    assert.equal(e.cpo_queue_abi(), 20);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -611,4 +611,20 @@ test('provider DOM fact catalogs are native and shared',{skip},async()=>{
     assert.deepEqual(facts.claudeInputIds,['chat-input']);
     assert.ok(facts.assistantErrorValues.includes('error-stop'));
     assert.ok(facts.toolIncompleteStates.includes('pending'));
+});
+
+test('generic provider response delegates lazy observation and complete projection to Rust',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    const binding={userTurnId:'u',assistantTurnId:'a',conversationId:'c'};
+    assert.equal(engine.genericProviderResponse(binding,{}).needsAssistant,true);
+    const terminal=engine.genericProviderResponse(binding,{},true,true);
+    assert.equal(terminal.needsAssistant,false);
+    assert.equal(terminal.state.phase,'terminal');
+    assert.equal(terminal.state.assistantTurnId,'a');
+    const error=engine.genericProviderResponse(binding,{hasDeliveryTimedOut:true,generating:true});
+    assert.equal(error.needsAssistant,false);
+    assert.equal(error.state.source,'delivery-timeout');
+    assert.equal(error.state.generating,false);
+    assert.equal(engine.genericProviderResponse(binding,{generating:true}).state.phase,'active');
 });

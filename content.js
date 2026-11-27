@@ -70,7 +70,7 @@
 
       this.provider = null;
 
-      this.init();
+      this.initialization=this.init();
     }
 
     resolveProvider() {
@@ -103,9 +103,9 @@
       await this.loadConfig();
 
       if (typeof document !== 'undefined' && document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', () => this.bootstrap());
+        document.addEventListener('DOMContentLoaded', () => { this.bootstrapReady=Promise.resolve(this.bootstrap()); });
       } else {
-        this.bootstrap();
+        this.bootstrapReady=Promise.resolve(this.bootstrap());
       }
 
       if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
@@ -372,8 +372,8 @@
         return;
       }
 
-      this.waitForMessages().then(() => {
-        this.bindOptimizer();
+      return this.waitForMessages().then(async () => {
+        await this.bindOptimizer();
         this.state.isInitialized = true;
         console.log('CPO: Initialized successfully');
       });

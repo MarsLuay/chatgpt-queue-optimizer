@@ -26,7 +26,7 @@
             'cpo_log_duplicate','cpo_log_keep_start','cpo_log_limit','cpo_log_sensitive',
             'cpo_event_code','cpo_content_event_kind','cpo_api_mode','cpo_api_path','cpo_injection_route','cpo_async_transition','cpo_live_new','cpo_live_delete','cpo_live_epoch','cpo_live_len','cpo_live_input','cpo_live_write','cpo_live_read','cpo_live_output','cpo_live_wipe','cpo_catalog_len','cpo_catalog_items','cpo_catalog_word','cpo_enter_eligible','cpo_enter_action','cpo_provider_predicate','cpo_log_plan','cpo_diag_pick','cpo_diag_reset','cpo_diag_update','cpo_diag_finish','cpo_log_walk_begin','cpo_log_walk_plan','cpo_log_walk_next','cpo_log_walk_close','cpo_batch_input','cpo_batch_run','cpo_batch_output','cpo_batch_wipe','cpo_keyboard_event','cpo_local_date_match','cpo_timestamp_valid','cpo_timestamp_math','cpo_live_transaction','cpo_job_binding','cpo_turn_cache_eligible','cpo_turn_text_reset','cpo_turn_text_update','cpo_turn_cache_invalidate'];
         if (!names.every(name => typeof exports[name] === 'function') ||
-            exports.cpo_queue_abi() !== 19 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
+            exports.cpo_queue_abi() !== 20 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
         core = exports;
         durableSchema = null;
         catalogCache.clear();
@@ -755,6 +755,15 @@
         }
         return {userTurns,assistantTurns,latestUserTurnId:latestUserTurnId||null,latestAssistantTurnId:latestAssistantTurnId||null,matchedUserTurnId:matchedUserTurnId||null};
     }
+    function genericProviderResponse(binding,generation,assistantObserved=false,assistantCompleted=false){
+        const flags=Number(!!(generation.conversationCapacityReached||generation.requiresNewConversation))|
+            (Number(!!generation.hasError)<<2)|(Number(!!generation.hasDeliveryTimedOut)<<3)|(Number(!!generation.hasTryAgainButton)<<4)|
+            (Number(assistantCompleted)<<8)|(Number(!!generation.generating)<<9)|(Number(!!generation.deepResearchActive)<<10);
+        const v=batch(36,[flags,Number(assistantObserved),binding.userTurnId||'',binding.assistantTurnId||'',binding.conversationId||'']);
+        if(v?.length!==6)return null;
+        const bits=Number(v[2]);
+        return {needsAssistant:!!(bits&8),state:{phase:v[0],source:v[1],generating:!!(bits&1),deepResearchActive:!!(bits&2),hasCompletedAssistant:!!(bits&4),userTurnId:v[3]||null,assistantTurnId:v[4]||null,conversationId:v[5]||null}};
+    }
     function providerBoundResponse(snapshot,binding,generation){
         const flags=Number(!!(generation.conversationCapacityReached||generation.requiresNewConversation))|
             (Number(!!generation.hasError)<<2)|(Number(!!generation.hasDeliveryTimedOut)<<3)|(Number(!!generation.hasTryAgainButton)<<4)|
@@ -955,7 +964,7 @@
             (Number(!!job.waitForIdleBeforeSend) << 6);
         return call('cpo_queue_next', [flags, phase, job.queue.length]);
     }
-    const api = { providerSurface, providerNavigation, providerTurnMetadata, invalidateProviderTurn, providerLastAssistant, providerGenerationState, providerMarker, providerButtons, providerGenerationText, providerDiagnostics, providerTurnSnapshot, providerBoundResponse, providerSemanticButton, classifyFailure, bindingDecision, scheduledMutation, sequenceName, validSequenceName, sequenceVariables, keyboardEvent, localDateParts, localDateMatches, localDateInput, timestampValid, timestampMath, batch, textBatch, scheduledSort, scheduledLookup, scheduledWithout, scheduledDue, identityKey, continuationHandoff, supportedTabs, popupStatus, popupRunningLabel, popupScheduledLabel, popupStats, providerCatalog, diagnosticText, diagnosticPick, sanitizeDiagnostic, createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
+    const api = { genericProviderResponse, providerSurface, providerNavigation, providerTurnMetadata, invalidateProviderTurn, providerLastAssistant, providerGenerationState, providerMarker, providerButtons, providerGenerationText, providerDiagnostics, providerTurnSnapshot, providerBoundResponse, providerSemanticButton, classifyFailure, bindingDecision, scheduledMutation, sequenceName, validSequenceName, sequenceVariables, keyboardEvent, localDateParts, localDateMatches, localDateInput, timestampValid, timestampMath, batch, textBatch, scheduledSort, scheduledLookup, scheduledWithout, scheduledDue, identityKey, continuationHandoff, supportedTabs, popupStatus, popupRunningLabel, popupScheduledLabel, popupStats, providerCatalog, diagnosticText, diagnosticPick, sanitizeDiagnostic, createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
     globalThis.CpoQueueEngine = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();
