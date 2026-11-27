@@ -348,6 +348,10 @@
             return null;
         }
     }
+    function trim(value) {
+        if(!core)return null;
+        try{return durableTrim(String(value??''));}catch(error){fail(error);return null;}
+    }
     function projectDurable(job){return durableObject(job,0);}
     function deserializeDurable(raw,now,createId){return durableObject(raw,1,now,createId);}
     function settings(source,mode='optimizer') {
@@ -430,7 +434,7 @@
             (Number(!!job.waitForIdleBeforeSend) << 6);
         return call('cpo_queue_next', [flags, phase, job.queue.length]);
     }
-    const api = { load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, settings, remaining, scheduledActions, sensitiveKey, tabDiscard, install, get status() { return status; } };
+    const api = { load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, remaining, scheduledActions, sensitiveKey, tabDiscard, install, get status() { return status; } };
     globalThis.CpoQueueEngine = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();
