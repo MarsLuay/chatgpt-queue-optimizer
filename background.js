@@ -1,5 +1,7 @@
 /** @type {Map<number, QueueJob>} */
 const jobs = new Map();
+// Ephemeral one-use click grants; never persisted or transferred between jobs.
+const nativeClickGrants = new Map();
 const QUEUE_DEBUG_LOG_KEY = 'queueDebugLogs';
 const QUEUE_DURABLE_STATE_KEY = 'queueDurableJobs';
 const MAX_QUEUE_DEBUG_LOG_ENTRIES = 300;
@@ -723,6 +725,17 @@ chrome.runtime.onMessage.addListener(
      * @param {(response?: RuntimeMessageResponse) => void} sendResponse
      */
     (request, sender, sendResponse) => {
+        if (request.action === 'authorizeNativeQueueClick') {
+            const tabId=sender?.tab?.id;
+            const grant=nativeClickGrants.get(tabId);
+            const ok=!!grant && grant.token===request.token && !grant.used &&
+                (!grant.job || (jobs.get(tabId)===grant.job && grant.job.isRunning && !grant.job.isStopped && !grant.job.isPaused)) &&
+                Date.now()<=grant.expiresAt;
+            if(ok)grant.used=true;
+            sendResponse({ok});
+            return true;
+        }
+
         if (request.action === 'discardHistorySource') {
             discardHistorySource(request, sender).then(sendResponse, () =>
                 sendResponse({ ok: false, error: 'Source tab unloading failed.' }));
@@ -894,6 +907,7 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+    nativeClickGrants.delete(tabId);
     if ((globalThis.CpoQueueEngine?.call('cpo_tab_close_action',[Number(jobs.has(tabId))]) ?? Number(jobs.has(tabId))) === 1) {
         const job = jobs.get(tabId);
         logQueueEvent(tabId, 'warn', 'ChatGPT tab closed while queue was active.', {
@@ -3084,7 +3098,33 @@ async function sendPromptToSpecificTab(tabId, text, expectedJob = jobs.get(tabId
         if (stageDecision(0, Number(!!beforeInspect.ok) << 1) !== 1) {
             return { ok: false, error: 'Queue stopped or paused before submission.', details: { failureClass: 'non-retryable' } };
         }
-        const results = await executeScript({
+        // Negotiate capability before any mutation. If the native operation
+        // has been attempted, never fall through to a second click path.
+        let nativeCapability=null;
+        try { nativeCapability=await sendTabMessage(tabId,{type:'GET_NATIVE_SUBMISSION_CAPABILITY'}); } catch {}
+        let results;
+        if(nativeCapability?.nativeSubmission===true){
+            const identity=provider?.getConversationIdentity(tabUrl);
+            const expectedKey=identity?.key;
+            if(!ownsSubmission() || !expectedKey || identity.type==='unsupported' ||
+                (job?.conversationId && identity.conversationId!==job.conversationId)){
+                return {ok:false,error:'Queue target changed before native submission.',details:{failureClass:'non-retryable'}};
+            }
+            const token=createRunId();
+            const grant={token,job,used:false,expiresAt:Date.now()+15000};
+            if(nativeClickGrants.has(tabId)) return {ok:false,error:'A native submission is already pending.',details:{failureClass:'transient'}};
+            nativeClickGrants.set(tabId,grant);
+            try {
+                const native=await sendTabMessage(tabId,{type:'NATIVE_SUBMIT_PROMPT',text,expectedKey,token});
+                results=[{result:native}];
+            } catch {
+                results=[{result:{ok:false,error:'Native submission outcome could not be confirmed.',details:{failureClass:'submission-unconfirmed'}}}];
+            } finally {
+                if(nativeClickGrants.get(tabId)===grant)nativeClickGrants.delete(tabId);
+            }
+        } else {
+        if(!ownsSubmission())return {ok:false,error:'Queue ownership changed.',details:{failureClass:'user-stop'}};
+        results = await executeScript({
             target: { tabId },
             func: async (msg, contract, providerName) => {
                 function sleepInPage(ms) {
@@ -3410,6 +3450,7 @@ async function sendPromptToSpecificTab(tabId, text, expectedJob = jobs.get(tabId
             },
             args: [text, compatibilityContract, providerName]
         });
+        }
 
         const result = results?.[0]?.result;
 
