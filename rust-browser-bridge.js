@@ -21,11 +21,11 @@
                     cpo: { host: (op, a, b, c) => this.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
                 });
                 const core = result.instance.exports;
-                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 6 ||
+                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 7 ||
                     !['cpo_collect_resources', 'cpo_discover_messages', 'cpo_execute_media',
                         'cpo_apply_window', 'cpo_window_visible', 'cpo_capture_history', 'cpo_process_mutations',
                         'cpo_cache_ttl', 'cpo_cache_valid', 'cpo_cache_nodes_valid', 'cpo_mutation_delay', 'cpo_provider_selectors', 'cpo_dom_composer_write', 'cpo_dom_composer_read',
-                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool', 'cpo_ui_render', 'cpo_ui_sequence_edit', 'cpo_ui_next_limit', 'cpo_ui_sequence_select', 'cpo_ui_variables', 'cpo_ui_saved_sequence', 'cpo_sequence_import', 'cpo_sequence_substitute', 'cpo_event_ready'].every(name => typeof core[name] === 'function')) {
+                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool', 'cpo_ui_render', 'cpo_ui_sequence_edit', 'cpo_ui_next_limit', 'cpo_ui_sequence_select', 'cpo_ui_variables', 'cpo_ui_saved_sequence', 'cpo_sequence_import', 'cpo_sequence_substitute', 'cpo_event_ready','cpo_restore_window','cpo_restore_journal'].every(name => typeof core[name] === 'function')) {
                     throw new Error('Browser WASM ABI mismatch');
                 }
                 this.exports = core;
@@ -42,7 +42,7 @@
             this.exports = null;
             this.memoryBytes = 0;
             this.status = 'unavailable';
-            console.warn('CPO: Rust browser engine unavailable; using compatibility bridge.', error);
+            console.warn('CPO: Rust browser engine unavailable; native effects suspended.', error);
         }
 
         invoke(context, operation) {
@@ -97,6 +97,14 @@
         applyWindow(messages, visible, offscreen, evictPlayback) {
             return this.invoke({ messages }, core =>
                 core.cpo_apply_window(messages.length, visible, Number(!!offscreen) | (Number(!!evictPlayback) << 1)) === 1);
+        }
+
+        restoreWindow(messages) {
+            return this.invoke({messages},core=>core.cpo_restore_window(messages.length)===1);
+        }
+
+        restoreJournal(entries) {
+            return this.invoke({entries},core=>core.cpo_restore_journal(entries.length)===1);
         }
 
         captureHistory(messages, offset) {
@@ -379,7 +387,7 @@
                 case 34: return Number(owner.restoreSources(ctx.group[a]));
                 case 35: return Number(owner.mediaOriginals.has(ctx.group[a]) &&
                     ['src','srcset'].some(name => ctx.group[a].hasAttribute(name)));
-                case 36: owner.mediaOriginals.delete(ctx.group[a]); return 1;
+                case 36: owner.forgetSources(ctx.group[a]); return 1;
                 case 37: {
                     const media = ctx.group[0];
                     return (media.paused === true ? 1 : 0) |
@@ -644,6 +652,16 @@
                 case 147:return ctx.value.indexOf(ctx.needle,a)>>>0;
                 case 148:ctx.parts.push(ctx.value.slice(a,b));return 1;
                 case 149:ctx.parts.push(ctx.replacement);return 1;
+                case 150: {
+                    ctx.journalNode=ctx.entries[a]?.deref();
+                    const node=ctx.journalNode;
+                    return !node||!owner.mediaOriginals.has(node)?0:1|(Number(node.hasAttribute('src')||node.hasAttribute('srcset'))<<1);
+                }
+                case 151: {
+                    if(b)owner.restoreSources(ctx.journalNode);
+                    else owner.forgetSources(ctx.journalNode);
+                    ctx.journalNode=null;return 1;
+                }
                 default: throw new Error('Unknown Rust browser host operation: ' + op);
             }
         }
