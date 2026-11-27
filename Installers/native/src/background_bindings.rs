@@ -937,9 +937,7 @@ function restoreDurableJobs(durableJobs) {
         const tabId = job.tabId;
         if (jobs.has(tabId)||restoredJobs.some(existing=>existing.job.tabId===tabId)) continue;
 
-        job.totalMessages = getTotalMessages(job);
-
-        // Native deserialization already reconciles the restored command number.
+        // Native deserialization reconciles totals and restored command numbers.
 
         const confirmed = isSubmissionConfirmed(job);
         const restoreAction = globalThis.CpoQueueEngine?.restoreAction(job, confirmed);

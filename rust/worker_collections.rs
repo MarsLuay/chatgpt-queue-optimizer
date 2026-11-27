@@ -130,6 +130,14 @@ impl Worker{
                 if terminal&&found.is_none(){return NONE;}
                 found.unwrap_or(0)
             },
+            12=>{
+                let n=super::DURABLE_FIELDS.len();
+                if f.len()<n+2{return NONE;}
+                let now=std::str::from_utf8(f[0]).ok().and_then(|v|v.parse::<f64>().ok()).unwrap_or(f64::NAN);
+                if !now.is_finite(){return NONE;}
+                let Some(restored)=super::durable_projection::restore(&f[2..n+2],&f[n+2..],now,f[1])else{return NONE;};
+                self.output=restored;u32::try_from(self.output.len()).unwrap_or(NONE)
+            },
             _=>NONE
         }
     }

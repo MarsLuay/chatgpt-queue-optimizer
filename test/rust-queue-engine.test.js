@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 26);
+    assert.equal(e.cpo_queue_abi(), 27);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -748,4 +748,24 @@ test('native canonical checkpoint matches durable projection and scheduler plans
     assert.equal(engine.scheduledUpsertPlan(items,{id:'active',status:'completed',__nativeClaim:lease}),2);
     assert.equal(engine.scheduledUpsertPlan(items,{id:'active',status:'completed',__nativeClaim:lease+1}),null);
     assert.equal(engine.scheduledUpsertPlan([...items,items[0]],{id:'pending',status:'pending'}),null);
+});
+
+
+test('native restore and atomic live initialization preserve legacy behavior',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    const now=1800000000000;
+    const restored=engine.deserializeDurable({tabId:8,queue:['  ','\u00a0next\n','\ud800'],currentMessage:'\tactive\n',completedCount:2,targetKey:'chatgpt:new',isPaused:true},now,()=> 'run');
+    assert.equal(restored.ok,true);assert.deepEqual(restored.value.queue,['next','\ud800']);
+    assert.equal(restored.value.currentMessage,'active');assert.equal(restored.value.totalMessages,5);
+    assert.equal(restored.value.currentCommandNumber,3);assert.equal(restored.value.conversationType,'new');
+    assert.equal(restored.value.isRunning,false);assert.equal(restored.value.startedAt,now);
+    const jobs=engine.createLiveJobs(),before=jobs.revision();
+    jobs.set(8,restored.value);assert.equal(jobs.revision(),before+1);
+    assert.deepEqual([...jobs.get(8).queue],restored.value.queue);
+    assert.equal(jobs.get(8).currentMessage,'active');
+    const e=instance.exports,rev=e.cpo_live_epoch();
+    const ptr=e.cpo_live_input(8);new DataView(e.memory.buffer,ptr,8).setUint32(0,0xffffffff,true);
+    assert.equal(e.cpo_live_initialize(),0);assert.equal(e.cpo_live_epoch(),rev);
+    assert.equal(engine.deserializeDurable({tabId:'8',queue:['x']},now,()=> 'legacy').value.tabId,8);
 });

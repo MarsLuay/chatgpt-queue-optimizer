@@ -94,7 +94,7 @@ const HOST:&str=r####"(() => {
             try{
                 const result=e.cpo_worker_dispatch(op,token)>>>0;
                 if(result===0xffffffff)return null;
-                if(op!==1&&op!==10)return result;
+                if(op!==1&&op!==10&&op!==12)return result;
                 return JSON.parse(workerDecoder.decode(new Uint8Array(e.memory.buffer,e.cpo_worker_output()>>>0,result)));
             }finally{e.cpo_worker_wipe();}
         }catch(error){fail(error);return null;}
@@ -346,7 +346,34 @@ const HOST:&str=r####"(() => {
             if(!accepted)throw new Error('Native job transaction rejected');
             return true;
         }
-        function makeJob(tabId, id, initial) {
+        function initialize(initial){
+            return native(e=>{
+                const entries=[];
+                for(const [key,value] of Object.entries(initial)){
+                    const field=fields.get(key);
+                    if(field===undefined)throw new Error('Unsupported native job field: '+key);
+                    if(key==='queue'){
+                        if(!Array.isArray(value)||value.some(v=>typeof v!=='string'))throw new Error('Invalid initial queue');
+                        for(const prompt of value)entries.push([field,encoder.encode(JSON.stringify(prompt))]);
+                    }else entries.push([field,value===undefined?new Uint8Array(0):encoder.encode(JSON.stringify(value))]);
+                }
+                const length=entries.reduce((sum,[,bytes])=>sum+8+bytes.length,0);
+                // Preserve support for unusually large combined job frames via
+                // the previous per-field path rather than silently truncate.
+                if(length>64*1024*1024)return null;
+                const ptr=e.cpo_live_input(length)>>>0;
+                if(length&&!ptr)throw new Error('Native initialization frame unavailable');
+                if(length){
+                    const view=new DataView(e.memory.buffer,ptr,length),out=new Uint8Array(e.memory.buffer,ptr,length);
+                    let at=0;
+                    for(const [field,bytes] of entries){view.setUint32(at,field,true);view.setUint32(at+4,bytes.length,true);out.set(bytes,at+8);at+=8+bytes.length;}
+                }
+                const id=e.cpo_live_initialize()>>>0;
+                if(!id)throw new Error('Native initialization rejected');
+                return id;
+            });
+        }
+        function makeJob(tabId, id, initial, initialized=false) {
             let handle;
             const active=()=>handles.get(tabId)===handle;
             const len=()=>active()?native(e=>e.cpo_live_len(id)>>>0):0;
@@ -394,7 +421,7 @@ const HOST:&str=r####"(() => {
                 return result===0xffffffff?null:result;
             });
             // Populate before publication; failed initialization never replaces a live owner.
-            for(const [key,value] of Object.entries(initial)){
+            if(!initialized)for(const [key,value] of Object.entries(initial)){
                 if(key==='queue'){
                     if(!Array.isArray(value))throw new Error('Invalid initial queue');
                     bulk(id,1,0,value);
@@ -414,10 +441,11 @@ const HOST:&str=r####"(() => {
             keys:()=>handles.keys(),
             [Symbol.iterator]:()=>handles.entries(),
             set(tabId,initial){
-                const id=native(e=>e.cpo_live_new()>>>0);
+                const allocated=initialize(initial);
+                const id=allocated??native(e=>e.cpo_live_new()>>>0);
                 if(!id)throw new Error('Native live handle exhaustion');
                 let handle;
-                try { handle=makeJob(tabId,id,initial); }
+                try { handle=makeJob(tabId,id,initial,allocated!=null); }
                 catch(error){if(!broken)native(e=>e.cpo_live_delete(id));throw error;}
                 const previous=handles.get(tabId);
                 if(previous)native(e=>e.cpo_live_delete(ids.get(previous)));
@@ -622,7 +650,31 @@ const HOST:&str=r####"(() => {
         try{return durableTrim(String(value??''));}catch(error){fail(error);return null;}
     }
     function projectDurable(job){return durableObject(job,0);}
-    function deserializeDurable(raw,now,createId){return durableObject(raw,1,now,createId);}
+    function deserializeDurable(raw,now=Date.now(),createId=()=>crypto.randomUUID()){
+        if(!core)return null;
+        if(!raw||typeof raw!=='object'||Array.isArray(raw))return {ok:false,error:'Invalid durable job'};
+        let generated,generatedOnce=false;
+        const id=()=>{if(!generatedOnce){generated=createId();generatedOnce=true;}return generated;};
+        const queue=raw.queue;
+        const scalarSafe=schemaDescriptor.every(field=>{
+            if(field.name==='queue')return true;
+            const value=raw[field.name];
+            return value==null||typeof value==='string'||typeof value==='boolean'||typeof value==='number'&&Number.isFinite(value);
+        });
+        if(scalarSafe&&(queue==null||Array.isArray(queue))&&(queue||[]).every(v=>typeof v==='string')){
+            const fields=schemaDescriptor.map(field=>{
+                if(field.name==='queue')return '';
+                const value=Object.prototype.hasOwnProperty.call(raw,field.name)?raw[field.name]:undefined;
+                return value===undefined?'':JSON.stringify(value)??'';
+            });
+            const missingRun=raw.runId==null||raw.runId==='';
+            const restored=workerCollection(12,0,[String(now),'"__native_missing_run__"',...fields,...(queue||[]).map(v=>JSON.stringify(v))]);
+            if(restored!=null){if(missingRun)restored.runId=id();return {ok:true,value:restored};}
+        }
+        // Preserve compatibility with legacy numeric strings and uncommon
+        // structured-clone values that the fast scalar path does not accept.
+        return durableObject(raw,1,now,id);
+    }
     function settings(source,mode='optimizer') {
         if(!core)return null;
         const out={};

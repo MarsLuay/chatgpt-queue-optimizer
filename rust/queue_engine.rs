@@ -994,6 +994,31 @@ mod live_state {
             self.changed(id);
             id
         }
+        // Initialize all scalars and the queue before allocating a visible
+        // native owner. Repeated queue frames are ordered; duplicate scalar
+        // indices or malformed prompt frames reject the entire operation.
+        fn initialize(&mut self)->u32{
+            let input=std::mem::take(&mut self.input);
+            let mut job=Job::new();let mut seen=vec![false;job.fields.len()];
+            let mut at=0usize;
+            while at<input.len(){
+                let Some(header)=input.get(at..at+8)else{return 0;};
+                let idx=u32::from_le_bytes(header[..4].try_into().unwrap()) as usize;
+                let len=u32::from_le_bytes(header[4..].try_into().unwrap()) as usize;
+                at+=8;let Some(end)=at.checked_add(len)else{return 0;};
+                let Some(value)=input.get(at..end)else{return 0;};at=end;
+                if idx>=job.fields.len(){return 0;}
+                if idx==QUEUE{
+                    if len<2||value.first()!=Some(&b'"')||value.last()!=Some(&b'"'){return 0;}
+                    job.queue.push_back(value.to_vec());
+                }else{
+                    if seen[idx]{return 0;}seen[idx]=true;
+                    if len!=0{job.fields[idx]=Some(value.to_vec());}
+                }
+            }
+            let Some(id)=self.next.checked_add(1)else{return 0;};
+            self.next=id;job.dirty(self.advance());self.jobs.insert(id,job);id
+        }
         fn mutate(&mut self, id: u32, field: u32, op: u32, index: u32) -> bool {
             let input = std::mem::take(&mut self.input);
             let Some(job) = self.jobs.get_mut(&id) else { return false; };
@@ -1360,6 +1385,8 @@ mod live_state {
         }
     }
     thread_local! { static STORE: RefCell<Store> = RefCell::new(Store::default()); }
+    #[no_mangle]
+    pub extern "C" fn cpo_live_initialize()->u32{STORE.with(|s|s.borrow_mut().initialize())}
     #[no_mangle]
     pub extern "C" fn cpo_live_new() -> u32 { STORE.with(|s| s.borrow_mut().create()) }
     #[no_mangle]
