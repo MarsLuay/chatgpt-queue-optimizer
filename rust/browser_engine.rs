@@ -20,7 +20,7 @@ fn h(op: u32, a: u32, b: u32, c: u32) -> u32 {
 }
 
 #[no_mangle]
-pub extern "C" fn cpo_browser_abi() -> u32 { 6 }
+pub extern "C" fn cpo_browser_abi() -> u32 { 7 }
 
 #[cfg(target_arch = "wasm32")]
 mod sequence;
@@ -287,8 +287,9 @@ pub extern "C" fn cpo_apply_window(total: u32, visible: u32, flags: u32) -> u32 
         let was_hidden = h(50, index, 0, 0) != 0;
         if action == 1 {
             if !was_hidden {
-                // Set hidden only after media operations succeed; an interrupted
-                // native pass can safely be retried by the compatibility path.
+                // Journal the affected turn before any media mutation.
+                // A trap after eviction must still leave a discoverable root.
+                h(51,1,0,0);
                 cpo_execute_media(0);
                 if flags & 2 != 0 { cpo_execute_media(2); }
             }
@@ -301,6 +302,34 @@ pub extern "C" fn cpo_apply_window(total: u32, visible: u32, flags: u32) -> u32 
             for image in 0..count { h(53, image, 0, 0); }
         }
         h(51, action, 0, 0);
+    }
+    1
+}
+
+// Restoration is intentionally separate from normal window policy. Restore
+// every supplied root, including a partially mutated turn, before clearing
+// markers. Never hide, evict or add lazy-loading attributes in recovery.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_restore_window(total:u32)->u32{
+    for index in 0..total{
+        h(50,index,0,0);
+        cpo_execute_media(1);
+        cpo_execute_media(3);
+        h(51,0,0,0);
+    }
+    1
+}
+
+// Media journal recovery: host yields only still-live weak references.
+// 150 selects an entry and reports source conflict; 151 restores or abandons
+// the entry. This also covers sources moved outside their original turn.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_restore_journal(count:u32)->u32{
+    for index in 0..count{
+        let flags=h(150,index,0,0);
+        if flags&1!=0{h(151,0,((flags&2)==0) as u32,0);}
     }
     1
 }
