@@ -128,7 +128,7 @@ module.exports = [
         rules: correctnessRules
     },
     {
-        files: ['content.js', 'popup.js', 'provider-adapter.js', 'history-viewer.js', 'rust-browser-bridge.js', 'history-store.js'],
+        files: ['content.js', 'popup.js', 'provider-adapter.js', 'history-viewer.js', 'rust-browser-bridge.js', 'history-store.js', 'rust-queue-bridge.js'],
         languageOptions: {
             ecmaVersion: 'latest',
             sourceType: 'script',
