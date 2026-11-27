@@ -25,6 +25,13 @@ pub extern "C" fn cpo_browser_abi() -> u32 { 6 }
 #[cfg(target_arch = "wasm32")]
 mod sequence;
 
+// Message transport readiness: read=1, action=2, snapshot=3, safety=4.
+// A browser effect is allowed only after both native engines are loaded.
+#[no_mangle]
+pub extern "C" fn cpo_event_ready(kind:u32,flags:u32)->u32 {
+    (kind>=1 && kind<=4 && flags&3==3) as u32
+}
+
 const MAX_TURNS: u32 = 32;
 const MAX_NODES: u32 = 512;
 const IN_ROOT: u32 = 1;
