@@ -147,7 +147,7 @@
           sendResponse({ success: true, enabled: this.config.enabled });
           break;
 
-        case 'UPDATE_CONFIG':
+        case 'UPDATE_CONFIG': {
           if (['windowSize', 'adaptiveBudget', 'resourceBudget'].some(key =>
               Object.prototype.hasOwnProperty.call(message.config || {}, key) &&
               message.config[key] !== this.config[key])) {
@@ -172,6 +172,7 @@
 
           sendResponse({ success: true, enabled: this.config.enabled });
           break;
+        }
 
         case 'CPO_HISTORY_BATCH':
           try { sendResponse(this.captureHistoryBatch(message)); }
@@ -338,8 +339,8 @@
       });
     }
 
-    // Explicit snapshot requests only. No HTML, attachments, credentials,
-    // media URLs or React state are serialized; text is bounded per turn.
+    // Explicit snapshot requests only. No HTML, attachments, source attributes,
+    // or React state are serialized; visible message text may be sensitive.
     captureHistoryBatch(request) {
       if (!this.provider?.supportsOptimizer || !this.canDiscardInactiveTab()) {
         return { ok: false, error: 'Chat must be inactive, idle and free of drafts or uploads.' };
@@ -354,6 +355,7 @@
       if (!Number.isSafeInteger(offset) || offset < 0 || offset > total) return { ok: false, error: 'Invalid history offset.' };
       // A route or count change aborts the snapshot rather than mixing chats.
       const identity = surface.key;
+      if (typeof identity !== 'string' || !identity) return { ok: false, error: 'Unknown conversation identity.' };
       if (request.identity != null && (request.identity !== identity || request.total !== total)) {
         return { ok: false, error: 'Conversation changed during capture. Start again.' };
       }
