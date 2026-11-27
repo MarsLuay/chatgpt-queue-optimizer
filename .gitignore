@@ -26,3 +26,6 @@ node_modules/
 
 # Generated browser WASM ABI loader (produced alongside the WASM binary).
 /rust-browser-bindings.js
+
+# Rust-generated browser API interoperability (not a handwritten source).
+/utils.js
