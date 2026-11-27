@@ -17,7 +17,7 @@ const MAX_TURNS: u32 = 4096;
 const PAGE: u32 = 16;
 
 #[no_mangle]
-pub extern "C" fn cpo_history_abi() -> u32 { 1 }
+pub extern "C" fn cpo_history_abi() -> u32 { 2 }
 
 // Snapshot row framing: magic, index, role, truncation flag, reserved bytes,
 // UTF-8 length, UTF-8 text. UTF-8 is validated on both encode and decode.
@@ -151,9 +151,141 @@ pub extern "C" fn cpo_history_next(kind: u32, previous: u32, valid: u32, remaini
     }
 }
 
+// CPO2 uses bounded LZ tokens. A literal token 0..127 copies token+1
+// bytes; a match token 128..255 copies (token&127)+3 bytes from a
+// nonzero little-endian u16 distance. Each row is independent.
+fn compress(input: &[u8], out: &mut [u8], table: &mut [u32; 4096]) -> Option<usize> {
+    table.fill(u32::MAX);
+    let mut pos = 0;
+    let mut written = 0;
+    let mut literal = 0;
+    fn literals(input: &[u8], out: &mut [u8], written: &mut usize, from: usize, to: usize) -> Option<()> {
+        for chunk in input[from..to].chunks(128) {
+            let end = written.checked_add(1 + chunk.len())?;
+            if end > out.len() { return None; }
+            out[*written] = (chunk.len()-1) as u8;
+            out[*written+1..end].copy_from_slice(chunk);
+            *written = end;
+        }
+        Some(())
+    }
+    while pos + 2 < input.len() {
+        let key = ((u32::from(input[pos]) * 251 + u32::from(input[pos+1])) * 251 + u32::from(input[pos+2])) as usize & 4095;
+        let prev = table[key] as usize;
+        table[key] = pos as u32;
+        let mut len = 0;
+        if prev < pos && pos-prev <= 65535 {
+            while len < 130 && pos+len < input.len() && input[prev+len] == input[pos+len] { len += 1; }
+        }
+        if len >= 4 {
+            literals(input,out,&mut written,literal,pos)?;
+            if written+3 > out.len() { return None; }
+            out[written] = 128 | ((len-3) as u8);
+            out[written+1..written+3].copy_from_slice(&((pos-prev) as u16).to_le_bytes());
+            written += 3;
+            pos += len;
+            literal = pos;
+        } else { pos += 1; }
+    }
+    literals(input,out,&mut written,literal,input.len())?;
+    (written < input.len()).then_some(written)
+}
+
+fn decompress(input: &[u8], output: &mut [u8]) -> bool {
+    let mut i = 0;
+    let mut o = 0;
+    while i < input.len() {
+        let token = input[i]; i += 1;
+        if token < 128 {
+            let n = token as usize + 1;
+            if n > input.len()-i || n > output.len()-o { return false; }
+            output[o..o+n].copy_from_slice(&input[i..i+n]);
+            i += n; o += n;
+        } else {
+            let n = (token & 127) as usize + 3;
+            if input.len()-i < 2 || n > output.len()-o { return false; }
+            let distance = u16::from_le_bytes([input[i],input[i+1]]) as usize;
+            i += 2;
+            if distance == 0 || distance > o { return false; }
+            for _ in 0..n { output[o] = output[o-distance]; o += 1; }
+        }
+    }
+    o == output.len()
+}
+
+#[cfg(target_arch = "wasm32")]
+static mut CODEC_OUTPUT: [u8; MAX_ROW] = [0; MAX_ROW];
+#[cfg(target_arch = "wasm32")]
+static mut CODEC_TABLE: [u32; 4096] = [0; 4096];
+
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_history_output() -> usize { core::ptr::addr_of_mut!(CODEC_OUTPUT) as *mut u8 as usize }
+
+// The input is a previously framed CPO1 row. Return the compressed length,
+// or zero to retain the original frame when compression is not beneficial.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_history_compress(size: u32) -> u32 {
+    let size = size as usize;
+    if !(HEADER..=MAX_ROW).contains(&size) { return 0; }
+    let input = unsafe { core::slice::from_raw_parts(cpo_history_buffer() as *const u8,size) };
+    let index = u32::from_le_bytes([input[4],input[5],input[6],input[7]]);
+    if parse(input,index).is_none() { return 0; }
+    let output = unsafe { core::slice::from_raw_parts_mut(cpo_history_output() as *mut u8,MAX_ROW) };
+    let table = unsafe { &mut *core::ptr::addr_of_mut!(CODEC_TABLE) };
+    match compress(&input[HEADER..],&mut output[HEADER..size],table) {
+        Some(n) => {
+            output[..HEADER].copy_from_slice(&input[..HEADER]);
+            output[..4].copy_from_slice(b"CPO2");
+            (HEADER+n) as u32
+        }
+        None => 0
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_history_decompress(index: u32, size: u32) -> u32 {
+    let size = size as usize;
+    if !(HEADER..=MAX_ROW).contains(&size) { return 0; }
+    let input = unsafe { core::slice::from_raw_parts(cpo_history_buffer() as *const u8,size) };
+    if &input[..4] != b"CPO2" { return 0; }
+    let len = u32::from_le_bytes([input[12],input[13],input[14],input[15]]) as usize;
+    if len > MAX_TEXT || size-HEADER >= len { return 0; }
+    let output = unsafe { core::slice::from_raw_parts_mut(cpo_history_output() as *mut u8,HEADER+len) };
+    output[..HEADER].copy_from_slice(&input[..HEADER]);
+    output[..4].copy_from_slice(b"CPO1");
+    if !decompress(&input[HEADER..],&mut output[HEADER..]) || parse(output,index).is_none() { return 0; }
+    (HEADER+len) as u32
+}
+
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_history_wipe_output(size: u32) {
+    let ptr = cpo_history_output() as *mut u8;
+    for i in 0..(size as usize).min(MAX_ROW) { unsafe { core::ptr::write_volatile(ptr.add(i),0); } }
+    let table = core::ptr::addr_of_mut!(CODEC_TABLE) as *mut u32;
+    for i in 0..4096 { unsafe { core::ptr::write_volatile(table.add(i),0); } }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn lz_roundtrip_and_malformed_tokens() {
+        let input = b"the same sentence the same sentence the same sentence";
+        let mut compressed = [0; 64];
+        let mut table = [0; 4096];
+        let n = compress(input,&mut compressed,&mut table).unwrap();
+        assert!(n < input.len());
+        let mut restored = [0; b"the same sentence the same sentence the same sentence".len()];
+        assert_eq!(input.len(),restored.len());
+        assert!(decompress(&compressed[..n],&mut restored));
+        assert_eq!(&restored,input);
+        assert!(!decompress(&[128,0,0],&mut [0;3]));
+        assert!(!decompress(&[127,1],&mut [0;2]));
+    }
     #[test]
     fn row_roundtrip_and_corruption() {
         let mut buf = [0; HEADER + 5];
