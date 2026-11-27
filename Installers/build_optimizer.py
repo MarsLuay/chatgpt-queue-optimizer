@@ -10,6 +10,7 @@ from pathlib import Path
 TARGET = "wasm32-unknown-unknown"
 OUTPUT = "optimizer_core.wasm"
 BROWSER_OUTPUT = "optimizer_browser.wasm"
+HISTORY_OUTPUT = "optimizer_history.wasm"
 
 
 @functools.lru_cache(maxsize=4)
@@ -32,7 +33,7 @@ def build_optimizer(repo_dir):
     print("Building Rust optimizer (WebAssembly)...", flush=True)
     with tempfile.TemporaryDirectory(prefix="optimizer-wasm-", dir=build_dir) as temp:
         artifacts = []
-        for name, source_name in [(OUTPUT, "optimizer_core.rs"), (BROWSER_OUTPUT, "browser_engine.rs")]:
+        for name, source_name in [(OUTPUT, "optimizer_core.rs"), (BROWSER_OUTPUT, "browser_engine.rs"), (HISTORY_OUTPUT, "history_engine.rs")]:
             artifact = Path(temp) / name
             subprocess.run([
                 rustc, "--edition=2021", "--crate-name", Path(name).stem,
