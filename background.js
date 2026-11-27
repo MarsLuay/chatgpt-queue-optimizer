@@ -1700,6 +1700,7 @@ async function processQueue(tabId) {
             recordCompletedRun(tabId);
         }
     } catch (error) {
+        if (jobs.get(tabId) !== job) return;
         logQueueEvent(tabId, 'error', 'Unexpected automation error while processing queue.', {
             error: serializeError(error),
             commandNumber: job.currentCommandNumber || 0,
@@ -5091,6 +5092,7 @@ if (typeof module !== 'undefined' && module.exports) {
         inspectTabCommandTurns,
         waitForSubmissionAck,
         isSubmissionConfirmed,
+        queueExecutionAction,
         refreshChatGPTTab,
         waitForTabToRecover,
         waitForTabResponse,
