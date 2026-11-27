@@ -79,14 +79,15 @@ impl Row<'_>{
     }
 }
 fn error(code:u32)->Vec<u8>{format!("{{\"code\":{code}}}").into_bytes()}
-// Frame: operation, target JSON ID, now, retry due, optional replacement
-// record (for upsert), followed by (ID,state,due,created,record) tuples.
+// Frame: operation, target JSON ID, now, retry/creation due or completion
+// flags, payload (creation facts, failure reason or optional remaining count),
+// followed by (ID,state,due,created,record) tuples.
 // Result: code, sorted records, selected index, alarm actions and optional
 // claim. The only persistent native state is an actual in-flight claim.
 pub(super) fn transact(f:&[&[u8]],token:u32,leases:&mut BTreeMap<Vec<u8>,u32>,next_token:&mut u32)->Option<Vec<u8>>{
     if f.len()<5||(f.len()-5)%5!=0{return None;}
-    let op=state(f[0])?;
-    if op==0{return None;}
+    let op=std::str::from_utf8(f[0]).ok()?.parse::<u32>().ok()?;
+    if !(1..=8).contains(&op){return None;}
     let target=f[1];let now=num(f[2])?;if now<=0.0{return None;}
     let next=num(f[3])?;
     let mut rows=Vec::with_capacity((f.len()-5)/5);
@@ -129,6 +130,41 @@ pub(super) fn transact(f:&[&[u8]],token:u32,leases:&mut BTreeMap<Vec<u8>,u32>,ne
                 }
             }
         },
+        6=>{ // create, never overwrite an existing record
+            if found.is_some()||leases.contains_key(target){return Some(error(7));}
+            if super::cpo_timestamp_valid(next)!=1{return Some(error(6));}
+            let due=next.to_string();let time=now.to_string();
+            let raw=patch(f[4],&[("id",target),("status",b"\"pending\""),("failureReason",b"\"\""),
+                ("dueTs",due.as_bytes()),("createdAt",time.as_bytes()),("updatedAt",time.as_bytes())])?;
+            rows.push(Row{id:target,state:1,due:next,created:now,raw:std::borrow::Cow::Owned(raw),effect:2,selected:true});
+        },
+        7|8=>{ // terminal settlement must match a live claim and firing row
+            let Some(i)=found else{return Some(error(0));};
+            if rows[i].state!=2||token==0||leases.get(target)!=Some(&token){return Some(error(7));}
+            let time=now.to_string();
+            let raw=if op==7{
+                let reason=if f[4]==b"\"\""||f[4].is_empty(){b"\"Scheduled delivery failed.\"".as_slice()}else{f[4]};
+                if reason.first()!=Some(&b'"')||reason.last()!=Some(&b'"'){return None;}
+                patch(&rows[i].raw,&[("status",b"\"failed\""),("failureReason",reason),("updatedAt",time.as_bytes())])?
+            }else{
+                if !(0.0..=15.0).contains(&next)||next.fract()!=0.0{return None;}
+                let flags=next as u32;
+                let mut result=format!("{{\"queued\":{},\"started\":{},\"paused\":{},\"waitingForIdle\":{}",
+                    flags&1!=0,flags&2!=0,flags&4!=0,flags&8!=0).into_bytes();
+                if !f[4].is_empty(){
+                    let remaining=num(f[4])?;
+                    if remaining<0.0||remaining.fract()!=0.0||remaining>9007199254740991.0{return None;}
+                    result.extend_from_slice(b",\"remaining\":");result.extend_from_slice(remaining.to_string().as_bytes());
+                }
+                result.push(b'}');
+                patch(&rows[i].raw,&[("status",b"\"completed\""),("failureReason",b"\"\""),("updatedAt",time.as_bytes()),
+                    ("completedAt",time.as_bytes()),("enqueueResult",&result)])?
+            };
+            rows[i].raw=std::borrow::Cow::Owned(raw);rows[i].state=if op==7{4}else{3};
+            rows[i].selected=true;rows[i].effect=1;
+            // Host releases only after durable storage has succeeded or the
+            // enclosing delivery fails. A rejected commit cannot authorize a new send.
+        },
         _=>return None
     }
     rows.sort_by(|a,b|match super::cpo_schedule_compare(a.due,b.due,a.created,b.created){
@@ -141,7 +177,6 @@ pub(super) fn transact(f:&[&[u8]],token:u32,leases:&mut BTreeMap<Vec<u8>,u32>,ne
     for (i,row) in rows.iter().enumerate(){if i!=0{out.push(b',');}out.push(b'0'+row.effect);}
     out.extend_from_slice(b"]}");
     if claim!=0{*next_token=claim;leases.insert(target.to_vec(),claim);}
-    let _=token;
     Some(out)
 }
 #[cfg(test)]
@@ -154,6 +189,21 @@ mod tests{
         assert!(s.contains(r#""other":{"nested":[1,{"q":"a\"b"}]}"#));
         assert!(s.contains(r#""text":"\ud800""#));assert!(s.contains(r#""status":"firing""#));
         assert!(!s.contains("pending"));
+    }
+    #[test]fn creation_and_terminal_settlement_require_exact_owner(){
+        let mut leases=BTreeMap::new();let mut next=0;
+        let created=[b"6".as_slice(),b"\"a\"",b"10",b"20",br#"{"text":"hello","tabId":1}"#];
+        let result=String::from_utf8(transact(&created,0,&mut leases,&mut next).unwrap()).unwrap();
+        assert!(result.contains("\"status\":\"pending\""));assert!(result.contains("\"dueTs\":20"));
+        let row=br#"{"id":"a","status":"firing","dueTs":20,"text":"hello","createdAt":10}"#;
+        let terminal=[b"8".as_slice(),b"\"a\"",b"21",b"9",b"2",b"\"a\"",b"2",b"20",b"10",row];
+        assert_eq!(transact(&terminal,1,&mut leases,&mut next).unwrap(),b"{\"code\":7}");
+        leases.insert(b"\"a\"".to_vec(),1);
+        let result=String::from_utf8(transact(&terminal,1,&mut leases,&mut next).unwrap()).unwrap();
+        assert!(result.contains("\"status\":\"completed\""));
+        assert!(result.contains("\"enqueueResult\":{\"queued\":true,\"started\":false,\"paused\":false,\"waitingForIdle\":true,\"remaining\":2}"));
+        assert!(result.contains("\"completedAt\":21"));
+        assert_eq!(leases.get(b"\"a\"".as_slice()),Some(&1));
     }
     #[test]fn claim_is_single_use_and_not_early(){
         let mut leases=BTreeMap::new();let mut next=0;

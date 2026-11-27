@@ -2280,6 +2280,7 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
 
     jobs.transaction(job,13,1);
     await updateRunningJobsStorage({ force: true });
+    if(jobs.processing(job,2)!==1)return {action:'return'};
 
     // Stage 1: In-page retry if a retry/regenerate button is currently present
     if (initialRecovery === 1) {
@@ -2343,6 +2344,7 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
     });
 
     const reloaded = await refreshChatGPTTab(tabId);
+    if(jobs.processing(job,2)!==1)return {action:'return'};
     if (!reloaded) {
         logQueueEvent(tabId, 'error', `Could not reload ChatGPT tab ${tabId}.`, {
             commandNumber: job.currentCommandNumber || 0,
@@ -2352,6 +2354,7 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
     }
 
     const recovered = await waitForTabToRecover(tabId, 30000);
+    if(jobs.processing(job,2)!==1)return {action:'return'};
     if (!recovered) {
         logQueueEvent(tabId, 'error', `ChatGPT tab did not become responsive within 30s after reload.`, {
             commandNumber: job.currentCommandNumber || 0,
@@ -2368,6 +2371,7 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
     }
 
     const inspect = await sendTabMessage(tabId, { type: 'INSPECT_GENERATION_STATE' }).catch(() => null);
+    if(jobs.processing(job,2)!==1)return {action:'return'};
     const reloadedState = inspect?.state || {};
     const lastAssistant = inspect?.lastAssistant || null;
 
@@ -3674,24 +3678,6 @@ function createScheduledAlarm(item) {
     chrome.alarms.create(scheduledAlarmName(item.id), { when });
 }
 
-async function persistScheduledItem(nextItem) {
-    return withScheduledStorageLock(async () => {
-        const items = await readScheduledMessages();
-        const index=globalThis.CpoQueueEngine?.scheduledUpsertPlan(items,nextItem);
-        if(index==null)throw new Error('Scheduled claim changed before settlement or ambiguous stored ID; no record overwritten.');
-        if(index===0)items.push(nextItem);
-        else items[index-1]=nextItem;
-        await writeScheduledMessages(items);
-        if(nextItem.status==='pending')createScheduledAlarm(nextItem);
-        else if(nextItem.status==='completed'||nextItem.status==='failed')clearScheduledAlarm(nextItem.id);
-        notifyRuntime({
-            action: 'scheduledMessagesUpdated',
-            item: nextItem
-        });
-        return nextItem;
-    });
-}
-
 function normalizedIdentityKey(provider,type,id,key=''){
     return requiredQueueDecision(globalThis.CpoQueueEngine?.identityKey?.(provider,type,id,key));
 }
@@ -3709,7 +3695,8 @@ function identitiesMatchForSchedule(stored,current){
 }
 
 async function createScheduledMessage({ text, dueTs, tabId, conversationIdentity = null }) {
-    const message = String(text || '').trim();
+    if(!await globalThis.CpoQueueEngine?.load())return {ok:false,error:'Native scheduler unavailable.'};
+    const message=requiredQueueDecision(globalThis.CpoQueueEngine?.trim(String(text||'')));
     const normalizedTabId = Number(tabId || 0);
     const normalizedDueTs = Number(dueTs);
 
@@ -3755,22 +3742,16 @@ async function createScheduledMessage({ text, dueTs, tabId, conversationIdentity
     const targetKey = normalizedIdentityKey(provider,conversationType,conversationId,identity?.key);
     const now = Date.now();
 
-    const item = {
-        id: createRunId(),
-        text: message,
-        dueTs: normalizedDueTs,
-        tabId: normalizedTabId,
-        provider,
-        conversationId,
-        conversationType,
-        targetKey,
-        createdAt: now,
-        updatedAt: now,
-        status: 'pending',
-        failureReason: ''
-    };
-
-    await persistScheduledItem(item);
+    const id=createRunId();
+    const facts={text:message,tabId:normalizedTabId,provider,conversationId,conversationType,targetKey};
+    const item=await withScheduledStorageLock(async()=>{
+        const plan=scheduledTransaction(6,await readScheduledMessages(),id,now,normalizedDueTs,JSON.stringify(facts));
+        if(plan.code!==1)throw new Error('Native scheduled creation rejected; stored records preserved.');
+        await commitScheduledPlan(plan,id);
+        const created=plan.items[plan.index];
+        notifyRuntime({action:'scheduledMessagesUpdated',item:created});
+        return created;
+    });
 
     logQueueEvent(normalizedTabId, 'info', 'Scheduled message created.', {
         scheduledId: item.id,
@@ -3784,8 +3765,8 @@ async function createScheduledMessage({ text, dueTs, tabId, conversationIdentity
 
 // All collection ordering, eligibility, state patches and claim allocation
 // run in Rust. Only browser storage, alarms and UI notifications are effects.
-function scheduledTransaction(op,items,id='',now=Date.now(),next=0){
-    const plan=globalThis.CpoQueueEngine?.scheduledTransaction(op,items,id,now,next);
+function scheduledTransaction(op,items,id='',now=Date.now(),next=0,payload='',lease=0){
+    const plan=globalThis.CpoQueueEngine?.scheduledTransaction(op,items,id,now,next,payload,lease);
     if(!plan)throw new Error('Native scheduled transaction unavailable; stored items preserved.');
     return plan;
 }
@@ -3844,33 +3825,32 @@ async function retryScheduledMessage(id, dueTs=null) {
     return result;
 }
 
-async function markScheduledFailed(item, reason) {
-    if(!globalThis.CpoQueueEngine.scheduledMutation(6,item,Date.now(),0,String(reason||'Scheduled delivery failed.')))throw new Error('Native scheduled failure rejected.');
-    await persistScheduledItem(item);
-    logQueueEvent(item.tabId, 'error', item.failureReason, {
-        scheduledId: item.id,
-        targetKey: item.targetKey,
-        status: item.status
+async function settleScheduledItem(item,op,next=0,payload=''){
+    return withScheduledStorageLock(async()=>{
+        const plan=scheduledTransaction(op,await readScheduledMessages(),item.id,Date.now(),next,payload,item.__nativeClaim||0);
+        if(plan.code!==1)throw new Error('Native scheduled settlement rejected; stored records preserved.');
+        await commitScheduledPlan(plan,item.id);
+        const settled=plan.items[plan.index];
+        notifyRuntime({action:'scheduledMessagesUpdated',item:settled});
+        return settled;
     });
-    return item;
 }
 
-async function markScheduledCompleted(item, enqueueResult = {}) {
-    if(!globalThis.CpoQueueEngine.scheduledMutation(7,item))throw new Error('Native scheduled completion rejected.');
-    item.enqueueResult = {
-        queued: enqueueResult.queued === true,
-        started: enqueueResult.started === true,
-        paused: enqueueResult.paused === true,
-        waitingForIdle: enqueueResult.waitingForIdle === true,
-        remaining: enqueueResult.remaining
-    };
-    await persistScheduledItem(item);
-    logQueueEvent(item.tabId, 'info', 'Scheduled message handed to queue.', {
-        scheduledId: item.id,
-        targetKey: item.targetKey,
-        enqueueResult: item.enqueueResult
+async function markScheduledFailed(item,reason){
+    const settled=await settleScheduledItem(item,7,0,JSON.stringify(String(reason||'Scheduled delivery failed.')));
+    logQueueEvent(settled.tabId,'error',settled.failureReason,{scheduledId:settled.id,targetKey:settled.targetKey,status:settled.status});
+    return settled;
+}
+
+async function markScheduledCompleted(item,enqueueResult={}){
+    const flags=Number(enqueueResult.queued===true)|(Number(enqueueResult.started===true)<<1)|
+        (Number(enqueueResult.paused===true)<<2)|(Number(enqueueResult.waitingForIdle===true)<<3);
+    const remaining=enqueueResult.remaining===undefined?'':String(enqueueResult.remaining);
+    const settled=await settleScheduledItem(item,8,flags,remaining);
+    logQueueEvent(settled.tabId,'info','Scheduled message handed to queue.',{
+        scheduledId:settled.id,targetKey:settled.targetKey,enqueueResult:settled.enqueueResult
     });
-    return item;
+    return settled;
 }
 
 async function claimScheduledMessageForFire(id, now=Date.now()) {

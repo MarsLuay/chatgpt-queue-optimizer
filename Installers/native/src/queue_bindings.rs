@@ -747,9 +747,9 @@ const HOST:&str=r####"(() => {
     const scheduledId=value=>typeof value==='string'?'s:'+value:'!';
     const scheduledState=item=>String(Math.max(0,['','pending','firing','completed','failed','cancelled'].indexOf(item?.status)));
     const scheduledRecordId=item=>typeof item?.id==='string'?JSON.stringify(item.id):'null';
-    function scheduledTransaction(op,items,id='',now=Date.now(),next=0){
+    function scheduledTransaction(op,items,id='',now=Date.now(),next=0,payload='',lease=0){
         if(!Array.isArray(items))return null;
-        return workerCollection(13,0,[String(op),JSON.stringify(String(id||'')),String(now),String(next),'',
+        return workerCollection(13,lease,[String(op),JSON.stringify(String(id||'')),String(now),String(next),payload,
             ...items.flatMap(item=>[scheduledRecordId(item),scheduledState(item),String(Number(item?.dueTs||0)),
                 String(Number(item?.createdAt||0)),JSON.stringify(item)])]);
     }

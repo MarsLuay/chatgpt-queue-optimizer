@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 28);
+    assert.equal(e.cpo_queue_abi(), 29);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -787,4 +787,21 @@ test('native scheduled transactions sort, mutate and claim records atomically',{
     const cancelled=tx(1,retried.items,'b',14);assert.equal(cancelled.items[0].status,'cancelled');assert.deepEqual(cancelled.items[0].extra,{x:[1,2]});
     const deleted=tx(2,cancelled.items,'b',15);assert.deepEqual(deleted.items.map(x=>x.id),['a']);assert.equal(deleted.clearDeleted,true);
     assert.equal(tx(1,[...items,items[0]],'b',16).code,7);
+});
+
+
+test('native scheduled creation and settlement use durable rows and exact leases',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    const tx=engine.scheduledTransaction;
+    const created=tx(6,[],'new',10,20,JSON.stringify({text:'message',tabId:7,provider:'chatgpt'}));
+    assert.equal(created.code,1);assert.equal(created.items[0].status,'pending');assert.deepEqual(created.effects,[2]);
+    assert.equal(tx(6,created.items,'new',11,30,'{}').code,7);
+    const claim=tx(4,created.items,'new',20);
+    assert.equal(tx(8,claim.items,'new',21,1,'2',claim.claim+1).code,7);
+    const done=tx(8,claim.items,'new',21,9,'2',claim.claim);
+    assert.equal(done.items[0].status,'completed');assert.equal(done.items[0].text,'message');
+    assert.deepEqual(done.items[0].enqueueResult,{queued:true,started:false,paused:false,waitingForIdle:true,remaining:2});
+    assert.deepEqual(done.effects,[1]);assert.equal(tx(7,done.items,'new',22,0,'"failed"',claim.claim).code,7);
+    assert.equal(engine.workerCollection(8,claim.claim,['"new"']),1);
 });
