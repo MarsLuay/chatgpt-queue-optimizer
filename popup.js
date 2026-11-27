@@ -271,69 +271,11 @@ document.addEventListener('DOMContentLoaded', async function () {
     }
 
     function executeScript(details) {
-        return extensionApiPromise(
-            (done) => {
-                if (chrome.scripting && chrome.scripting.executeScript) {
-                    return chrome.scripting.executeScript(details, done);
-                }
-
-                if (chrome.tabs && chrome.tabs.executeScript) {
-                    const tabId = details?.target?.tabId;
-                    const legacyDetails = {};
-
-                    if (Array.isArray(details.files) && details.files[0]) {
-                        legacyDetails.file = details.files[0];
-                    } else if (details.func) {
-                        legacyDetails.code = `(${details.func}).apply(null, ${JSON.stringify(details.args || [])});`;
-                    } else {
-                        throw new Error('No script file or function was provided.');
-                    }
-
-                    return chrome.tabs.executeScript(tabId, legacyDetails, done);
-                }
-
-                throw new Error('Script injection is not available in this browser.');
-            },
-            () => {
-                if (!chrome.scripting || !chrome.scripting.executeScript) {
-                    throw new Error('Script injection is not available in this browser.');
-                }
-
-                return chrome.scripting.executeScript(details);
-            }
-        );
+        return globalThis.CpoBrowserApi.inject(details);
     }
 
     function insertCSS(details) {
-        return extensionApiPromise(
-            (done) => {
-                if (chrome.scripting && chrome.scripting.insertCSS) {
-                    return chrome.scripting.insertCSS(details, done);
-                }
-
-                if (chrome.tabs && chrome.tabs.insertCSS) {
-                    const tabId = details?.target?.tabId;
-                    const legacyDetails = {};
-
-                    if (Array.isArray(details.files) && details.files[0]) {
-                        legacyDetails.file = details.files[0];
-                    } else {
-                        throw new Error('No CSS file was provided.');
-                    }
-
-                    return chrome.tabs.insertCSS(tabId, legacyDetails, done);
-                }
-
-                throw new Error('CSS injection is not available in this browser.');
-            },
-            () => {
-                if (!chrome.scripting || !chrome.scripting.insertCSS) {
-                    throw new Error('CSS injection is not available in this browser.');
-                }
-
-                return chrome.scripting.insertCSS(details);
-            }
-        );
+        return globalThis.CpoBrowserApi.inject(details,true);
     }
 
     function sleep(ms) {
@@ -704,16 +646,7 @@ document.addEventListener('DOMContentLoaded', async function () {
     }
 
     function sendScheduledRuntimeMessage(request) {
-        return new Promise((resolve, reject) => {
-            chrome.runtime.sendMessage(request, (response) => {
-                if (chrome.runtime.lastError) {
-                    reject(new Error(chrome.runtime.lastError.message || 'Scheduled action failed.'));
-                    return;
-                }
-
-                resolve(response || {});
-            });
-        });
+        return globalThis.CpoBrowserApi.invoke('runtimeSend',request).then(response=>response||{});
     }
 
     function getScheduledTargetTitleMap() {
@@ -2187,8 +2120,7 @@ The sequence should do the following: `;
             if (tab?.incognito) throw new Error('Local history is unavailable for private tabs.');
             if (tab?.id && !tab.discarded) await ensureOptimizerContentScript(tab.id);
             const url = chrome.runtime.getURL('history-viewer.html') + (tab?.id ? '?tab=' + encodeURIComponent(tab.id) : '');
-            await extensionApiPromise(done => chrome.tabs.create({ url, active: true }, done),
-                () => chrome.tabs.create({ url, active: true }));
+            await globalThis.CpoBrowserApi.invoke('tabCreate',{url,active:true});
         } catch (error) {
             setOptimizerStatus(error?.message || 'Could not open local history reader.', 'disabled');
         }
