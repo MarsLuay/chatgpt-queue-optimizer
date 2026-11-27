@@ -710,12 +710,19 @@
             this._turnScanCacheEnabled = false;
             this._turnScanCache = new WeakMap();
             this._turnListCache = null;
+            this._turnListCacheTimer = null;
+        }
+
+        clearTurnListCache() {
+            clearTimeout(this._turnListCacheTimer);
+            this._turnListCacheTimer = null;
+            this._turnListCache = null;
         }
 
         setTurnScanCacheEnabled(enabled) {
             this._turnScanCacheEnabled = enabled === true;
             this._turnScanCache = new WeakMap();
-            this._turnListCache = null;
+            this.clearTurnListCache();
         }
 
         invalidateTurnScanCache(mutations) {
@@ -746,7 +753,7 @@
                 }
             }
             for (const node of dirtyNodes) this._turnScanCache.delete(node);
-            if (structureChanged) this._turnListCache = null;
+            if (structureChanged) this.clearTurnListCache();
         }
 
         getCompatibilityContract() {
@@ -874,10 +881,10 @@
             const cache = this._turnListCache;
             if (this._turnScanCacheEnabled && cache?.doc === doc &&
                 now - cache.createdAt < 8000 &&
-                (cache.nodes.length === 0 || typeof doc.contains !== 'function' ||
-                    (doc.contains(cache.nodes[0]) && doc.contains(cache.nodes[cache.nodes.length - 1])))) {
+                cache.nodes.every(node => node.isConnected !== false)) {
                 return cache.nodes;
             }
+            this.clearTurnListCache();
             // One DOM-ordered query instead of a separate full traversal for
             // every selector. Preserve the independent-selector fallback.
             let nodes;
@@ -900,7 +907,9 @@
                 }
             }
             if (this._turnScanCacheEnabled) {
-                this._turnListCache = { doc, nodes, turnSet: new Set(nodes), createdAt: now };
+                this._turnListCache = { doc, nodes, createdAt: now };
+                this._turnListCacheTimer = setTimeout(() => this.clearTurnListCache(), 8000);
+                if (typeof this._turnListCacheTimer?.unref === 'function') this._turnListCacheTimer.unref();
             }
             return nodes;
         }
@@ -1461,9 +1470,7 @@
             const turns = this.getConversationTurns(doc);
             const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
             const assistantErrorStop = getNodeRole(latestTurn) === 'assistant' && hasAssistantErrorStop(latestTurn);
-            const turnSet = this._turnListCache?.nodes === turns
-                ? this._turnListCache.turnSet
-                : new Set(turns);
+            const turnSet = new Set(turns);
             const inActiveSurface = (node) => this.isActiveResponseNode(node, turns, latestTurn, turnSet);
 
             const buttons = Array.from(doc.querySelectorAll('button')).filter(inActiveSurface);
