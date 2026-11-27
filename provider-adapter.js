@@ -897,6 +897,7 @@
             if (this._nativeMessageDiscovery) {
                 const native = this._nativeMessageDiscovery(this, doc, mainRoot);
                 if (native) return native;
+                throw new Error('Native message discovery unavailable.');
             }
             const collected = [];
             let matchedSelector = null;
@@ -1500,7 +1501,7 @@
         }
 
         clearComposer(composer) {
-            if(this._nativeSelectorEngine?.composerWrite(1,composer,'',0)===true)return;
+            if(this._nativeSelectorEngine){if(this._nativeSelectorEngine.composerWrite(1,composer,'',0)!==true)throw new Error('Native composer clear unavailable.');return;}
             if (!composer) return;
 
             if (typeof composer.focus === 'function') {
@@ -1773,7 +1774,7 @@
             const btn = this.getRetryButton(doc);
             if (!btn) return false;
             const native=this._nativeSelectorEngine?.click(btn);
-            if(native!=null)return native;
+            if(this._nativeSelectorEngine)return native===true;
             try {
                 btn.click();
                 return true;
@@ -2164,7 +2165,7 @@
         }
 
         clearComposer(composer) {
-            if(this._nativeSelectorEngine?.composerWrite(2,composer,'',0)===true)return;
+            if(this._nativeSelectorEngine){if(this._nativeSelectorEngine.composerWrite(2,composer,'',0)!==true)throw new Error('Native composer clear unavailable.');return;}
             if (!composer) return;
 
             if (typeof composer.focus === 'function') {
@@ -2537,7 +2538,7 @@
         }
 
         clearComposer(composer) {
-            if(this._nativeSelectorEngine?.composerWrite(3,composer,'',0)===true)return;
+            if(this._nativeSelectorEngine){if(this._nativeSelectorEngine.composerWrite(3,composer,'',0)!==true)throw new Error('Native composer clear unavailable.');return;}
             if (!composer) return;
 
             if (typeof composer.focus === 'function') {
