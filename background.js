@@ -106,9 +106,7 @@ async function discardHistorySource(request, sender) {
         if (approved !== 1 || !safeTab(after) || before.lastAccessed !== after.lastAccessed || jobs.has(tabId)) {
             return { ok: false, error: 'Source tab state changed.' };
         }
-        const discarded = await extensionApiPromise(
-            done => chrome.tabs.discard(tabId, done), () => chrome.tabs.discard(tabId)
-        );
+        const discarded = await globalThis.CpoBrowserApi.invoke('tabDiscard',tabId);
         const verified = discarded?.discarded === true || (await getTab(tabId))?.discarded === true;
         return verified ? { ok: true } : { ok: false, error: 'Browser did not confirm that the tab was discarded.' };
     } catch {
@@ -161,10 +159,7 @@ async function discardInactiveChatGPTTabs() {
                 before.lastAccessed === after?.lastAccessed && before.url === after?.url,reply?.safe === true);
             if (approved !== 1 || !isIdleDiscardCandidate(after, minutes) ||
                 before.lastAccessed !== after.lastAccessed || before.url !== after.url || jobs.has(tab.id)) continue;
-            await extensionApiPromise(
-                done => chrome.tabs.discard(tab.id, done),
-                () => chrome.tabs.discard(tab.id)
-            );
+            await globalThis.CpoBrowserApi.invoke('tabDiscard',tab.id);
             count++;
         } catch {
             // The tab may have changed state or disappeared during the sweep.
@@ -4244,11 +4239,7 @@ function scheduledAlarmName(id) {
 
 function sortScheduledMessages(items) {
     return [...(Array.isArray(items) ? items : [])].sort((a, b) => {
-        const native = globalThis.CpoQueueEngine?.numeric('cpo_schedule_compare', [Number(a?.dueTs || 0), Number(b?.dueTs || 0), Number(a?.createdAt || 0), Number(b?.createdAt || 0)]);
-        if (native != null) return native - 1;
-        const dueDiff = Number(a?.dueTs || 0) - Number(b?.dueTs || 0);
-        if (dueDiff !== 0) return dueDiff;
-        return Number(a?.createdAt || 0) - Number(b?.createdAt || 0);
+        return requiredQueueDecision(globalThis.CpoQueueEngine?.numeric('cpo_schedule_compare', [Number(a?.dueTs || 0), Number(b?.dueTs || 0), Number(a?.createdAt || 0), Number(b?.createdAt || 0)]))-1;
     });
 }
 
