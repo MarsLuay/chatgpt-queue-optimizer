@@ -1696,17 +1696,8 @@ function handleStopAllSequences(sendResponse) {
 
 function queueExecutionAction(job) {
     const native = globalThis.CpoQueueEngine?.next(job, isSubmissionConfirmed(job));
-    if (native != null) return native;
-    if (!job.isRunning || job.isPaused || job.isStopped) return 0;
-    if (job.rolloverInProgress || job.currentPhase === 'rollover-in-progress') return 1;
-    if (job.currentMessage) {
-        if (job.currentPhase === 'terminal') return 2;
-        if (WAITING_COMMAND_PHASES.has(job.currentPhase)) return 3;
-        if (job.currentPhase === 'retry-wait') return 4;
-        return isSubmissionConfirmed(job) ? 5 : 6;
-    }
-    if (!job.queue.length) return 7;
-    return job.waitForIdleBeforeSend ? 8 : 9;
+    if (native == null) throw new Error('Required Rust queue dispatcher unavailable.');
+    return native;
 }
 
 async function processQueue(tabId) {
@@ -1721,7 +1712,10 @@ async function processQueue(tabId) {
     try {
         // The native engine selects the next action from durable job state.
         // JavaScript performs asynchronous browser and storage effects only.
-        await globalThis.CpoQueueEngine?.load();
+        if(!await globalThis.CpoQueueEngine?.load()) {
+            pauseJob(tabId,'Required Rust queue engine unavailable. Rebuild and reinstall the extension.',{failureClass:'non-retryable'});
+            return;
+        }
         while (jobs.get(tabId) === job) {
             const action = queueExecutionAction(job);
             if (action === 0 || action === 7) break;
@@ -3074,7 +3068,7 @@ async function waitForSubmissionAck(tabId, { expectedText, beforeSnapshot, timeo
 
 async function sendPromptToSpecificTab(tabId, text, expectedJob = jobs.get(tabId)) {
     try {
-        await globalThis.CpoQueueEngine?.load();
+        if(!await globalThis.CpoQueueEngine?.load())return {ok:false,error:'Required Rust queue engine unavailable.',details:{failureClass:'non-retryable'}};
         let tabUrl = '';
         try {
             const tab = await getTab(tabId);
@@ -3089,9 +3083,7 @@ async function sendPromptToSpecificTab(tabId, text, expectedJob = jobs.get(tabId
             getActiveProviderAdapter(job?.provider) ||
             getActiveProviderAdapter('chatgpt');
         const providerName = provider?.name || 'Provider';
-        const compatibilityContract = provider && typeof provider.getCompatibilityContract === 'function'
-            ? provider.getCompatibilityContract()
-            : { provider: provider?.id || 'unknown', version: 1, selectors: {}, signals: {} };
+
 
         const beforeInspect = await inspectTabCommandTurns(tabId, {
             expectedText: text,
@@ -3137,333 +3129,7 @@ async function sendPromptToSpecificTab(tabId, text, expectedJob = jobs.get(tabId
                 if(nativeClickGrants.get(tabId)===grant)nativeClickGrants.delete(tabId);
             }
         } else {
-        if(!ownsSubmission())return {ok:false,error:'Queue ownership changed.',details:{failureClass:'user-stop'}};
-        results = await executeScript({
-            target: { tabId },
-            func: async (msg, contract, providerName) => {
-                function sleepInPage(ms) {
-                    return new Promise(resolve => {
-                        setTimeout(resolve, ms);
-                    });
-                }
-
-                function describeElement(element) {
-                    if (!element) return null;
-
-                    return {
-                        tagName: element.tagName || '',
-                        id: element.id || '',
-                        testId: element.getAttribute('data-testid') || element.getAttribute('data-test-id') || '',
-                        ariaLabel: element.getAttribute('aria-label') || '',
-                        textLength: (element.innerText || element.textContent || element.value || '').length,
-                        disabled: !!element.disabled,
-                        ariaDisabled: element.getAttribute('aria-disabled') || ''
-                    };
-                }
-
-                function getSelectorList(signalKey) {
-                    return Array.isArray(contract?.selectors?.[signalKey])
-                        ? contract.selectors[signalKey]
-                        : [];
-                }
-
-                function getCandidates(signalKey) {
-                    const candidates = [];
-                    const seen = new Set();
-                    const selectorList = getSelectorList(signalKey);
-
-                    if (selectorList.length === 0) {
-                        return candidates;
-                    }
-
-                    try {
-                        const combinedSelector = selectorList.join(',');
-                        const elements = document.querySelectorAll(combinedSelector);
-
-                        if (elements.length > 0) {
-                            let remainingElements = Array.from(elements);
-                            for (const selector of selectorList) {
-                                if (remainingElements.length === 0) break;
-
-                                const matches = [];
-                                const newRemaining = [];
-
-                                for (const el of remainingElements) {
-                                    try {
-                                        if (el.matches(selector)) {
-                                            matches.push(el);
-                                        } else {
-                                            newRemaining.push(el);
-                                        }
-                                    } catch {
-                                        newRemaining.push(el);
-                                    }
-                                }
-
-                                for (const element of matches) {
-                                    if (!seen.has(element)) {
-                                        seen.add(element);
-                                        candidates.push({ element, selector, signalKey });
-                                    }
-                                }
-                                remainingElements = newRemaining;
-                            }
-                        }
-                    } catch {
-                        for (const selector of selectorList) {
-                            let elements = [];
-                            try {
-                                elements = Array.from(document.querySelectorAll(selector));
-                            } catch {
-                                elements = [];
-                            }
-                            for (const element of elements) {
-                                if (!seen.has(element)) {
-                                    seen.add(element);
-                                    candidates.push({ element, selector, signalKey });
-                                }
-                            }
-                        }
-                    }
-                    return candidates;
-                }
-
-                function isComposerCandidate(element, selector) {
-                    const tagName = (element?.tagName || '').toLowerCase();
-                    const isEditable = tagName === 'textarea' || element?.getAttribute('contenteditable') === 'true';
-                    if (!isEditable || element.closest?.('#cpo-root')) return false;
-
-                    const messageContext = contract?.signals?.messageContext || [];
-                    if (messageContext.length > 0 && element.closest?.(messageContext.join(','))) {
-                        return false;
-                    }
-
-                    const weakComposerSelectors = contract?.signals?.weakComposerSelectors || [];
-                    if (weakComposerSelectors.includes(selector)) {
-                        const composerContext = contract?.signals?.composerContext || [];
-                        return composerContext.length > 0 && !!element.closest?.(composerContext.join(','));
-                    }
-
-                    return true;
-                }
-
-                function isSendActionCandidate(element, selector) {
-                    const tagName = (element?.tagName || '').toLowerCase();
-                    if (tagName !== 'button' && typeof element?.click !== 'function') return false;
-
-                    const weakSendButtonSelectors = contract?.signals?.weakSendButtonSelectors || [];
-                    if (!weakSendButtonSelectors.includes(selector)) return true;
-
-                    const composerContext = contract?.signals?.composerContext || [];
-                    return composerContext.length > 0 && !!element.closest?.(composerContext.join(','));
-                }
-
-                function findMatch(signalKey, predicate = null) {
-                    return getCandidates(signalKey).find(match => !predicate || predicate(match.element, match.selector)) || {
-                        element: null,
-                        selector: '',
-                        signalKey
-                    };
-                }
-
-                function compatibilityFailure(signalKey, message, details = {}) {
-                    return {
-                        ok: false,
-                        error: `${providerName || 'Provider'} compatibility failure: ${message}`,
-                        details: {
-                            compatibilityFailure: signalKey,
-                            signalKey,
-                            provider: providerName || '',
-                            url: location.href,
-                            title: document.title,
-                            ...details
-                        }
-                    };
-                }
-
-                function getComposerText(element) {
-                    if (!element) return '';
-
-                    const tagName = (element.tagName || '').toLowerCase();
-                    if (tagName === 'textarea') {
-                        return String(element.value || '');
-                    }
-
-                    const directText = element.innerText || element.textContent || '';
-                    if (directText) return String(directText);
-
-                    // Lightweight test DOMs do not always maintain a parent's
-                    // textContent after appendChild. Reading child text here
-                    // also matches the browser's contenteditable text.
-                    return Array.from(element.children || [])
-                        .map(child => child.innerText || child.textContent || '')
-                        .join('');
-                }
-
-                function normalizeComposerText(value) {
-                    return String(value || '').replace(/\u200b/g, '').trim();
-                }
-
-                function setComposerText(element, value) {
-                    const nextText = String(value || '');
-                    const tagName = (element.tagName || '').toLowerCase();
-                    element.focus();
-
-                    if (tagName === 'textarea') {
-                        element.value = nextText;
-                    } else {
-                        if (typeof element.replaceChildren === 'function') {
-                            element.replaceChildren();
-                        } else if (Array.isArray(element.children)) {
-                            element.children.length = 0;
-                        }
-                        element.innerText = '';
-                        element.textContent = '';
-                        if (element.classList && typeof element.classList.remove === 'function') {
-                            element.classList.remove('ql-blank');
-                        }
-                        if (nextText) {
-                            const paragraph = document.createElement('p');
-                            paragraph.innerText = nextText;
-                            paragraph.textContent = nextText;
-                            element.appendChild(paragraph);
-                        }
-                    }
-
-                    if (typeof InputEvent === 'function') {
-                        element.dispatchEvent(new InputEvent('input', {
-                            bubbles: true,
-                            inputType: nextText ? 'insertText' : 'deleteContentBackward',
-                            data: nextText || null
-                        }));
-                    }
-                }
-
-                function restoreComposerIfUnchanged(element, originalText, injectedText) {
-                    const currentText = getComposerText(element);
-                    if (normalizeComposerText(currentText) !== normalizeComposerText(injectedText)) {
-                        return {
-                            restored: false,
-                            draftPreserved: true,
-                            currentTextLength: currentText.length
-                        };
-                    }
-
-                    try {
-                        setComposerText(element, originalText);
-                        return {
-                            restored: true,
-                            draftPreserved: false,
-                            currentTextLength: originalText.length
-                        };
-                    } catch {
-                        return {
-                            restored: false,
-                            draftPreserved: false,
-                            restoreFailed: true,
-                            currentTextLength: currentText.length
-                        };
-                    }
-                }
-
-                const inputMatch = findMatch('composer', isComposerCandidate);
-                const input = inputMatch.element;
-
-                if (!input) {
-                    return compatibilityFailure('composer', 'required composer signal was not found.', {
-                        activeElement: describeElement(document.activeElement)
-                    });
-                }
-
-                const originalComposerText = getComposerText(input);
-                if (normalizeComposerText(originalComposerText)) {
-                    return compatibilityFailure('composer', 'canonical composer contains pending user content; queued send deferred to preserve the draft.', {
-                        composerSelector: inputMatch.selector,
-                        composerSignal: inputMatch.signalKey,
-                        composer: describeElement(input),
-                        composerConflict: true,
-                        deferred: true,
-                        pendingTextLength: originalComposerText.length
-                    });
-                }
-
-                const queuedText = String(msg || '');
-                let composerWriteStarted = false;
-
-                try {
-                    composerWriteStarted = true;
-                    setComposerText(input, queuedText);
-                    await sleepInPage(700);
-
-                    const currentComposerText = getComposerText(input);
-                    if (normalizeComposerText(currentComposerText) !== normalizeComposerText(queuedText)) {
-                        return compatibilityFailure('composer', 'canonical composer changed while the queued message was pending; send deferred to preserve the draft.', {
-                            composerSelector: inputMatch.selector,
-                            composerSignal: inputMatch.signalKey,
-                            composer: describeElement(input),
-                            composerConflict: true,
-                            deferred: true,
-                            pendingTextLength: currentComposerText.length,
-                            draftPreserved: true
-                        });
-                    }
-
-                    const sendButtonMatch = findMatch('sendButton', isSendActionCandidate);
-                    const sendButton = sendButtonMatch.element;
-
-                    if (!sendButton) {
-                        const restoration = restoreComposerIfUnchanged(input, originalComposerText, queuedText);
-                        return compatibilityFailure('sendButton', 'required send action signal was not found.', {
-                            composerSelector: inputMatch.selector,
-                            composerSignal: inputMatch.signalKey,
-                            composer: describeElement(input),
-                            ...restoration
-                        });
-                    }
-
-                    if (sendButton.disabled || sendButton.getAttribute('aria-disabled') === 'true') {
-                        const restoration = restoreComposerIfUnchanged(input, originalComposerText, queuedText);
-                        return compatibilityFailure('sendButton', 'send action signal is disabled.', {
-                            composerSelector: inputMatch.selector,
-                            composerSignal: inputMatch.signalKey,
-                            sendButtonSelector: sendButtonMatch.selector,
-                            sendButtonSignal: sendButtonMatch.signalKey,
-                            composer: describeElement(input),
-                            sendButton: describeElement(sendButton),
-                            ...restoration
-                        });
-                    }
-
-                    sendButton.click();
-
-                    return {
-                        ok: true,
-                        details: {
-                            composerSelector: inputMatch.selector,
-                            composerSignal: inputMatch.signalKey,
-                            sendButtonSelector: sendButtonMatch.selector,
-                            sendButtonSignal: sendButtonMatch.signalKey,
-                            messageLength: queuedText.length,
-                            url: location.href,
-                            title: document.title,
-                            provider: providerName || ''
-                        }
-                    };
-                } catch (error) {
-                    const restoration = composerWriteStarted
-                        ? restoreComposerIfUnchanged(input, originalComposerText, queuedText)
-                        : { restored: false, draftPreserved: false };
-                    return compatibilityFailure('submission', 'queued message submission failed; the composer draft was preserved when it was safe to restore.', {
-                        composerSelector: inputMatch.selector,
-                        composerSignal: inputMatch.signalKey,
-                        composer: describeElement(input),
-                        error: error?.message || 'Unknown submission error',
-                        ...restoration
-                    });
-                }
-            },
-            args: [text, compatibilityContract, providerName]
-        });
+            return {ok:false,error:'Required native submission engine unavailable. Reload the conversation after reinstalling the extension.',details:{failureClass:'non-retryable'}};
         }
 
         const result = results?.[0]?.result;
