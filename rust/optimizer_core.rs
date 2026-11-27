@@ -13,7 +13,7 @@ const DEFAULT_WINDOW: u32 = 50;
 const DEFAULT_BATCH: u32 = 25;
 
 #[no_mangle]
-pub extern "C" fn cpo_abi_version() -> u32 { 2 }
+pub extern "C" fn cpo_abi_version() -> u32 { 3 }
 
 /// Retain the configured window and any explicitly expanded history.
 /// Preserve the preexisting optimizer's behavior while moving policy to Rust.
@@ -71,6 +71,21 @@ pub extern "C" fn cpo_adaptive_window(total: u32, configured: u32, sampled: u32,
     cap.min(allowed.max(MIN_RECENT))
 }
 
+/// Approximate one uncompressed RGBA image surface. This is an estimate of
+/// potential decoded storage, never a claim about resident or reclaimed RAM.
+#[no_mangle]
+pub extern "C" fn cpo_image_surface_bytes(width: u32, height: u32) -> u32 {
+    width.saturating_mul(height).saturating_mul(4)
+}
+
+/// Reject active, seeked, or application-owned playback. The DOM bridge
+/// supplies flags only after inspecting the real browser media element.
+#[no_mangle]
+pub extern "C" fn cpo_can_evict_playback(paused: u32, at_start: u32,
+    has_stream: u32, has_protected_source: u32) -> u32 {
+    (paused == 1 && at_start == 1 && has_stream == 0 && has_protected_source == 0) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,6 +108,16 @@ mod tests {
         assert_eq!(cpo_adaptive_window(500, 50, 0, 0, 4000), 50);
         assert_eq!(cpo_adaptive_window(500, 50, 20, 4000, 100000), 50);
         assert_eq!(cpo_adaptive_window(u32::MAX, u32::MAX, u32::MAX, 1, u32::MAX), u32::MAX);
+    }
+    #[test]
+    fn media_eviction_policy() {
+        assert_eq!(cpo_image_surface_bytes(1920, 1080), 8_294_400);
+        assert_eq!(cpo_image_surface_bytes(u32::MAX, 4), u32::MAX);
+        assert_eq!(cpo_can_evict_playback(1, 1, 0, 0), 1);
+        assert_eq!(cpo_can_evict_playback(0, 1, 0, 0), 0);
+        assert_eq!(cpo_can_evict_playback(1, 0, 0, 0), 0);
+        assert_eq!(cpo_can_evict_playback(1, 1, 1, 0), 0);
+        assert_eq!(cpo_can_evict_playback(1, 1, 0, 1), 0);
     }
     #[test]
     fn bounds_and_saturation() {
