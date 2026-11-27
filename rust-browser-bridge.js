@@ -24,7 +24,7 @@
                 if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 2 ||
                     !['cpo_collect_resources', 'cpo_discover_messages', 'cpo_execute_media',
                         'cpo_apply_window', 'cpo_capture_history', 'cpo_process_mutations',
-                        'cpo_cache_ttl', 'cpo_cache_valid', 'cpo_mutation_delay'].every(name => typeof core[name] === 'function')) {
+                        'cpo_cache_ttl', 'cpo_cache_valid', 'cpo_cache_nodes_valid', 'cpo_mutation_delay'].every(name => typeof core[name] === 'function')) {
                     throw new Error('Browser WASM ABI mismatch');
                 }
                 this.exports = core;
@@ -112,6 +112,13 @@
             const age = Number.isFinite(elapsed) && elapsed >= 0 ? Math.min(0xffffffff, Math.floor(elapsed)) : 0xffffffff;
             return this.invoke({}, core => core.cpo_cache_valid(kind, age,
                 Number(!!present) | (Number(!!connected) << 1)) === 1);
+        }
+
+        cacheNodesValid(kind, created, nodes, now = Date.now()) {
+            if (!nodes || !Number.isFinite(created)) return false;
+            const elapsed = now - created;
+            const age = Number.isFinite(elapsed) && elapsed >= 0 ? Math.min(0xffffffff, Math.floor(elapsed)) : 0xffffffff;
+            return this.invoke({ nodes }, core => core.cpo_cache_nodes_valid(kind, age, nodes.length) === 1);
         }
 
         mutationDelay() {
@@ -371,6 +378,7 @@
                     ctx.dirtyNode = node.parentElement;
                     return 1;
                 }
+                case 74: return Number(!!ctx.nodes[a] && ctx.nodes[a].isConnected !== false);
                 default: throw new Error('Unknown Rust browser host operation: ' + op);
             }
         }
