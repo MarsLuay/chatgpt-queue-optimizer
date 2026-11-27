@@ -1,88 +1,16 @@
 /**
  * @param {RunningJobSnapshot|Record<string, unknown>} [job]
  */
+function requirePopupNative(value){
+    if(value==null)throw new Error('Required native popup policy unavailable.');
+    return value;
+}
 function getPopupQueueStatusLabel(job = {}) {
-    const nativeLabel=globalThis.CpoQueueEngine?.popupStatus?.(job);
-    if(nativeLabel!=null)return nativeLabel;
-    const status = String(job.status || '').trim().toLowerCase();
-    const phase = String(job.currentPhase || '').trim().toLowerCase();
-    const either=values=>values.includes(status)||values.includes(phase);
-    const flags=Number(either(['complete','completed','done','finished'])) |
-        (Number(either(['failed','error']))<<1) | (Number(!!job.isPaused||status==='paused')<<2) |
-        (Number(either(['retrying','retry-wait','retry_wait']))<<3) |
-        (Number(['rollover-in-progress','rollover','conversation-rollover'].includes(phase)||!!job.rolloverInProgress)<<4) |
-        (Number(!!job.waitForIdleBeforeSend||['waiting-for-idle','wait-for-idle','waiting_idle'].includes(phase))<<5) |
-        (Number(['waiting','wait'].includes(phase))<<6) | (Number(['sending','send'].includes(phase))<<7) |
-        (Number(phase==='queued')<<8) | (Number(status==='stopped')<<9);
-    const native=globalThis.CpoQueueEngine?.call('cpo_popup_status',[flags]);
-    if(native!=null)return ['Complete','Failed','Paused','Retrying','New conversation','Waiting for idle','Waiting','Sending','Queued','Stopped','Running'][native];
-
-    if (
-        ['complete', 'completed', 'done', 'finished'].includes(status) ||
-        ['complete', 'completed', 'done', 'finished'].includes(phase)
-    ) {
-        return 'Complete';
-    }
-
-    if (['failed', 'error'].includes(status) || ['failed', 'error'].includes(phase)) {
-        return 'Failed';
-    }
-
-    if (job.isPaused || status === 'paused') {
-        return 'Paused';
-    }
-
-    if (['retrying', 'retry-wait', 'retry_wait'].includes(status) || ['retrying', 'retry-wait', 'retry_wait'].includes(phase)) {
-        return 'Retrying';
-    }
-
-    if (['rollover-in-progress', 'rollover', 'conversation-rollover'].includes(phase) || job.rolloverInProgress) {
-        return 'New conversation';
-    }
-
-    if (job.waitForIdleBeforeSend || ['waiting-for-idle', 'wait-for-idle', 'waiting_idle'].includes(phase)) {
-        return 'Waiting for idle';
-    }
-
-    if (['waiting', 'wait'].includes(phase)) {
-        return 'Waiting';
-    }
-
-    if (['sending', 'send'].includes(phase)) {
-        return 'Sending';
-    }
-
-    if (phase === 'queued') {
-        return 'Queued';
-    }
-
-    if (status === 'stopped') {
-        return 'Stopped';
-    }
-
-    return 'Running';
+    return requirePopupNative(globalThis.CpoQueueEngine?.popupStatus?.(job));
 }
 
 function formatPopupRunningInstanceText(tabTitle, job = {}) {
-    const title = String(tabTitle || 'Supported tab');
-    const status = getPopupQueueStatusLabel(job);
-    const native=globalThis.CpoQueueEngine?.popupRunningLabel?.(title,status,job);
-    if(native!=null)return native;
-    const totalMessages = Number(job.totalMessages || 0);
-    const completedCount = Number(job.completedCount || 0);
-    const progress = totalMessages > 0 ? ` | Done: ${completedCount}/${totalMessages}` : '';
-    const commandNumber = Number(job.currentCommandNumber || 0);
-    const commandProgress = commandNumber > 0 && totalMessages > 0
-        ? ` | Command: ${commandNumber}/${totalMessages}`
-        : '';
-    const nextPreview = Number(job.nextMessageLength || 0) > 0
-        ? ` | Next length: ${Number(job.nextMessageLength)}`
-        : '';
-    const errorMessage = job.lastError || job.pausedReason || '';
-    const errorPreview = errorMessage ? ` | Error: ${errorMessage}` : '';
-    const remaining = job.remaining ?? 0;
-
-    return `${title} | ${status}${progress}${commandProgress} | Remaining: ${remaining}${nextPreview}${errorPreview}`;
+    return requirePopupNative(globalThis.CpoQueueEngine?.popupRunningLabel?.(tabTitle,getPopupQueueStatusLabel(job),job));
 }
 
 function parseScheduledLocalDateTime(value) {
@@ -96,26 +24,7 @@ function parseScheduledLocalDateTime(value) {
         if(!engine.localDateMatches(parts,[date.getFullYear(),date.getMonth()+1,date.getDate(),date.getHours(),date.getMinutes()]))return null;
         return date.getTime();
     }
-    const text = String(value || '').trim();
-    const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(text);
-
-    if (!match) return null;
-
-    const [, year, month, day, hour, minute] = match.map(Number);
-    const date = new Date(year, month - 1, day, hour, minute, 0, 0);
-
-    if (
-        date.getFullYear() !== year ||
-        date.getMonth() !== month - 1 ||
-        date.getDate() !== day ||
-        date.getHours() !== hour ||
-        date.getMinutes() !== minute
-    ) {
-        return null;
-    }
-
-    const timestamp = date.getTime();
-    return Number.isFinite(timestamp) ? timestamp : null;
+    return null;
 }
 
 function formatScheduledLocalDateTime(timestamp) {
@@ -129,28 +38,11 @@ function formatScheduledLocalDateTime(timestamp) {
 }
 
 function getScheduledStatusLabel(status) {
-    const native=globalThis.CpoQueueEngine?.textBatch?.(11,[status||'']);
-    if(native!=null)return native;
-    const normalized = String(status || '').trim().toLowerCase();
-    return {
-        pending: 'Pending',
-        firing: 'Sending',
-        completed: 'Completed',
-        failed: 'Failed',
-        cancelled: 'Cancelled'
-    }[normalized] || 'Unknown';
+    return requirePopupNative(globalThis.CpoQueueEngine?.textBatch?.(11,[status||'']));
 }
 
 function formatScheduledItemText(item = {}, targetTitle = '') {
-    const native=globalThis.CpoQueueEngine?.popupScheduledLabel?.(item,targetTitle,formatScheduledLocalDateTime(item.dueTs));
-    if(native!=null)return native;
-    const target = String(targetTitle || `Tab ${item.tabId || 'unknown'}`);
-    const preview = String(item.text || '').replace(/\s+/g, ' ').trim();
-    const status = getScheduledStatusLabel(item.status);
-    const due = formatScheduledLocalDateTime(item.dueTs);
-    const reason = item.failureReason ? ` | ${String(item.failureReason)}` : '';
-
-    return `${target} | ${status} | ${due} | ${preview}${reason}`;
+    return requirePopupNative(globalThis.CpoQueueEngine?.popupScheduledLabel?.(item,targetTitle,formatScheduledLocalDateTime(item.dueTs)));
 }
 
 if (typeof module !== 'undefined' && module.exports) {
@@ -591,11 +483,7 @@ document.addEventListener('DOMContentLoaded', async function () {
         const date = new Date(Number(timestamp));
         if (!Number.isFinite(date.getTime())) return '';
 
-        const native=globalThis.CpoQueueEngine?.localDateInput?.([date.getFullYear(),date.getMonth()+1,date.getDate(),date.getHours(),date.getMinutes()]);
-        if(native!=null)return native;
-        const pad = (value) => String(value).padStart(2, '0');
-        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
-            `T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+        return requirePopupNative(globalThis.CpoQueueEngine?.localDateInput?.([date.getFullYear(),date.getMonth()+1,date.getDate(),date.getHours(),date.getMinutes()]));
     }
 
     function initializeScheduledDueDefault() {
@@ -792,16 +680,7 @@ document.addEventListener('DOMContentLoaded', async function () {
     }
 
     function cleanTabTitle(title) {
-        const native=globalThis.CpoQueueEngine?.textBatch?.(8,[String(title||'Supported tab')]);
-        if(native!=null)return native;
-        return String(title || 'Supported tab')
-            .replace(/^ChatGPT\s*[-–]\s*/i, '')
-            .replace(/\s*[-–]\s*ChatGPT$/i, '')
-            .replace(/^Gemini\s*[-–]\s*/i, '')
-            .replace(/\s*[-–]\s*Gemini$/i, '')
-            .replace(/^Claude\s*[-–]\s*/i, '')
-            .replace(/\s*[-–]\s*Claude$/i, '')
-            .trim() || 'Supported tab';
+        return requirePopupNative(globalThis.CpoQueueEngine?.textBatch?.(8,[String(title||'Supported tab')]));
     }
 
     if (refreshTargetTabsButton) {
@@ -1481,7 +1360,7 @@ document.addEventListener('DOMContentLoaded', async function () {
         ].join('|');
         const now = Date.now();
 
-        if ((globalThis.CpoQueueEngine?.numeric('cpo_log_duplicate',[Number(signature===lastOptimizerLogSignature),now-lastOptimizerLogAt,dedupeMs]) ?? Number(signature === lastOptimizerLogSignature && now - lastOptimizerLogAt < dedupeMs)) === 1) {
+        if ((globalThis.CpoQueueEngine?.numeric('cpo_log_duplicate',[Number(signature===lastOptimizerLogSignature),now-lastOptimizerLogAt,dedupeMs]) ?? 0) === 1) {
             return;
         }
 
@@ -1562,9 +1441,7 @@ document.addEventListener('DOMContentLoaded', async function () {
     function updateMessagesToGoFooter(runningJobs) {
         if (!messagesToGoFooter) return;
 
-        const totalRemaining = globalThis.CpoQueueEngine?.remaining(runningJobs) ?? Object.values(runningJobs || {}).reduce((sum, job) => {
-            return sum + Number(job.remaining || 0);
-        }, 0);
+        const totalRemaining = requirePopupNative(globalThis.CpoQueueEngine?.remaining(runningJobs));
 
         messagesToGoFooter.textContent = `${totalRemaining} message${totalRemaining === 1 ? '' : 's'} to go...`;
     }
@@ -2059,43 +1936,7 @@ The sequence should do the following: `;
     }
 
     function renderOptimizerStats(tab, response) {
-        const native=globalThis.CpoQueueEngine?.popupStats?.(cleanTabTitle(tab.title),response);
-        if(native!=null){renderNative(5,optimizerStats,native.map(line=>({fields:[line]})));return;}
-        const lines = [
-            `Target: ${cleanTabTitle(tab.title)}`,
-            `Total messages: ${response.messageCount}`,
-            `Optimizer engine: ${response.debugInfo?.optimizerEngine ?? 'Unknown'}`,
-            `Browser execution engine: ${response.debugInfo?.browserEngine ?? 'Unknown'}`,
-            `Hidden: ${response.hiddenCount}`,
-            `Visible: ${response.visibleCount}`,
-            `Container: ${response.debugInfo?.containerFound ? 'Found' : 'Missing'}`,
-            `Initialized: ${response.debugInfo?.initialized ? 'Yes' : 'No'}`,
-            `DOM scans: ${response.debugInfo?.performance?.scans ?? 0}`,
-            `Last scan: ${response.debugInfo?.performance?.lastScanMs ?? 0} ms`,
-            `Last window: ${response.debugInfo?.performance?.lastWindowMs ?? 0} ms`,
-            `Streaming mutation batches skipped: ${response.debugInfo?.performance?.mutationSkips ?? 0}`
-        ];
-
-        const resources = response.debugInfo?.resources;
-        if (resources) {
-            const mib = bytes => typeof bytes === 'number' ? (bytes / 1048576).toFixed(2) + ' MiB' : 'Unavailable';
-            lines.push(
-                'Resource sample (recent turns only):',
-                `Sampled: ${resources.sampledTurns}/${resources.totalTurns}; capped turns: ${resources.truncatedTurns}`,
-                `Sampled DOM nodes: ${resources.nodes}; text characters: ${resources.textChars}`,
-                `Images: ${resources.images}; audio/video: ${resources.media}; canvas/frames: ${resources.surfaces}`,
-                `Resource units (estimate): ${resources.units}`,
-                `Adaptive budget: ${resources.adaptiveEnabled ? resources.budget + ' units; target ' + resources.adaptiveTarget + ' turns' : 'Off'}`,
-                `Manual history expansion: ${resources.manuallyExpanded ? 'Yes' : 'No'}`,
-                `Extension cached message references: ${resources.cachedMessageRefs}`,
-                `Image eviction actions: ${resources.mediaEviction?.imagesEvicted ?? 0}`,
-                `Paused playback eviction actions: ${resources.mediaEviction?.playbackEvicted ?? 0}`,
-                `Source restoration actions: ${resources.mediaEviction?.restored ?? 0}`,
-                `Estimated image surface bytes targeted (cumulative): ${mib(resources.mediaEviction?.estimatedImageBytes)}`,
-                `WASM linear memory: ${mib(resources.wasmLinearBytes)}`,
-                `Browser JS heap (not tab RAM): ${mib(resources.usedJsHeapBytes)}`
-            );
-        }
+        const lines=requirePopupNative(globalThis.CpoQueueEngine?.popupStats?.(cleanTabTitle(tab.title),response));
         renderNative(5,optimizerStats,lines.map(line=>({fields:[line]})));
     }
 

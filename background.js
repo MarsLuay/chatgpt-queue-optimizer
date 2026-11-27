@@ -395,7 +395,7 @@ function applyAuthorizedConversationRebind(job, identity) {
     job.rolloverToConversationId = job.conversationId;
     if (!job.rolloverRebindApplied) {
         const generation = Number(job.conversationGeneration || 0);
-        job.conversationGeneration = globalThis.CpoQueueEngine?.call('cpo_rollover_generation',[generation,0]) ?? generation + 1;
+        job.conversationGeneration = requiredQueueDecision(globalThis.CpoQueueEngine?.call('cpo_rollover_generation',[generation,0]));
         job.rolloverRebindApplied = true;
     }
     job.rolloverStage = 'identity-confirmed';
@@ -419,7 +419,7 @@ function isVerifiedFreshConversation(adapter, identity, fromConversationId, navi
 
 async function confirmFreshConversationIdentity(tabId, job, adapter, fromConversationId) {
     const now=Date.now();
-    const deadline=globalThis.CpoQueueEngine?.timestampMath?.(0,now,20000)??(now+20000);
+    const deadline=globalThis.CpoQueueEngine?.timestampMath?.(0,now,20000)??NaN;
     const pollMs = Math.max(20, Number(QUEUE_WAIT_POLICY.submissionAckPollMs) || 50);
 
     while (Date.now() <= deadline) {
@@ -1865,7 +1865,7 @@ function handleProcessRecovered(tabId, job) {
 
 async function handleProcessRetryWait(tabId, job) {
     const retryNow=Date.now();
-    const remainingMs=globalThis.CpoQueueEngine?.timestampMath?.(2,Number(job.nextRetryAt||0),retryNow)??Math.max(0,Number(job.nextRetryAt||0)-retryNow);
+    const remainingMs=globalThis.CpoQueueEngine?.timestampMath?.(2,Number(job.nextRetryAt||0),retryNow)??NaN;
     const interrupted = await interruptibleSleep(tabId, job, remainingMs);
 
     if (interrupted || !jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
@@ -2187,30 +2187,12 @@ function emptyDeliveryFields() {
 }
 
 function fingerprintCommandTextForJob(text) {
-    const native = globalThis.CpoQueueEngine?.fingerprint(text);
-    if (native != null) return native;
-    if (typeof globalThis !== 'undefined' && typeof globalThis.fingerprintCommandText === 'function') {
-        return globalThis.fingerprintCommandText(text);
-    }
-    const provider = getActiveProviderAdapter('chatgpt');
-    if (provider && typeof provider.fingerprintCommandText === 'function') {
-        return provider.fingerprintCommandText(text);
-    }
-    const normalized = String(text || '').replace(/\s+/g, ' ').trim();
-    let hash = 2166136261;
-    for (let i = 0; i < normalized.length; i += 1) {
-        hash ^= normalized.charCodeAt(i);
-        hash = Math.imul(hash, 16777619);
-    }
-    return `fnv1a:${(hash >>> 0).toString(16)}:len:${normalized.length}`;
+    return requiredQueueDecision(globalThis.CpoQueueEngine?.fingerprint(text));
 }
 
 function isSubmissionConfirmed(job) {
     if (!job) return false;
-    const native = globalThis.CpoQueueEngine?.confirmed(job);
-    if (native != null) return native === 1;
-    if (job.submittedUserTurnId) return true;
-    return CONFIRMED_DELIVERY_STATES.has(String(job.deliveryState || ''));
+    return requiredQueueDecision(globalThis.CpoQueueEngine?.confirmed(job))===1;
 }
 
 function resetCommandDeliveryState(job) {
@@ -2240,16 +2222,7 @@ function getCommandBinding(job, context = {}) {
 }
 
 function boundedDiagnosticValue(value, maxLength = 160) {
-    const native=globalThis.CpoQueueEngine?.diagnosticText?.(value,maxLength);
-    if(native!=null)return native;
-    const normalized = String(value ?? '').replace(/\s+/g, ' ').trim();
-    if (!normalized) {
-        return '';
-    }
-    if (normalized.length <= maxLength) {
-        return normalized;
-    }
-    return `${normalized.slice(0, Math.max(1, maxLength - 1))}…`;
+    return globalThis.CpoQueueEngine?.diagnosticText?.(value,maxLength)??'';
 }
 
 function getDiagnosticTurnIdentity(job, details = {}) {
@@ -2424,7 +2397,7 @@ function getRetryExhaustionReason(job, lastReason) {
 async function interruptibleSleep(tabId, job, ms) {
     const duration = Math.max(0, Number(ms) || 0);
     const now=Date.now();
-    const deadline=globalThis.CpoQueueEngine?.timestampMath?.(0,now,duration)??(now+duration);
+    const deadline=globalThis.CpoQueueEngine?.timestampMath?.(0,now,duration)??NaN;
     const sliceMs = Math.max(5, Number(QUEUE_RETRY_POLICY.sleepSliceMs) || 250);
 
     while (Date.now() < deadline) {
@@ -2488,7 +2461,7 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
     job.retryExhausted = false;
     job.nextRetryDelayMs = delayMs;
     const retryNow=Date.now();
-    job.nextRetryAt=globalThis.CpoQueueEngine?.timestampMath?.(0,retryNow,delayMs)??(retryNow+delayMs);
+    job.nextRetryAt=globalThis.CpoQueueEngine?.timestampMath?.(0,retryNow,delayMs)??NaN;
     job.lastError = classification.reason;
     job.currentPhase = 'retry-wait';
     job.updatedAt = Date.now();
@@ -3717,8 +3690,7 @@ function getRunningJobsSnapshot() {
 
 function getRemainingCount(job) {
     const queued = Array.isArray(job?.queue) ? job.queue.length : 0;
-    return globalThis.CpoQueueEngine?.call('cpo_queue_remaining', [queued, Number(!!job?.currentMessage)]) ??
-        queued + (job?.currentMessage ? 1 : 0);
+    return requiredQueueDecision(globalThis.CpoQueueEngine?.call('cpo_queue_remaining', [queued, Number(!!job?.currentMessage)]));
 }
 
 function getTotalMessages(job) {
@@ -3727,7 +3699,7 @@ function getTotalMessages(job) {
     const declared = Number(job.totalMessages || 0);
     const completed = Number(job.completedCount || 0);
     const remaining = getRemainingCount(job);
-    return globalThis.CpoQueueEngine?.call('cpo_queue_total', [declared, completed, remaining]) ?? Math.max(declared, completed + remaining);
+    return requiredQueueDecision(globalThis.CpoQueueEngine?.call('cpo_queue_total', [declared, completed, remaining]));
 }
 
 function getJobStatus(job) {
@@ -4041,82 +4013,8 @@ function executeScript(details, callback) {
 }
 
 function isSensitiveLogKey(key) {
-    const normalized = String(key || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-    if (!normalized) {
-        return false;
-    }
-    const native=globalThis.CpoQueueEngine?.sensitiveKey(normalized);
-    if(native!=null)return native===1;
-    if (
-        normalized === 'currentmessage' ||
-        normalized === 'text' ||
-        normalized === 'prompt' ||
-        normalized === 'composertext' ||
-        normalized === 'lastqueuedtext' ||
-        normalized === 'errorsnippet' ||
-        normalized === 'researchstatuspreview' ||
-        normalized === 'recoveredturnpreview' ||
-        normalized === 'assistantpreview' ||
-        normalized === 'handofftext' ||
-        normalized === 'handoff'
-    ) {
-        return true;
-    }
-    if (normalized.includes('preview') || normalized.includes('snippet') || normalized.includes('handofftext')) {
-        return true;
-    }
-
-    return (
-        normalized === 'title' ||
-        normalized === 'url' ||
-        normalized === 'href' ||
-        normalized === 'location' ||
-        normalized.includes('path') ||
-        normalized.includes('filename') ||
-        normalized === 'conversationid' ||
-        normalized === 'conversationkey' ||
-        normalized.includes('conversationcontent') ||
-        normalized.includes('conversationtext') ||
-        normalized.includes('transcript') ||
-        normalized.includes('assistanttext') ||
-        normalized.includes('usertext') ||
-        normalized === 'arguments' ||
-        normalized === 'tool' ||
-        normalized === 'tools' ||
-        normalized === 'toolargs' ||
-        normalized.includes('toolargument') ||
-        normalized.includes('toolcall') ||
-        normalized.includes('toolinput') ||
-        normalized.includes('tooloutput') ||
-        normalized.includes('functionargument') ||
-        normalized === 'token' ||
-        normalized.endsWith('token') ||
-        normalized.includes('secret') ||
-        normalized.includes('password') ||
-        normalized.includes('credential') ||
-        normalized.includes('authorization') ||
-        normalized.includes('cookie') ||
-        normalized.includes('apikey') ||
-        normalized.includes('privatekey')
-    );
-}
-
-function redactSensitiveLogValue(value) {
-    if (typeof value === 'string') {
-        return {
-            redacted: true,
-            length: value.length
-        };
-    }
-    if (Array.isArray(value)) {
-        return {
-            redacted: true,
-            length: value.length
-        };
-    }
-    return {
-        redacted: true
-    };
+    const normalized=String(key||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+    return normalized?requiredQueueDecision(globalThis.CpoQueueEngine?.sensitiveKey(normalized))===1:false;
 }
 
 function describeLoggedMessage(text) {
@@ -4128,64 +4026,9 @@ function describeLoggedMessage(text) {
 
 function sanitizeLogValue(value, depth = 0, key = '') {
     const native=globalThis.CpoQueueEngine?.sanitizeDiagnostic?.(value,depth,key,isSensitiveLogKey,serializeError);
-    if(native?.ok)return native.value;
-    return emergencySanitizeLogValue(value,depth,key);
-}
-
-// Native engine failure must never bypass redaction.
-function emergencySanitizeLogValue(value, depth = 0, key = '') {
-    if (value === null || value === undefined) {
-        return value;
-    }
-
-    if (key && isSensitiveLogKey(key)) {
-        if (value && typeof value === 'object' && value.redacted === true) {
-            const clean={redacted:true};
-            for(const field of ['length','messageLength'])if(Number.isSafeInteger(value[field])&&value[field]>=0)clean[field]=value[field];
-            return clean;
-        }
-        return redactSensitiveLogValue(value);
-    }
-
-    if (value instanceof Error) {
-        return emergencySanitizeLogValue(serializeError(value), depth, key);
-    }
-
-    if (typeof value === 'string') {
-        const limit=globalThis.CpoQueueEngine?.call('cpo_log_limit',[0,depth,value.length])??(value.length>700?697:value.length);
-        return value.length>limit?value.slice(0,limit)+'...':value;
-    }
-
-    if (typeof value === 'number' || typeof value === 'boolean') {
-        return value;
-    }
-
-    if (Array.isArray(value)) {
-        if (depth >= 2) {
-            return `[${value.length} items]`;
-        }
-
-        return value.slice(0, globalThis.CpoQueueEngine?.call('cpo_log_limit',[1,depth,value.length])??12).map(item => emergencySanitizeLogValue(item, depth + 1));
-    }
-
-    if (typeof value === 'object') {
-        if (depth >= 3) {
-            return '[object]';
-        }
-
-        const clean = {};
-        const allEntries=Object.entries(value);
-        const entries = allEntries.slice(0,globalThis.CpoQueueEngine?.call('cpo_log_limit',[2,depth,allEntries.length])??30);
-
-        for (const [entryKey, item] of entries) {
-            if (typeof item === 'function' || item === undefined) continue;
-            Object.defineProperty(clean,entryKey,{value:emergencySanitizeLogValue(item,depth+1,entryKey),enumerable:true,configurable:true,writable:true});
-        }
-
-        return clean;
-    }
-
-    return String(value);
+    // No alternate recursive policy: when native redaction fails, drop the
+    // complete detail object rather than exposing unclassified data.
+    return native?.ok?native.value:{redacted:true,nativeUnavailable:true};
 }
 
 function serializeError(error) {
@@ -4205,21 +4048,7 @@ function createRunId() {
 }
 
 function previewText(text, maxLength = 70) {
-    const native=globalThis.CpoQueueEngine?.diagnosticText?.(text||'',maxLength);
-    if(native!=null)return native;
-    const clean = String(text || '').replace(/\s+/g, ' ').trim();
-
-    if (clean.length <= maxLength) {
-        return clean;
-    }
-
-    return clean.slice(0, maxLength - 1) + '…';
-}
-
-function sleep(ms) {
-    return new Promise(resolve => {
-        setTimeout(resolve, ms);
-    });
+    return globalThis.CpoQueueEngine?.diagnosticText?.(text||'',maxLength)??'';
 }
 
 function scheduledAlarmName(id) {
@@ -4304,8 +4133,7 @@ async function persistScheduledItem(nextItem) {
 }
 
 function normalizedIdentityKey(provider,type,id,key=''){
-    return globalThis.CpoQueueEngine?.identityKey?.(provider,type,id,key) ??
-        (key||(id?provider+':c:'+id:provider+':'+type));
+    return requiredQueueDecision(globalThis.CpoQueueEngine?.identityKey?.(provider,type,id,key));
 }
 function buildScheduledConversationIdentity(item) {
     return {

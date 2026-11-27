@@ -1,18 +1,14 @@
 (() => {
     'use strict';
 
-    const CHATGPT_HOSTS = new Set(['chatgpt.com', 'chat.openai.com']);
-    const GEMINI_HOSTS = new Set(['gemini.google.com']);
-    const CLAUDE_HOSTS = new Set(['claude.ai']);
-
     const PROVIDER_CODES = { chatgpt: 1, gemini: 2, claude: 3 };
-    const nativeContains = (text, marker) => globalThis.CpoQueueEngine?.contains(text, marker) ?? text.includes(marker);
+    const nativeContains = (text, marker) => requireNative(globalThis.CpoQueueEngine?.contains(text,marker));
     function nativeRoute(provider, pathname) {
         const engine=globalThis.CpoQueueEngine;
         const route=engine?.providerRoute(PROVIDER_CODES[provider],pathname);
         if(!route)return null;
         const key=engine.identityKey?.(provider,route.type,route.conversationId);
-        return {...route,key:key??(route.conversationId?provider+':c:'+route.conversationId:provider+':'+route.type)};
+        return {...route,key:requireNative(key)};
     }
     function nativeGeneration(stop, streaming, tool, error, retry, deep = false, capacity = false) {
         const flags = Number(!!stop) | (Number(!!streaming)<<1) | (Number(!!tool)<<2) |
@@ -31,9 +27,12 @@
         return globalThis.CpoQueueEngine?.call('cpo_response_class', [flags]) ?? null;
     }
 
-    function catalogView(id, fallbackFactory) {
-        let fallback;
-        const current=()=>{const native=globalThis.CpoQueueEngine?.providerCatalog?.(id);if(native){fallback=null;return native;}return (fallback ||= fallbackFactory());};
+    function requireNative(value){
+        if(value==null)throw new Error('Required native provider policy unavailable.');
+        return value;
+    }
+    function catalogView(id) {
+        const current=()=>requireNative(globalThis.CpoQueueEngine?.providerCatalog?.(id));
         return new Proxy({},{
             get(_target,key){return current()[key];},
             ownKeys(){return Reflect.ownKeys(current());},
@@ -46,174 +45,8 @@
     function providerPredicate(provider,mode,flags) {
         return globalThis.CpoQueueEngine?.call('cpo_provider_predicate',[PROVIDER_CODES[provider],mode,flags]);
     }
-    const CHATGPT_MESSAGE_CONTEXT_SELECTORS = [
-        '[data-testid^="conversation-turn"]',
-        '[data-testid*="conversation-turn"]',
-        'article',
-        '[data-message-author-role]',
-        '[data-message-id]'
-    ];
-
-    const CHATGPT_COMPATIBILITY_SIGNALS = catalogView(4, () => ({
-        composerContext: [
-            '[data-testid*="composer"]',
-            '[data-testid*="prompt"]',
-            '[id*="prompt"]',
-            'form'
-        ],
-        messageContext: CHATGPT_MESSAGE_CONTEXT_SELECTORS,
-        turnContext: CHATGPT_MESSAGE_CONTEXT_SELECTORS.slice(0, 3),
-        assistantContentSelectors: [
-            '.markdown',
-            '[data-testid*="copy"]',
-            '[aria-label*="Copy"]'
-        ],
-        weakComposerSelectors: [
-            'textarea',
-            '[contenteditable="true"][role="textbox"]',
-            'div[contenteditable="true"]',
-            '[contenteditable="true"]'
-        ],
-        weakSendButtonSelectors: [
-            'button[type="submit"]'
-        ],
-        stopLabels: [
-            'stop generating',
-            'stop streaming',
-            'stop response',
-            'interrupt',
-            'stop'
-        ],
-        retryLabels: [
-            'retry',
-            'try again',
-            'regenerate',
-            'regenerate response'
-        ],
-        researchMarkers: [
-            'deep research',
-            'researching',
-            'searching the web',
-            'searching sources',
-            'reading sources',
-            'analyzing sources',
-            'gathering sources',
-            'checking sources',
-            'synthesizing',
-            'creating report',
-            'writing report',
-            'thinking',
-            'working'
-        ],
-        deliveryTimeoutMarkers: [
-            'message delivery timed out',
-            'delivery timed out',
-            'message delivery timeout',
-            'delivery timeout',
-            'timed out. please try again'
-        ],
-        errorMarkers: [
-            'something went wrong',
-            'there was an error',
-            'error generating a response',
-            'network error',
-            'failed to generate',
-            'try again later'
-        ],
-        waitingForUserMarkers: [
-            'waiting for you',
-            'waiting for your response',
-            'waiting for your reply',
-            'need more information from you',
-            'reply when you are ready'
-        ],
-        interruptedMarkers: [
-            'stopped generating',
-            'response interrupted',
-            'generation stopped',
-            'you stopped this response'
-        ],
-        conversationCapacityMarkers: [
-            "you've reached the maximum length for this conversation",
-            'maximum length for this conversation',
-            'keep talking by starting a new chat'
-        ]
-    }));
-
-    const CHATGPT_SELECTORS = catalogView(1, () => ({
-        composer: [
-            '#prompt-textarea',
-            '[data-testid="prompt-textarea"]',
-            'textarea',
-            '[contenteditable="true"][role="textbox"]',
-            'div[contenteditable="true"]',
-            '[contenteditable="true"]'
-        ],
-        sendButton: [
-            'button[data-testid="send-button"]',
-            'button[data-testid="fruitjuice-send-button"]',
-            'button[aria-label="Send prompt"]',
-            'button[aria-label="Send message"]',
-            'button[type="submit"]'
-        ],
-        stopButton: [
-            'button[data-testid="stop-button"]',
-            'button[data-testid*="stop"]',
-            'button[aria-label*="stop"]',
-            'button[aria-label*="Stop"]'
-        ],
-        streaming: [
-            '.result-streaming',
-            '[data-testid*="conversation-turn"] .result-streaming',
-            '[data-message-streaming="true"]',
-            '[data-is-streaming="true"]',
-            '[data-testid*="streaming"]'
-        ],
-        status: [
-            '[role="status"]',
-            '[aria-live]',
-            '[data-testid*="status"]',
-            '[data-testid*="progress"]',
-            '[data-testid*="research"]',
-            '[data-testid*="thinking"]',
-            '[data-testid*="reasoning"]',
-            '[data-testid*="thought"]',
-            '[data-testid*="tool-progress"]',
-            '.result-thinking'
-        ],
-        spinner: [
-            'svg.animate-spin',
-            '[class*="animate-spin"]',
-            '[data-testid*="loading-spinner"]'
-        ],
-        errorAlerts: [
-            '[role="alert"]',
-            '[data-testid*="error"]',
-            '.text-red-500',
-            '.border-red-500',
-            '.text-token-text-error',
-            '[class*="error-message"]'
-        ],
-        messages: [
-            ...CHATGPT_MESSAGE_CONTEXT_SELECTORS,
-            '[data-testid="conversation-turn"]'
-        ],
-        fallbackMessages: [
-            'main article',
-            'main [data-message-author-role]',
-            'main [data-message-id]',
-            'main div[class*="group"]',
-            '[role="main"] article',
-            '[role="main"] [data-message-author-role]',
-            '[role="main"] div[class*="group"]'
-        ],
-        mainRoot: [
-            'main',
-            '[role="main"]',
-            '#__next',
-            'body'
-        ]
-    }));
+    const CHATGPT_COMPATIBILITY_SIGNALS = catalogView(4);
+    const CHATGPT_SELECTORS = catalogView(1);
 
     function cloneCompatibilityValue(value) {
         if (Array.isArray(value)) {
@@ -230,19 +63,11 @@
         // Large conversation text should not grow WASM linear memory merely
         // to normalize a browser-owned string.
         const native=value.length<=65536?globalThis.CpoQueueEngine?.textBatch?.(14,[value]):null;
-        return native??value.replace(/\s+/g, ' ').trim();
+        return value.length>65536?value.replace(/\s+/g,' ').trim():requireNative(native);
     }
 
     function fingerprintCommandText(text) {
-        const native = globalThis.CpoQueueEngine?.fingerprint(text);
-        if (native != null) return native;
-        const normalized = normalizeCommandText(text);
-        let hash = 2166136261;
-        for (let i = 0; i < normalized.length; i += 1) {
-            hash ^= normalized.charCodeAt(i);
-            hash = Math.imul(hash, 16777619);
-        }
-        return `fnv1a:${(hash >>> 0).toString(16)}:len:${normalized.length}`;
+        return requireNative(globalThis.CpoQueueEngine?.fingerprint(text));
     }
 
     function emptyCommandTurnSnapshot(adapter) {
@@ -446,39 +271,13 @@
 
             if (!root || selectors.length === 0) return matches;
             const native = this._nativeSelectorEngine?.providerSelectors(root, selectors, selectorKey, predicate);
-            if (native != null) return native;
-
-            for (const selector of selectors) {
-                let nodes = [];
-                try {
-                    if (
-                        (typeof root.matches === 'function' && root.matches(selector)) ||
-                        (typeof root.closest === 'function' && root.closest(selector) === root)
-                    ) {
-                        nodes.push(root);
-                    }
-                    if (typeof root.querySelectorAll === 'function') {
-                        nodes.push(...Array.from(root.querySelectorAll(selector)));
-                    }
-                } catch {
-                    nodes = [];
-                }
-
-                for (const element of nodes) {
-                    if (seen.has(element)) continue;
-                    if (predicate && !predicate(element, selector)) continue;
-                    seen.add(element);
-                    matches.push({ element, selector, signalKey: selectorKey });
-                }
-            }
-
-            return matches;
+            return requireNative(native);
         }
 
         getSelectorMatch(root, selectorKey, predicate = null) {
             const selectors = Array.isArray(this.selectors?.[selectorKey]) ? this.selectors[selectorKey] : [];
             const native = root && selectors.length ? this._nativeSelectorEngine?.providerSelectors(root, selectors, selectorKey, predicate, true) : null;
-            return (native ?? this.getSelectorNodes(root, selectorKey, predicate))[0] || {
+            return (root && selectors.length ? requireNative(native) : [])[0] || {
                 element: null,
                 selector: '',
                 signalKey: selectorKey
@@ -508,19 +307,14 @@
             // Walk the node's ancestor chain and use a constant-time membership set.
             const members = turnSet || new Set(turns);
             const native = this._nativeSelectorEngine?.activeSurface(node,members,latestTurn);
-            if (native != null) return native;
-            for (let parent = node; parent; parent = parent.parentElement || parent.parentNode || null) {
-                if (parent === latestTurn) return true;
-                if (members.has(parent)) return false;
-            }
-            return true;
+            return requireNative(native);
         }
 
         isComposerElement(element, _details = {}) {
             const tagName = (element?.tagName || '').toLowerCase();
             const flags=Number(tagName==='textarea') | (Number(element?.getAttribute?.('contenteditable')==='true')<<1);
             const native=providerPredicate(this.id,0,flags);
-            return native==null?!!flags:native===1;
+            return requireNative(native)===1;
         }
 
         getComposerMatch(doc = (typeof document !== 'undefined' ? document : null)) {
@@ -534,7 +328,7 @@
             const tagName = (element?.tagName || '').toLowerCase();
             const action=tagName==='button'||typeof element?.click==='function';
             const native=providerPredicate(this.id,1,Number(action)<<2);
-            return native==null?action:native===1;
+            return requireNative(native)===1;
         }
 
         getSendActionMatch(doc = (typeof document !== 'undefined' ? document : null)) {
@@ -859,22 +653,7 @@
                 (Number(!!element?.closest?.(this.compatibilitySignals.messageContext.join(',')))<<2) |
                 (Number(weak)<<3) | (Number(!!element?.closest?.(this.compatibilitySignals.composerContext.join(',')))<<4);
             const native = this._nativeSelectorEngine?.candidate(0,flags);
-            if (native != null) return native;
-            if (!super.isComposerElement(element)) return false;
-            if (element.closest?.('#cpo-root')) return false;
-
-            const messageContext = this.compatibilitySignals.messageContext.join(',');
-            if (element.closest?.(messageContext)) return false;
-
-            if (!this.compatibilitySignals.weakComposerSelectors.includes(selector)) {
-                return true;
-            }
-
-            const composerContext = this.compatibilitySignals.composerContext.join(',');
-            if (element.closest?.(composerContext)) return true;
-
-            // Weak editable fallbacks are only valid inside a known composer context.
-            // This keeps Enter and queued sends on the same canonical contract.
+            return requireNative(native);
         }
 
         isSendActionElement(element, { selector = '' } = {}) {
@@ -882,12 +661,7 @@
                 (Number(this.compatibilitySignals.weakSendButtonSelectors.includes(selector))<<3) |
                 (Number(!!element?.closest?.(this.compatibilitySignals.composerContext.join(',')))<<4);
             const native=this._nativeSelectorEngine?.candidate(1,flags);
-            if(native!=null)return native;
-            if (!super.isSendActionElement(element)) return false;
-            if (!this.compatibilitySignals.weakSendButtonSelectors.includes(selector)) return true;
-
-            const composerContext = this.compatibilitySignals.composerContext.join(',');
-            return !!element.closest?.(composerContext);
+            return requireNative(native);
         }
 
         getMessageDiscovery(doc = (typeof document !== 'undefined' ? document : null), mainRoot = null) {
@@ -919,58 +693,7 @@
                 };
             }
 
-            // The browser execution module returns null only when unavailable
-            // or failed; an empty successful result is authoritative.
-            if (this._nativeMessageDiscovery) {
-                const native = this._nativeMessageDiscovery(this, doc, mainRoot);
-                if (native) return native;
-                throw new Error('Native message discovery unavailable.');
-            }
-            const collected = [];
-            let matchedSelector = null;
-            const combinedSelector = this.selectors.messages.join(',');
-
-            try {
-                const nodes = Array.from(doc.querySelectorAll(combinedSelector));
-                for (const node of nodes) {
-                    if (!mainRoot.contains(node)) continue;
-
-                    const normalized = this.normalizeMessageNode(node, mainRoot);
-                    if (normalized && this.isValidMessageNode(normalized, mainRoot)) {
-                        collected.push(normalized);
-                        matchedSelector = matchedSelector || this.findMatchingSelector(node, 'messages');
-                    }
-                }
-            } catch (error) {
-                console.warn('CPO: Combined selector failed', error);
-            }
-
-            let messages = this.sortMessagesByPosition(this.removeDuplicates(collected));
-            if (messages.length > 0) {
-                return {
-                    nodes: messages,
-                    selector: matchedSelector,
-                    signalKey: 'messages',
-                    fallback: false
-                };
-            }
-
-            if (typeof this.allowsFallbackMessageDiscovery === 'function' && !this.allowsFallbackMessageDiscovery(doc)) {
-                return {
-                    nodes: [],
-                    selector: null,
-                    signalKey: 'messages',
-                    fallback: false
-                };
-            }
-
-            messages = this.getFallbackMessages(doc, mainRoot);
-            return {
-                nodes: messages,
-                selector: messages.length > 0 ? 'fallbackMessages' : null,
-                signalKey: 'fallbackMessages',
-                fallback: true
-            };
+            return requireNative(this._nativeMessageDiscovery?.(this,doc,mainRoot));
         }
 
         /**
@@ -1325,7 +1048,7 @@
                 const parsed = new URL(url);
                 if (parsed.protocol !== 'https:') return false;
                 const native = globalThis.CpoQueueEngine?.providerHost(parsed.hostname.toLowerCase());
-                return native == null ? CHATGPT_HOSTS.has(parsed.hostname.toLowerCase()) : native === PROVIDER_CODES.chatgpt;
+                return native === PROVIDER_CODES.chatgpt;
             } catch {
                 return false;
             }
@@ -1375,46 +1098,7 @@
                         surface: existing ? 'conversation' : fresh ? 'composer' : 'unsupported',
                         optimizerEligible: existing || fresh, allowFallbackDiscovery: existing, pathname };
                 }
-                const existingMatch = pathname.match(/(?:^|\/)c\/([a-zA-Z0-9_-]+)/);
-                if (existingMatch && existingMatch[1]) {
-                    const conversationId = existingMatch[1];
-                    return {
-                        provider: this.id,
-                        type: 'existing',
-                        conversationId,
-                        key: `${this.id}:c:${conversationId}`,
-                        surface: 'conversation',
-                        optimizerEligible: true,
-                        allowFallbackDiscovery: true,
-                        pathname
-                    };
-                }
-
-                const nonConversationRegex = /^\/(?:settings|admin|auth|login|logout|pricing|api|help|account|privacy|terms|share|gpts|search|library|explore|codex|business|team)(?:\/|$)/i;
-                if (nonConversationRegex.test(pathname)) {
-                    return {
-                        ...unsupported,
-                        pathname
-                    };
-                }
-
-                if (pathname === '/' || pathname === '' || /^\/g\/[a-zA-Z0-9_-]+\/?$/.test(pathname)) {
-                    return {
-                        provider: this.id,
-                        type: 'new',
-                        conversationId: null,
-                        key: `${this.id}:new`,
-                        surface: 'composer',
-                        optimizerEligible: true,
-                        allowFallbackDiscovery: false,
-                        pathname: pathname || '/'
-                    };
-                }
-
-                return {
-                    ...unsupported,
-                    pathname
-                };
+                return unsupported;
             } catch {
                 return unsupported;
             }
@@ -1447,18 +1131,7 @@
             const flags = Number(identity?.provider === 'chatgpt') | (Number(!!identity?.conversationId)<<1) |
                 (Number(identity?.conversationId !== previousConversationId)<<2) | (Number(!!previousConversationId)<<3);
             const native = globalThis.CpoQueueEngine?.call('cpo_rollover_fresh',[kind,flags]);
-            if (native != null) return native === 1;
-            if (!identity || identity.provider !== 'chatgpt') {
-                return false;
-            }
-            if (identity.type === 'unsupported' || identity.type === 'unknown') {
-                return false;
-            }
-            if (identity.type === 'existing' && identity.conversationId && identity.conversationId !== previousConversationId) {
-                return true;
-            }
-            // A new-chat route is a fresh target only after leaving a known exhausted conversation.
-            return identity.type === 'new' && !!previousConversationId;
+            return requireNative(native)===1;
         }
 
         matchConversationCapacity(text) {
@@ -1470,29 +1143,7 @@
         }
 
         buildContinuationHandoffMessage(context = {}) {
-            const native=globalThis.CpoQueueEngine?.continuationHandoff?.(context);
-            if(native!=null)return native;
-            const runId = String(context.runId || '').replace(/\s+/g, ' ').trim().slice(0, 80);
-            const commandNumber = Number(context.currentCommandNumber || 0);
-            const completedCount = Number(context.completedCount || 0);
-            const remainingCount = Number(context.remainingCount || 0);
-            const generation = Number(context.conversationGeneration || 0);
-            const pendingLength = Number(context.pendingMessageLength || 0);
-            const parts = [
-                'Continuation handoff for an automated ChatGPT Queue Optimizer run.',
-                'The previous conversation reached ChatGPT maximum length.',
-                `Logical run id: ${runId || 'unknown'}.`,
-                `Conversation segment: ${generation}.`,
-                `Completed original commands: ${completedCount}.`,
-                `Current original command number: ${commandNumber}.`,
-                `Remaining original commands after this one: ${remainingCount}.`,
-                pendingLength > 0
-                    ? `The next original queued command is pending (length ${pendingLength}) and must be treated as the next user task.`
-                    : 'Resume the remaining original queued commands in order.',
-                'Do not treat this handoff as one of the original queued commands.',
-                'Preserve prior workflow constraints and continue in FIFO order.'
-            ];
-            return parts.join(' ').slice(0, 1200);
+            return requireNative(globalThis.CpoQueueEngine?.continuationHandoff?.(context));
         }
 
         getCurrentSurface(doc = (typeof document !== 'undefined' ? document : null), locationOrUrl = null) {
@@ -1515,51 +1166,12 @@
         }
 
         getComposerText(composer) {
-            const native=this._nativeSelectorEngine?.composerRead(1,composer);
-            if(native!=null)return native;
-            if (!composer) return '';
-
-            if (composer.tagName && composer.tagName.toLowerCase() === 'textarea') {
-                return composer.value || '';
-            }
-
-            const directText = composer.innerText || composer.textContent || '';
-            if (directText) return String(directText);
-
-            return Array.from(composer.children || [])
-                .map(child => child.innerText || child.textContent || '')
-                .join('');
+            return requireNative(this._nativeSelectorEngine?.composerRead(1,composer));
         }
 
         clearComposer(composer) {
-            if(this._nativeSelectorEngine){if(this._nativeSelectorEngine.composerWrite(1,composer,'',0)!==true)throw new Error('Native composer clear unavailable.');return;}
-            if (!composer) return;
-
-            if (typeof composer.focus === 'function') {
-                composer.focus();
-            }
-
-            if (composer.tagName && composer.tagName.toLowerCase() === 'textarea') {
-                composer.value = '';
-            } else {
-                if (typeof composer.replaceChildren === 'function') {
-                    composer.replaceChildren();
-                } else if (Array.isArray(composer.children)) {
-                    composer.children.length = 0;
-                }
-                composer.innerText = '';
-                composer.textContent = '';
-            }
-
-            if (typeof InputEvent !== 'undefined') {
-                composer.dispatchEvent(new InputEvent('input', {
-                    bubbles: true,
-                    inputType: 'deleteContentBackward',
-                    data: null
-                }));
-            }
+            if(this._nativeSelectorEngine?.composerWrite(1,composer,'',0)!==true)throw new Error('Native composer clear unavailable.');
         }
-
         getGenerationState(doc = (typeof document !== 'undefined' ? document : null)) {
             const emptySignals = {
                 stopButton: null,
@@ -1686,10 +1298,10 @@
             const hasKnownError = !!matchedError || hasDeliveryTimedOut || conversationCapacityReached || assistantErrorStop;
             const isWorking = hasActiveStopButton || hasResultStreaming || hasActiveToolOrResearch;
             const native = nativeGeneration(hasActiveStopButton,hasResultStreaming,hasActiveToolOrResearch,hasKnownError,hasTryAgainButton,isDeepResearch,conversationCapacityReached);
-            const generating = native?.generating ?? (!hasKnownError && isWorking);
-            const deepResearchActive = native?.deepResearchActive ?? (!hasKnownError && isWorking && isDeepResearch);
-            const statusUnknown = native?.statusUnknown ?? (!hasKnownError && !hasTryAgainButton && !isWorking);
-            const compatibilityState = native?.compatibilityState ?? ((hasKnownError || hasTryAgainButton) ? 'error' : (isWorking ? 'active' : 'unknown'));
+            const generating = requireNative(native).generating;
+            const deepResearchActive = native.deepResearchActive;
+            const statusUnknown = native.statusUnknown;
+            const compatibilityState = native.compatibilityState;
 
             const url = typeof location !== 'undefined' ? location.href : (doc.defaultView?.location?.href || '');
             const title = typeof document !== 'undefined' ? document.title : (doc.title || '');
@@ -1899,178 +1511,23 @@
         isValidMessageNode(node, mainRoot) {
             if (!node || !mainRoot.contains(node)) return false;
             const native=this._nativeSelectorEngine?.messagePredicate?.(0,node,mainRoot,this);
-            if(native!=null)return native;
-            if (node.closest('#cpo-root')) return false;
-            if (node.classList && node.classList.contains('cpo-more-banner')) return false;
-
-            const tag = (node.tagName || '').toLowerCase();
-            if (['script', 'style', 'nav', 'aside', 'header', 'footer'].includes(tag)) {
-                return false;
-            }
-
-            const composerOrFormSelector = `${this.selectors.composer.join(',')}, form`;
-            if (node.querySelector(composerOrFormSelector)) {
-                const text = (node.textContent || '').trim();
-                if (text.length < 80) return false;
-            }
-
-            const text = (node.textContent || '').trim();
-            if (text.length < 1) return false;
-
-            const hasMessageMarker =
-                (typeof node.matches === 'function' && (this.compatibilitySignals.messageContext || [])
-                    .some(selector => node.matches(selector))) ||
-                !!node.querySelector((this.compatibilitySignals.messageContext || []).join(','));
-
-            if (!hasMessageMarker) return false;
-
-            return true;
+            return requireNative(native);
         }
 
         getFallbackMessages(doc, mainRoot) {
-            const fallbackSelector = this.selectors.fallbackMessages.join(', ');
-            const collected = [];
-
-            try {
-                const nodes = Array.from(doc.querySelectorAll(fallbackSelector));
-                for (const node of nodes) {
-                    if (!mainRoot.contains(node)) continue;
-                    if (node.closest('#cpo-root')) continue;
-                    if (node.id && node.id.includes('thread-bottom')) continue;
-                    if (node.querySelector(`${this.selectors.composer.join(',')}, input, form`)) continue;
-
-                    const text = (node.textContent || '').trim();
-                    if (text.length < 15) continue;
-
-                    const normalized = this.normalizeMessageNode(node, mainRoot);
-                    if (normalized && this.isValidFallbackNode(normalized, mainRoot)) {
-                        collected.push(normalized);
-                    }
-                }
-            } catch (e) {
-                console.warn('CPO: Fallback querySelectorAll failed', e);
-            }
-
-            return this.sortMessagesByPosition(this.removeDuplicates(collected));
+            const result=this.getMessageDiscovery(doc,mainRoot);
+            return result.fallback?result.nodes:[];
         }
 
         isValidFallbackNode(node, mainRoot) {
             if (!node || !mainRoot.contains(node)) return false;
             const native=this._nativeSelectorEngine?.messagePredicate?.(1,node,mainRoot,this);
-            if(native!=null)return native;
-            if (node.closest('#cpo-root')) return false;
-            if (node.classList && node.classList.contains('cpo-more-banner')) return false;
-
-            const text = (node.textContent || '').trim();
-            if (text.length < 15) return false;
-
-            if (node.querySelector(`${this.selectors.composer.join(',')}, input, form`)) return false;
-
-            const hasContent =
-                node.querySelector('p, pre, code, ul, ol, h1, h2, h3, h4, h5, h6, [data-message-author-role]') ||
-                (typeof node.matches === 'function' && (this.compatibilitySignals.messageContext || [])
-                    .some(selector => node.matches(selector)));
-
-            return !!hasContent;
+            return requireNative(native);
         }
 
-        sortMessagesByPosition(messages) {
-            return messages
-                .toSorted((a, b) => {
-                    if (a === b) return 0;
-
-                    const position = a.compareDocumentPosition(b);
-                    if (position & 4) { // Node.DOCUMENT_POSITION_FOLLOWING = 4
-                        return -1;
-                    }
-                    if (position & 2) { // Node.DOCUMENT_POSITION_PRECEDING = 2
-                        return 1;
-                    }
-                    return 0;
-                });
-        }
-
-        removeDuplicates(messages) {
-            const unique = Array.from(new Set(messages));
-            const candidates = new Set(unique);
-            const redundant = new Set();
-            const isTurn = node => {
-                const testId = node.getAttribute?.('data-testid') || '';
-                return node.tagName?.toLowerCase() === 'article' ||
-                    testId.startsWith('conversation-turn') ||
-                    !!node.getAttribute?.('data-message-author-role') ||
-                    !!node.getAttribute?.('data-message-id');
-            };
-            for (const node of unique) {
-                for (let parent = node.parentElement; parent; parent = parent.parentElement) {
-                    if (!candidates.has(parent)) continue;
-                    // Prefer canonical turns over generic wrappers containing them.
-                    if (isTurn(node) && !isTurn(parent)) {
-                        redundant.add(parent);
-                    } else {
-                        redundant.add(node);
-                    }
-                }
-            }
-            return unique.filter(node => !redundant.has(node));
-        }
     }
 
-    const GEMINI_SELECTORS = catalogView(2, () => ({
-        composer: [
-            '.ql-editor[contenteditable="true"]',
-            'rich-textarea .ql-editor',
-            '.ql-editor',
-            '[contenteditable="true"][role="textbox"]',
-            'div[contenteditable="true"]'
-        ],
-        sendButton: [
-            'button.send-button[aria-label="Send message"]',
-            'button.send-button',
-            'button[aria-label="Send message"]',
-            'button[aria-label*="Send"]'
-        ],
-        stopButton: [
-            'button[aria-label="Stop response"]',
-            'button[aria-label*="Stop"]',
-            'button.stop-button',
-            'button[data-test-id*="stop"]'
-        ],
-        streaming: [
-            '[class*="response-streaming"]',
-            '[data-is-streaming="true"]',
-            '.model-response-text[aria-busy="true"]'
-        ],
-        status: [
-            '[role="status"]',
-            '[aria-live]',
-            '[class*="thinking"]',
-            '[class*="loading"]',
-            '[data-test-id*="loading"]',
-            '[data-test-id*="progress"]'
-        ],
-        spinner: [
-            '[class*="loading"]',
-            '[class*="spinner"]',
-            'mat-progress-spinner',
-            'circular-progress'
-        ],
-        errorAlerts: [
-            '[role="alert"]',
-            '[matsnackbarlabel]',
-            '.mat-mdc-snack-bar-label',
-            '.mdc-snackbar__label',
-            '[class*="error"]'
-        ],
-        messages: [],
-        fallbackMessages: [],
-        mainRoot: [
-            'main',
-            '[role="main"]',
-            'chat-window',
-            'body'
-        ]
-    }));
+    const GEMINI_SELECTORS = catalogView(2);
 
     class GeminiAdapter extends ProviderAdapter {
         constructor() {
@@ -2089,7 +1546,7 @@
                 const parsed = new URL(url);
                 if (parsed.protocol !== 'https:') return false;
                 const native = globalThis.CpoQueueEngine?.providerHost(parsed.hostname.toLowerCase());
-                return native == null ? GEMINI_HOSTS.has(parsed.hostname.toLowerCase()) : native === PROVIDER_CODES.gemini;
+                return native === PROVIDER_CODES.gemini;
             } catch {
                 return false;
             }
@@ -2117,38 +1574,7 @@
                 if (native) return { provider: this.id, ...native,
                     key: native.key };
 
-                // /app/:id or /u/:n/app/:id
-                const existingMatch = pathname.match(/(?:^|\/)(?:u\/\d+\/)?app\/([a-zA-Z0-9_-]+)\/?$/);
-                if (existingMatch && existingMatch[1] && existingMatch[1].toLowerCase() !== 'app') {
-                    const conversationId = existingMatch[1];
-                    return {
-                        provider: this.id,
-                        type: 'existing',
-                        conversationId,
-                        key: `${this.id}:c:${conversationId}`
-                    };
-                }
-
-                // New chat: /, /app, /u/:n/app
-                if (
-                    pathname === '/' ||
-                    pathname === '' ||
-                    /^\/(?:u\/\d+\/)?app\/?$/.test(pathname)
-                ) {
-                    return {
-                        provider: this.id,
-                        type: 'new',
-                        conversationId: null,
-                        key: `${this.id}:new`
-                    };
-                }
-
-                return {
-                    provider: this.id,
-                    type: 'unsupported',
-                    conversationId: null,
-                    key: `${this.id}:unsupported`
-                };
+                return {provider:this.id,type:'unsupported',conversationId:null,key:this.id+':unsupported'};
             } catch {
                 return {
                     provider: this.id,
@@ -2178,51 +1604,18 @@
                 (Number(false)<<4) |
                 (Number(!!composer.closest('model-response, .model-response, .response-container, message-content'))<<5);
             const native=providerPredicate(this.id,2,flags);
-            if(native==null?(!(flags&11)||!!(flags&32)):native!==1)return null;
+            if(requireNative(native)!==1)return null;
 
             return composer;
         }
 
         getComposerText(composer) {
-            const native=this._nativeSelectorEngine?.composerRead(2,composer);
-            if(native!=null)return native;
-            if (!composer) return '';
-
-            if (composer.tagName && composer.tagName.toLowerCase() === 'textarea') {
-                return composer.value || '';
-            }
-
-            return composer.innerText || composer.textContent || '';
+            return requireNative(this._nativeSelectorEngine?.composerRead(2,composer));
         }
 
         clearComposer(composer) {
-            if(this._nativeSelectorEngine){if(this._nativeSelectorEngine.composerWrite(2,composer,'',0)!==true)throw new Error('Native composer clear unavailable.');return;}
-            if (!composer) return;
-
-            if (typeof composer.focus === 'function') {
-                composer.focus();
-            }
-
-            if (composer.tagName && composer.tagName.toLowerCase() === 'textarea') {
-                composer.value = '';
-            } else {
-                composer.textContent = '';
-                if (composer.classList) {
-                    if (typeof composer.classList.add === 'function') {
-                        composer.classList.add('ql-blank');
-                    }
-                }
-            }
-
-            if (typeof InputEvent !== 'undefined') {
-                composer.dispatchEvent(new InputEvent('input', {
-                    bubbles: true,
-                    inputType: 'deleteContentBackward',
-                    data: null
-                }));
-            }
+            if(this._nativeSelectorEngine?.composerWrite(2,composer,'',0)!==true)throw new Error('Native composer clear unavailable.');
         }
-
         getGenerationState(doc = (typeof document !== 'undefined' ? document : null)) {
             if (!doc) {
                 return {
@@ -2344,7 +1737,7 @@
 
             const hasKnownError = !!matchedError;
             const isWorking = hasActiveStopButton || hasResultStreaming || hasActiveToolOrResearch;
-            const generating = nativeGeneration(hasActiveStopButton,hasResultStreaming,hasActiveToolOrResearch,hasKnownError,hasTryAgainButton)?.generating ?? (!hasKnownError && isWorking);
+            const generating = requireNative(nativeGeneration(hasActiveStopButton,hasResultStreaming,hasActiveToolOrResearch,hasKnownError,hasTryAgainButton)).generating;
 
             const url = typeof location !== 'undefined' ? location.href : (doc.defaultView?.location?.href || '');
             const title = typeof document !== 'undefined' ? document.title : (doc.title || '');
@@ -2380,62 +1773,7 @@
         }
     }
 
-    const CLAUDE_SELECTORS = catalogView(3, () => ({
-        composer: [
-            '[data-testid="chat-input"]',
-            'div.ProseMirror[contenteditable="true"]',
-            'div.ProseMirror',
-            '[contenteditable="true"][role="textbox"]',
-            'div[contenteditable="true"]',
-            'fieldset textarea',
-            'textarea'
-        ],
-        sendButton: [
-            'button[aria-label="Send Message"]',
-            'button[aria-label="Send message"]',
-            'button[data-testid="send-button"]',
-            'button[aria-label*="Send"]',
-            'button[type="submit"]'
-        ],
-        stopButton: [
-            'button[aria-label="Stop generating"]',
-            'button[aria-label*="Stop"]',
-            'button[aria-label*="stop"]',
-            'button[data-testid*="stop"]'
-        ],
-        streaming: [
-            '[data-is-streaming="true"]',
-            '[data-is-streaming]',
-            '.font-claude-response[data-is-streaming]'
-        ],
-        status: [
-            '[role="status"]',
-            '[aria-live]',
-            '[class*="thinking"]',
-            '[class*="loading"]',
-            '[data-testid*="thinking"]',
-            '[data-testid*="progress"]',
-            '[data-testid*="status"]'
-        ],
-        spinner: [
-            '[class*="loading"]',
-            '[class*="spinner"]',
-            '[class*="animate-spin"]',
-            'svg.animate-spin'
-        ],
-        errorAlerts: [
-            '[role="alert"]',
-            '[data-testid*="error"]',
-            '[class*="error"]'
-        ],
-        messages: [],
-        fallbackMessages: [],
-        mainRoot: [
-            'main',
-            '[role="main"]',
-            'body'
-        ]
-    }));
+    const CLAUDE_SELECTORS = catalogView(3);
 
     class ClaudeAdapter extends ProviderAdapter {
         constructor() {
@@ -2454,7 +1792,7 @@
                 const parsed = new URL(url);
                 if (parsed.protocol !== 'https:') return false;
                 const native = globalThis.CpoQueueEngine?.providerHost(parsed.hostname.toLowerCase());
-                return native == null ? CLAUDE_HOSTS.has(parsed.hostname.toLowerCase()) : native === PROVIDER_CODES.claude;
+                return native === PROVIDER_CODES.claude;
             } catch {
                 return false;
             }
@@ -2482,41 +1820,7 @@
                 if (native) return { provider: this.id, ...native,
                     key: native.key };
 
-                // Existing chat: /chat/:id
-                const existingMatch = pathname.match(/^\/chat\/([a-zA-Z0-9_-]+)\/?$/);
-                if (existingMatch && existingMatch[1]) {
-                    const conversationId = existingMatch[1];
-                    return {
-                        provider: this.id,
-                        type: 'existing',
-                        conversationId,
-                        key: `${this.id}:c:${conversationId}`
-                    };
-                }
-
-                // New chat: /, /new, /chat
-                if (
-                    pathname === '/' ||
-                    pathname === '' ||
-                    pathname === '/new' ||
-                    pathname === '/new/' ||
-                    pathname === '/chat' ||
-                    pathname === '/chat/'
-                ) {
-                    return {
-                        provider: this.id,
-                        type: 'new',
-                        conversationId: null,
-                        key: `${this.id}:new`
-                    };
-                }
-
-                return {
-                    provider: this.id,
-                    type: 'unsupported',
-                    conversationId: null,
-                    key: `${this.id}:unsupported`
-                };
+                return {provider:this.id,type:'unsupported',conversationId:null,key:this.id+':unsupported'};
             } catch {
                 return {
                     provider: this.id,
@@ -2546,46 +1850,18 @@
                 (Number(composer.getAttribute('data-testid') === 'chat-input')<<4) |
                 (Number(!!composer.closest('[data-testid="user-message"], .font-claude-response, .font-user-message'))<<5);
             const native=providerPredicate(this.id,2,flags);
-            if(native==null?(!(flags&27)||!!(flags&32)):native!==1)return null;
+            undefined
 
             return composer;
         }
 
         getComposerText(composer) {
-            const native=this._nativeSelectorEngine?.composerRead(3,composer);
-            if(native!=null)return native;
-            if (!composer) return '';
-
-            if (composer.tagName && composer.tagName.toLowerCase() === 'textarea') {
-                return composer.value || '';
-            }
-
-            return composer.innerText || composer.textContent || '';
+            return requireNative(this._nativeSelectorEngine?.composerRead(3,composer));
         }
 
         clearComposer(composer) {
-            if(this._nativeSelectorEngine){if(this._nativeSelectorEngine.composerWrite(3,composer,'',0)!==true)throw new Error('Native composer clear unavailable.');return;}
-            if (!composer) return;
-
-            if (typeof composer.focus === 'function') {
-                composer.focus();
-            }
-
-            if (composer.tagName && composer.tagName.toLowerCase() === 'textarea') {
-                composer.value = '';
-            } else {
-                composer.textContent = '';
-            }
-
-            if (typeof InputEvent !== 'undefined') {
-                composer.dispatchEvent(new InputEvent('input', {
-                    bubbles: true,
-                    inputType: 'deleteContentBackward',
-                    data: null
-                }));
-            }
+            if(this._nativeSelectorEngine?.composerWrite(3,composer,'',0)!==true)throw new Error('Native composer clear unavailable.');
         }
-
         getGenerationState(doc = (typeof document !== 'undefined' ? document : null)) {
             if (!doc) {
                 return {
@@ -2708,7 +1984,7 @@
 
             const hasKnownError = !!matchedError;
             const isWorking = hasActiveStopButton || hasResultStreaming || hasActiveToolOrResearch;
-            const generating = nativeGeneration(hasActiveStopButton,hasResultStreaming,hasActiveToolOrResearch,hasKnownError,hasTryAgainButton)?.generating ?? (!hasKnownError && isWorking);
+            const generating = requireNative(nativeGeneration(hasActiveStopButton,hasResultStreaming,hasActiveToolOrResearch,hasKnownError,hasTryAgainButton)).generating;
 
             const url = typeof location !== 'undefined' ? location.href : (doc.defaultView?.location?.href || '');
             const title = typeof document !== 'undefined' ? document.title : (doc.title || '');
@@ -2767,14 +2043,8 @@
             const parsed = new URL(urlStr);
             if (parsed.protocol !== 'https:') return null;
             const native = globalThis.CpoQueueEngine?.providerHost(parsed.hostname.toLowerCase());
-            if (native != null) return PROVIDERS[['','chatgpt','gemini','claude'][native]] || null;
+            return PROVIDERS[['','chatgpt','gemini','claude'][native]] || null;
         } catch { return null; }
-        for (const provider of Object.values(PROVIDERS)) {
-            if (provider.isSupportedUrl(urlStr)) {
-                return provider;
-            }
-        }
-        return null;
     }
 
     function getConversationIdentity(locationOrUrl) {

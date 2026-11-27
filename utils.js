@@ -1,37 +1,11 @@
-const CHATGPT_HOSTS = new Set(['chatgpt.com', 'chat.openai.com']);
-const GEMINI_HOSTS = new Set(['gemini.google.com']);
-const CLAUDE_HOSTS = new Set(['claude.ai']);
-
-const PROVIDER_HOSTS = {
-    chatgpt: CHATGPT_HOSTS,
-    gemini: GEMINI_HOSTS,
-    claude: CLAUDE_HOSTS
-};
-
 function getUrlProvider(url) {
-    if (typeof url !== 'string') {
-        return null;
-    }
-
-    try {
-        const parsed = new URL(url);
-
-        if (parsed.protocol !== 'https:') {
-            return null;
-        }
-
-        const hostname = parsed.hostname.toLowerCase();
-
-        for (const [providerId, hosts] of Object.entries(PROVIDER_HOSTS)) {
-            if (hosts.has(hostname)) {
-                return providerId;
-            }
-        }
-
-        return null;
-    } catch {
-        return null;
-    }
+    if(typeof url!=='string')return null;
+    try{
+        const parsed=new URL(url);
+        if(parsed.protocol!=='https:')return null;
+        const code=globalThis.CpoQueueEngine?.providerHost(parsed.hostname.toLowerCase());
+        return ['','chatgpt','gemini','claude'][code]||null;
+    }catch{return null;}
 }
 
 function isSupportedProviderUrl(url) {

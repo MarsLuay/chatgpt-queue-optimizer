@@ -68,7 +68,7 @@
       /** @type {Promise<boolean> | null} */
       this.nativeCoreLoading = null;
 
-      this.provider = this.resolveProvider();
+      this.provider = null;
 
       this.init();
     }
@@ -90,21 +90,15 @@
         const found = registry.getProviderForUrl(currentUrl);
         if (found) return found;
       }
-      if (typeof getProvider === 'function') {
-        return getProvider('chatgpt');
-      }
-      if (registry && typeof registry.getProvider === 'function') {
-        return registry.getProvider('chatgpt');
-      }
-      if (typeof globalThis !== 'undefined' && globalThis.ProviderAdapters?.chatgpt) {
-        return globalThis.ProviderAdapters.chatgpt;
-      }
       return null;
     }
 
     async init() {
-      // Lazy native loading never blocks composer or generation detection.
-      globalThis.CpoQueueEngine?.load();
+      const ready=await globalThis.CpoQueueEngine?.load();
+      if(ready){
+        this.provider=this.resolveProvider();
+        if(this.provider)await this.loadRustBrowserEngine();
+      }
       this.setupComposerQueueShortcut();
       await this.loadConfig();
 
@@ -360,6 +354,7 @@
     }
 
     bootstrap() {
+      if(!this.provider||!this.browserEngine?.exports)return;
       this.setupComposerQueueShortcut();
       this.setupRouteWatcher();
 
@@ -394,7 +389,7 @@
       if (!surface.conversationId || !surface.optimizerEligible) {
         return { ok: false, error: 'Open a saved ChatGPT conversation first.' };
       }
-      const messages = this.sortMessagesByPosition(this.getMessageNodes());
+      const messages = this.getMessageNodes();
       const total = messages.length;
       const offset = Number(request.offset || 0);
       if (!Number.isSafeInteger(offset) || offset < 0 || offset > total) return { ok: false, error: 'Invalid history offset.' };
@@ -876,7 +871,7 @@
       const engine=globalThis.CpoQueueEngine;
       // The browser supplies raw modifier facts and key text. Rust
       // classifies Enter, modifiers and IME before any interception.
-      if(engine?.keyboardEvent?.(event)!==1)return;
+      if(!this.browserEngine?.exports||!this.provider||engine?.keyboardEvent?.(event)!==1)return;
 
       const composerMatch = this.provider?.id === 'chatgpt' && typeof this.provider.getComposerMatchFromEventTarget === 'function'
         ? this.provider.getComposerMatchFromEventTarget(event.target, '#cpo-root')
@@ -1272,48 +1267,6 @@
       return false;
     }
 
-    sortMessagesByPosition(messages) {
-      return messages
-        .toSorted((a, b) => {
-          if (a === b) return 0;
-
-          const position = a.compareDocumentPosition(b);
-
-          if (position & Node.DOCUMENT_POSITION_FOLLOWING) {
-            return -1;
-          }
-
-          if (position & Node.DOCUMENT_POSITION_PRECEDING) {
-            return 1;
-          }
-
-          return 0;
-        });
-    }
-
-    removeDuplicates(messages) {
-      const unique = Array.from(new Set(messages));
-      const candidates = new Set(unique);
-      const redundant = new Set();
-      const isTurn = node => {
-        const testId = node.getAttribute?.('data-testid') || '';
-        return node.tagName?.toLowerCase() === 'article' ||
-          testId.startsWith('conversation-turn') ||
-          !!node.getAttribute?.('data-message-author-role') ||
-          !!node.getAttribute?.('data-message-id');
-      };
-      for (const node of unique) {
-        for (let parent = node.parentElement; parent; parent = parent.parentElement) {
-          if (!candidates.has(parent)) continue;
-          if (isTurn(node) && !isTurn(parent)) {
-            redundant.add(parent);
-          } else {
-            redundant.add(node);
-          }
-        }
-      }
-      return unique.filter(node => !redundant.has(node));
-    }
 
     setupContainer() {
       const messages = this.getMessageNodes();
@@ -1494,7 +1447,7 @@
       if (messages.length === 0) return;
 
       const started = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
-      messages = this.sortMessagesByPosition(messages);
+      // Native discovery already returns canonical DOM order.
 
       const totalMessages = messages.length;
 
