@@ -98,6 +98,18 @@ function extensionApiPromise(callWithCallback, callWithoutCallback) {
 // Shared host ABI for browser API effects. Keep method access on the
 // browser side; WASM owns decisions and never receives privileged API objects.
 const CpoBrowserApi = Object.freeze({
+    // Exactly one reply, including rejected asynchronous handlers.
+    listen(handler) {
+        chrome.runtime.onMessage.addListener((message,sender,reply)=>{
+            let settled=false;
+            const respond=value=>{if(!settled){settled=true;reply(value);}};
+            try{
+                const result=handler(message,sender,respond);
+                if(result&&typeof result.then==='function')result.catch(error=>respond({ok:false,error:String(error?.message||error)}));
+            }catch(error){respond({ok:false,error:String(error?.message||error)});}
+            return true;
+        });
+    },
     invoke(operation, ...args) {
         const operations = {
             localGet:['storage','local','get'], localSet:['storage','local','set'],
