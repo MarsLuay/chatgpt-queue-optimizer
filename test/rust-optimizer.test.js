@@ -28,7 +28,11 @@ test('compiled Rust WASM implements the same window and batch policy', {
 }, async () => {
     const { instance } = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const core = instance.exports;
-    assert.equal(core.cpo_abi_version(), 3);
+    assert.equal(core.cpo_abi_version(), 4);
+    assert.equal(core.cpo_history_page_count(100, 95, 16), 5);
+    assert.equal(core.cpo_history_page_count(100, 0, 500), 32);
+    assert.equal(core.cpo_history_accept_bytes(8388600, 8), 1);
+    assert.equal(core.cpo_history_accept_bytes(8388600, 9), 0);
     assert.equal(core.cpo_image_surface_bytes(1920, 1080), 8294400);
     assert.equal(core.cpo_can_evict_playback(1, 1, 0, 0), 1);
     assert.equal(core.cpo_can_evict_playback(0, 1, 0, 0), 0);
