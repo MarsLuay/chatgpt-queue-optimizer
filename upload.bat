@@ -8,22 +8,12 @@ set "UPLOAD_EXIT=1"
 echo ChatGPT Queue + Optimizer - Firefox release publisher
 echo.
 
-where py >nul 2>nul
-if not errorlevel 1 goto UsePy
-where python >nul 2>nul
-if not errorlevel 1 goto UsePython
-
-echo [ERROR] Python 3 was not found.
-echo Install Python 3 from https://www.python.org/downloads/windows/
-goto Finish
-
-:UsePy
-py -3 "%REPO_ROOT%Installers\publish_firefox.py" --repo-dir "%REPO_ROOT%."
-set "UPLOAD_EXIT=%ERRORLEVEL%"
-goto ShowResult
-
-:UsePython
-python "%REPO_ROOT%Installers\publish_firefox.py" --repo-dir "%REPO_ROOT%."
+where cargo >nul 2>nul
+if errorlevel 1 (
+  echo [ERROR] Rust/Cargo was not found. Install Rust using rustup.
+  goto Finish
+)
+cargo run --release --manifest-path "%REPO_ROOT%Installers\native\Cargo.toml" -- managed-publish --repo-dir "%REPO_ROOT%."
 set "UPLOAD_EXIT=%ERRORLEVEL%"
 goto ShowResult
 
