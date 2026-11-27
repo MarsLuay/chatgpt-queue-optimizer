@@ -13,3 +13,5 @@ node_modules/
 /optimizer_browser.wasm
 
 /optimizer_history.wasm
+
+/optimizer_queue.wasm
