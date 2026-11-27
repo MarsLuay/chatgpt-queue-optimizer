@@ -245,7 +245,7 @@ async function validateJobTargetConversation(tabId, job) {
     if (job.rolloverInProgress) {
         const adapter = getActiveProviderAdapter(currentIdentity.provider || job.provider || 'chatgpt') || getActiveProviderAdapter('chatgpt');
         const fromId = job.rolloverFromConversationId || null;
-        if (adapter && typeof adapter.isFreshConversationIdentity === 'function' && adapter.isFreshConversationIdentity(currentIdentity, fromId)) {
+        if (isVerifiedFreshConversation(adapter, currentIdentity, fromId, job.rolloverNavigationStarted)) {
             if (!job.rolloverRebindApplied) {
                 applyAuthorizedConversationRebind(job, currentIdentity);
                 await updateRunningJobsStorage({ force: true });
@@ -600,6 +600,12 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
 
             if (!owned()) return { action: 'return' };
             if (rolloverNext(4,false,alreadyPresent) === 8) {
+                const beforeHandoff = await validateJobTargetConversation(tabId, job);
+                if (!owned()) return { action: 'return' };
+                if (!beforeHandoff.ok || (job.conversationId && beforeHandoff.currentIdentity?.conversationId !== job.conversationId)) {
+                    pauseJob(tabId, 'Rollover target changed before continuation submission.', { phase: 'rollover-handoff', failureClass: 'conversation-max-length' });
+                    return { action: 'return' };
+                }
                 const sendResult = await sendPromptToSpecificTab(tabId, handoffText, job);
                 if (jobs.get(tabId) !== job || job.isStopped || job.isPaused || !job.isRunning) {
                     return { action: 'return' };
