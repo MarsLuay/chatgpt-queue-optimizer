@@ -1,7 +1,7 @@
 //! Queue execution decisions and streaming legacy-compatible UTF-16 fingerprints.
 
 #[no_mangle]
-pub extern "C" fn cpo_queue_abi() -> u32 { 17 }
+pub extern "C" fn cpo_queue_abi() -> u32 { 18 }
 
 const OFFSET: u32 = 2166136261;
 const PRIME: u32 = 16777619;
@@ -1388,6 +1388,10 @@ pub extern "C" fn cpo_provider_predicate(provider:u32,mode:u32,flags:u32)->u32 {
     match mode {
         0=>(flags&3!=0) as u32, 1=>(flags&4!=0) as u32,
         2=>((flags&32==0) && match provider{2=>flags&11!=0,3=>flags&27!=0,_=>flags&3!=0}) as u32,
+        // Raw document-candidate facts: editable=1, overlay=2, historical
+        // message=4, weak selector=8, composer context=16.
+        3=>(flags&1!=0&&(provider!=1||(flags&6==0&&(flags&8==0||flags&16!=0)))) as u32,
+        4=>(flags&1!=0&&(provider!=1||flags&8==0||flags&16!=0)) as u32,
         _=>0
     }
 }
@@ -1916,6 +1920,8 @@ mod presentation_batch {
             31=>turn_metadata_finish(f),
             32=>turn_metadata_lookup(f),
             33=>last_assistant_observation(f),
+            34=>provider_surface(f),
+            35=>provider_navigation(f),
             _=>None
         }
     }

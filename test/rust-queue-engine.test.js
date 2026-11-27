@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 17);
+    assert.equal(e.cpo_queue_abi(), 18);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -580,4 +580,25 @@ test('native turn metadata streams fingerprints and avoids reading cached DOM te
     assert.equal(engine.providerTurnMetadata(7,1,2,()=> '  ').hasText,false);
     assert.deepEqual(engine.providerLastAssistant(4,'',''),{hasError:false,hasDeliveryTimeout:false,hasCompletedText:true,errorSignal:''});
     assert.equal(engine.providerLastAssistant(4,'Message delivery timed out','').hasCompletedText,false);
+});
+
+test('native provider navigation and surface policy preserve host and route distinctions',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    const chat=engine.providerSurface(1,'https://chatgpt.com/c/test-id');
+    assert.equal(chat.type,'existing');
+    assert.equal(chat.key,'chatgpt:c:test-id');
+    assert.equal(chat.optimizerEligible,true);
+    assert.equal(chat.allowFallbackDiscovery,true);
+    assert.equal(engine.providerSurface(1,'https://chatgpt.com/g/test').surface,'composer');
+    assert.equal(engine.providerSurface(1,'').surface,'unclassified');
+    assert.equal(engine.providerSurface(1,'https://example.com/c/test').supported,false);
+    assert.equal(engine.providerSurface(1,'http://chatgpt.com/').supported,false);
+    assert.equal(engine.providerSurface(2,'https://gemini.google.com/app/abc').conversationId,'abc');
+    assert.equal(engine.providerSurface(3,'https://claude.ai/chat/abc').conversationId,'abc');
+    assert.deepEqual(engine.providerNavigation(1),{ok:true,url:'https://chatgpt.com/',method:'route'});
+    assert.equal(engine.providerNavigation(2).ok,false);
+    assert.equal(engine.call('cpo_provider_predicate',[1,3,1|4]),0);
+    assert.equal(engine.call('cpo_provider_predicate',[1,3,1|8|16]),1);
+    assert.equal(engine.call('cpo_provider_predicate',[1,4,1|8]),0);
 });

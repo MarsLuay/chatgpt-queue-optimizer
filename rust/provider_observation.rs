@@ -250,3 +250,36 @@ mod turn_cache_tests{
         TURN_CACHE.with(|cache|assert!(cache.borrow().is_empty()));
     }
 }
+
+
+// URL parsing remains the browser's WHATWG URL primitive. Native code owns
+// host validation, route identity, surface eligibility and navigation policy.
+// Fields: provider code, URL state (0 invalid, 1 HTTPS, 2 absent), host, path.
+fn provider_surface(f:&[&[u16]])->Option<Vec<Vec<u16>>>{
+    if f.len()!=4{return None;}
+    let provider=number(f[0]) as u32;
+    let state=number(f[1]) as u32;
+    let name=match provider{1=>"chatgpt",2=>"gemini",3=>"claude",_=>return None};
+    let supported=state==1&&super::provider_host(&lower_ascii(f[2]))==provider;
+    let packed=if supported{super::route(provider,f[3])}else{0};
+    let kind=packed&3;
+    let id=if kind==2{
+        let start=((packed>>2)&2047) as usize;
+        let len=((packed>>13)&2047) as usize;
+        f[3].get(start..start.checked_add(len)?)?.to_vec()
+    }else{Vec::new()};
+    let kind_name=match kind{1=>"new",2=>"existing",_=>"unsupported"};
+    let mut key=ascii(name);append(&mut key,":");
+    if kind==2{append(&mut key,"c:");key.extend_from_slice(&id);}else{append(&mut key,kind_name);}
+    let missing=state==2&&provider==1;
+    let surface=if missing{"unclassified"}else{match kind{1=>"composer",2=>"conversation",_=>"unsupported"}};
+    let eligible=provider==1&&(missing||kind==1||kind==2);
+    let fallback=provider==1&&kind==2;
+    let flags=u32::from(supported)|(u32::from(eligible)<<1)|(u32::from(fallback)<<2);
+    Some(vec![ascii(kind_name),id,key,ascii(surface),ascii(&flags.to_string()),if supported{f[3].to_vec()}else{Vec::new()}])
+}
+fn provider_navigation(f:&[&[u16]])->Option<Vec<Vec<u16>>>{
+    if f.len()!=1{return None;}
+    let provider=number(f[0]) as u32;
+    Some(if provider==1{vec![ascii("1"),ascii("https://chatgpt.com/"),ascii("route")]}else{vec![ascii("0"),Vec::new(),ascii("unsupported")]})
+}

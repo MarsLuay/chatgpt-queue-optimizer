@@ -331,8 +331,11 @@
         }
 
         firstMatchingSelector(node,selectors) {
-            if(this.context)return null;
-            return this.invoke({node,selectors},core=>selectors[(core.cpo_first_matching_selector(selectors.length)>>>0)-1]||'');
+            if(!this.exports)return null;
+            const outer=this.context;
+            this.context={node,selectors};
+            try{return selectors[(this.exports.cpo_first_matching_selector(selectors.length)>>>0)-1]||'';}
+            finally{this.context=outer;}
         }
         messagePredicate(mode,node,root,adapter) {
             const markers=adapter.compatibilitySignals.messageContext||[];
@@ -918,12 +921,12 @@
     'use strict';
 
     const PROVIDER_CODES = { chatgpt: 1, gemini: 2, claude: 3 };
-    function nativeRoute(provider, pathname) {
-        const engine=globalThis.CpoQueueEngine;
-        const route=engine?.providerRoute(PROVIDER_CODES[provider],pathname);
-        if(!route)return null;
-        const key=engine.identityKey?.(provider,route.type,route.conversationId);
-        return {...route,key:requireNative(key)};
+    function providerSurface(adapter,locationOrUrl){
+        return requireNative(globalThis.CpoQueueEngine?.providerSurface(PROVIDER_CODES[adapter.id],locationOrUrl));
+    }
+    function providerIdentity(adapter,locationOrUrl){
+        const {type,conversationId,key}=providerSurface(adapter,locationOrUrl);
+        return {provider:adapter.id,type,conversationId,key};
     }
     function nativeResponse(generation, assistant, waiting = false, interrupted = false) {
         const flags = [generation.conversationCapacityReached || generation.requiresNewConversation,
@@ -1446,16 +1449,14 @@
                 (Number(!!element?.closest?.('#cpo-root'))<<1) |
                 (Number(!!element?.closest?.(this.compatibilitySignals.messageContext.join(',')))<<2) |
                 (Number(weak)<<3) | (Number(!!element?.closest?.(this.compatibilitySignals.composerContext.join(',')))<<4);
-            const native = this._nativeSelectorEngine?.candidate(0,flags);
-            return requireNative(native);
+            return requireNative(providerPredicate(this.id,3,flags))===1;
         }
 
         isSendActionElement(element, { selector = '' } = {}) {
             const flags=Number(super.isSendActionElement(element)) |
                 (Number(this.compatibilitySignals.weakSendButtonSelectors.includes(selector))<<3) |
                 (Number(!!element?.closest?.(this.compatibilitySignals.composerContext.join(',')))<<4);
-            const native=this._nativeSelectorEngine?.candidate(1,flags);
-            return requireNative(native);
+            return requireNative(providerPredicate(this.id,4,flags))===1;
         }
 
         getMessageDiscovery(doc = (typeof document !== 'undefined' ? document : null), mainRoot = null) {
@@ -1550,16 +1551,8 @@
         }
 
         findMatchingSelector(node, selectorKey) {
-            const selectors = this.selectors?.[selectorKey] || [];
-            const native=this._nativeSelectorEngine?.firstMatchingSelector?.(node,selectors);
-            if(native!=null)return native||null;
-            return selectors.find((selector) => {
-                try {
-                    return node.matches?.(selector);
-                } catch {
-                    return false;
-                }
-            }) || null;
+            const selectors=this.selectors?.[selectorKey]||[];
+            return requireNative(this._nativeSelectorEngine?.firstMatchingSelector(node,selectors))||null;
         }
 
         getCompatibilityDiagnostics(doc = (typeof document !== 'undefined' ? document : null)) {
@@ -1583,90 +1576,24 @@
         }
 
         isSupportedUrl(url) {
-            if (typeof url !== 'string') {
-                return false;
-            }
-
-            try {
-                const parsed = new URL(url);
-                if (parsed.protocol !== 'https:') return false;
-                const native = globalThis.CpoQueueEngine?.providerHost(parsed.hostname.toLowerCase());
-                return native === PROVIDER_CODES.chatgpt;
-            } catch {
-                return false;
-            }
+            return typeof url==='string'&&providerSurface(this,url).supported;
         }
 
         classifyChatGPTSurface(locationOrUrl) {
-            const unsupported = {
-                provider: this.id,
-                type: 'unsupported',
-                conversationId: null,
-                key: `${this.id}:unsupported`,
-                surface: 'unsupported',
-                optimizerEligible: false,
-                allowFallbackDiscovery: false,
-                pathname: ''
-            };
-
-            const urlStr = typeof locationOrUrl === 'string'
-                ? locationOrUrl
-                : (locationOrUrl?.href || String(locationOrUrl || ''));
-
-            if (!urlStr || urlStr === 'undefined' || urlStr === 'null') {
-                return {
-                    provider: this.id,
-                    type: 'unsupported',
-                    conversationId: null,
-                    key: `${this.id}:unsupported`,
-                    surface: 'unclassified',
-                    optimizerEligible: true,
-                    allowFallbackDiscovery: false,
-                    pathname: ''
-                };
-            }
-
-            if (!this.isSupportedUrl(urlStr)) {
-                return unsupported;
-            }
-
-            try {
-                const parsed = new URL(urlStr);
-                const pathname = parsed.pathname || '/';
-                const native = nativeRoute(this.id, pathname);
-                if (native) {
-                    const existing = native.type === 'existing';
-                    const fresh = native.type === 'new';
-                    return { ...unsupported, ...native, key: native.key,
-                        surface: existing ? 'conversation' : fresh ? 'composer' : 'unsupported',
-                        optimizerEligible: existing || fresh, allowFallbackDiscovery: existing, pathname };
-                }
-                return unsupported;
-            } catch {
-                return unsupported;
-            }
+            const {supported,...surface}=providerSurface(this,locationOrUrl);
+            return {provider:this.id,...surface};
         }
 
         getConversationIdentity(locationOrUrl) {
-            const surface = this.classifyChatGPTSurface(locationOrUrl);
-            return {
-                provider: surface.provider,
-                type: surface.type,
-                conversationId: surface.conversationId,
-                key: surface.key
-            };
+            return providerIdentity(this,locationOrUrl);
         }
 
         getNewConversationUrl() {
-            return 'https://chatgpt.com/';
+            return requireNative(globalThis.CpoQueueEngine?.providerNavigation(1)).url;
         }
 
         startNewConversation() {
-            return {
-                ok: true,
-                url: this.getNewConversationUrl(),
-                method: 'route'
-            };
+            return requireNative(globalThis.CpoQueueEngine?.providerNavigation(1));
         }
 
         isFreshConversationIdentity(identity, previousConversationId = null) {
@@ -1898,51 +1825,11 @@
         }
 
         isSupportedUrl(url) {
-            if (typeof url !== 'string') {
-                return false;
-            }
-
-            try {
-                const parsed = new URL(url);
-                if (parsed.protocol !== 'https:') return false;
-                const native = globalThis.CpoQueueEngine?.providerHost(parsed.hostname.toLowerCase());
-                return native === PROVIDER_CODES.gemini;
-            } catch {
-                return false;
-            }
+            return typeof url==='string'&&providerSurface(this,url).supported;
         }
 
         getConversationIdentity(locationOrUrl) {
-            const urlStr = typeof locationOrUrl === 'string'
-                ? locationOrUrl
-                : (locationOrUrl?.href || String(locationOrUrl || ''));
-
-            if (!this.isSupportedUrl(urlStr)) {
-                return {
-                    provider: this.id,
-                    type: 'unsupported',
-                    conversationId: null,
-                    key: `${this.id}:unsupported`
-                };
-            }
-
-            try {
-                const parsed = new URL(urlStr);
-                const pathname = parsed.pathname || '/';
-
-                const native = nativeRoute(this.id, pathname);
-                if (native) return { provider: this.id, ...native,
-                    key: native.key };
-
-                return {provider:this.id,type:'unsupported',conversationId:null,key:this.id+':unsupported'};
-            } catch {
-                return {
-                    provider: this.id,
-                    type: 'unsupported',
-                    conversationId: null,
-                    key: `${this.id}:unsupported`
-                };
-            }
+            return providerIdentity(this,locationOrUrl);
         }
 
         getComposerFromEventTarget(target, excludeSelector = '#cpo-root') {
@@ -1997,51 +1884,11 @@
         }
 
         isSupportedUrl(url) {
-            if (typeof url !== 'string') {
-                return false;
-            }
-
-            try {
-                const parsed = new URL(url);
-                if (parsed.protocol !== 'https:') return false;
-                const native = globalThis.CpoQueueEngine?.providerHost(parsed.hostname.toLowerCase());
-                return native === PROVIDER_CODES.claude;
-            } catch {
-                return false;
-            }
+            return typeof url==='string'&&providerSurface(this,url).supported;
         }
 
         getConversationIdentity(locationOrUrl) {
-            const urlStr = typeof locationOrUrl === 'string'
-                ? locationOrUrl
-                : (locationOrUrl?.href || String(locationOrUrl || ''));
-
-            if (!this.isSupportedUrl(urlStr)) {
-                return {
-                    provider: this.id,
-                    type: 'unsupported',
-                    conversationId: null,
-                    key: `${this.id}:unsupported`
-                };
-            }
-
-            try {
-                const parsed = new URL(urlStr);
-                const pathname = parsed.pathname || '/';
-
-                const native = nativeRoute(this.id, pathname);
-                if (native) return { provider: this.id, ...native,
-                    key: native.key };
-
-                return {provider:this.id,type:'unsupported',conversationId:null,key:this.id+':unsupported'};
-            } catch {
-                return {
-                    provider: this.id,
-                    type: 'unsupported',
-                    conversationId: null,
-                    key: `${this.id}:unsupported`
-                };
-            }
+            return providerIdentity(this,locationOrUrl);
         }
 
         getComposerFromEventTarget(target, excludeSelector = '#cpo-root') {

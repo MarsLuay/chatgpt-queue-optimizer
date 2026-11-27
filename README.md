@@ -318,3 +318,7 @@ The browser engine controls generation observation stages and canonical-stop pre
 ### Native retry selection and compatibility observation (browser ABI 14)
 
 The browser engine now controls latest-turn retry precedence, alert traversal and reverse active-surface fallback, along with required-control diagnostics and optimizer-only message discovery. The host exposes browser queries and opaque DOM objects; the queue engine continues to own semantic matching and compatibility classification. Regression coverage is included, but native compilation and live browser parity remain unverified.
+
+### Native provider surface and navigation policy (queue ABI 18)
+
+Provider host validation, route identity, conversation surface eligibility, fallback discovery and new-conversation navigation are settled together in Rust using browser-parsed URL components. ChatGPT composer/send eligibility is native, and selector matching now preserves the outer native discovery context instead of falling back to JavaScript. The browser remains responsible for WHATWG URL parsing and DOM property access. Native compilation and integration tests remain unverified.
