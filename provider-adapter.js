@@ -235,8 +235,13 @@
         };
     }
 
-    function getNodeRole(node) {
+    function getNodeRole(node, engine = null) {
         const attr = String(node?.getAttribute?.('data-message-author-role') || '').toLowerCase();
+        const flags=Number(attr==='user')|(Number(attr==='assistant')<<1)|
+            (Number(!!node?.querySelector?.('[data-message-author-role="user"]'))<<2)|
+            (Number(!!node?.querySelector?.('[data-message-author-role="assistant"]'))<<3);
+        const native=engine?.nodeRole(flags);
+        if(native!=null)return ['','user','assistant'][native]||'';
         if (attr === 'user' || attr === 'assistant') {
             return attr;
         }
@@ -272,7 +277,9 @@
         'error_stop'
     ]);
 
-    function hasAssistantErrorStop(node) {
+    function hasAssistantErrorStop(node, engine = null) {
+        const native=engine?.assistantError(node,ASSISTANT_ERROR_STATUS_ATTRIBUTES,ASSISTANT_ERROR_STATUS_VALUES);
+        if(native!=null)return native;
         if (!node || typeof node.getAttribute !== 'function') {
             return false;
         }
@@ -308,7 +315,9 @@
     ];
     const INCOMPLETE_TOOL_STATES = new Set(['active', 'incomplete', 'pending', 'running', 'waiting']);
 
-    function hasIncompleteToolTurn(node) {
+    function hasIncompleteToolTurn(node, engine = null) {
+        const native=engine?.incompleteTool(node,TOOL_TURN_SELECTORS,INCOMPLETE_TOOL_STATES,normalizeCommandText);
+        if(native!=null)return native;
         if (!node || typeof node.getAttribute !== 'function') {
             return false;
         }
@@ -1020,7 +1029,7 @@
             const assistantTurns = [];
 
             turns.forEach((node, index) => {
-                const role = getNodeRole(node);
+                const role = getNodeRole(node, this._nativeSelectorEngine);
                 // Cache only the completed history, never the last two turns.
                 // Store fingerprints, not the potentially multi-megabyte text.
                 const cacheable = this._turnScanCacheEnabled && index < turns.length - 2;
@@ -1062,7 +1071,7 @@
 
                 if (role === 'assistant') {
                     const streaming = !!(node.querySelector?.('[data-message-streaming="true"], [data-is-streaming="true"], .result-streaming'));
-                    const errorStop = hasAssistantErrorStop(node);
+                    const errorStop = hasAssistantErrorStop(node, this._nativeSelectorEngine);
                     assistantTurns.push({
                         turnId,
                         index,
@@ -1070,7 +1079,7 @@
                         fingerprint,
                         streaming,
                         hasErrorStop: errorStop,
-                        hasIncompleteToolTurn: hasIncompleteToolTurn(node),
+                        hasIncompleteToolTurn: hasIncompleteToolTurn(node, this._nativeSelectorEngine),
                         hasCompletedText: !streaming && !errorStop && hasText,
                         errorSignal
                     });
@@ -1557,7 +1566,7 @@
 
             const turns = this.getConversationTurns(doc);
             const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
-            const assistantErrorStop = getNodeRole(latestTurn) === 'assistant' && hasAssistantErrorStop(latestTurn);
+            const assistantErrorStop = getNodeRole(latestTurn, this._nativeSelectorEngine) === 'assistant' && hasAssistantErrorStop(latestTurn, this._nativeSelectorEngine);
             const turnSet = new Set(turns);
             const inActiveSurface = (node) => this.isActiveResponseNode(node, turns, latestTurn, turnSet);
 
@@ -1812,7 +1821,7 @@
 
             const hasDeliveryTimeout = this.compatibilitySignals.deliveryTimeoutMarkers.some(marker => nativeContains(alertText, marker));
             const hasGeneralError = this.compatibilitySignals.errorMarkers.some(marker => nativeContains(alertText, marker));
-            const hasErrorStop = hasAssistantErrorStop(latestTurn);
+            const hasErrorStop = hasAssistantErrorStop(latestTurn, this._nativeSelectorEngine);
             const errorSignal = this.getAssistantTurnErrorSignal(text);
             const hasError = hasDeliveryTimeout || hasGeneralError || hasErrorStop || !!errorSignal;
 
