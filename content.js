@@ -361,6 +361,8 @@
       if (request.identity != null && (request.identity !== identity || request.total !== total)) {
         return { ok: false, error: 'Conversation changed during capture. Start again.' };
       }
+      const native = this.browserEngine?.captureHistory(messages, offset);
+      if (native != null) return native.ok ? { ...native, identity, total } : native;
       const end = Math.min(total, offset + 16);
       const records = [];
       for (let index = offset; index < end; index++) {
@@ -620,7 +622,9 @@
 
     getResourceSample(messages) {
       const current = this.resourceSample;
-      if (current && current.totalTurns === messages.length && Date.now() - current.time < 8000) return current;
+      if (current && current.totalTurns === messages.length &&
+          (this.browserEngine?.cacheValid(2, current.time, true, true) ??
+            (Date.now() >= current.time && Date.now() - current.time < 8000))) return current;
       this.resourceSample = this.sampleResources(messages);
       return this.resourceSample;
     }
@@ -681,8 +685,10 @@
         if (!ready) return;
         this.provider?.setNativeMessageDiscovery?.((adapter, doc, root) =>
           engine.discover(adapter, doc, root));
+        this.provider?.setNativeLifecycle?.(engine);
         this.clearMessageCache();
         this.resourceSample = null;
+        if (this.state.optimizerBound && this.config.enabled) this.refresh();
       }).catch(error => engine.fail(error));
     }
 
@@ -1136,13 +1142,12 @@
     }
 
     getMessageNodes() {
-      if (
-        this._cachedMessages &&
-        this._cacheTimestamp &&
-        Date.now() - this._cacheTimestamp < 800 &&
-        this._cachedMessages.every(node => node.isConnected !== false)
-      ) {
-        return this._cachedMessages;
+      const cached = this._cachedMessages;
+      const connected = !!cached && cached.every(node => node.isConnected !== false);
+      if (cached && (this.browserEngine?.cacheValid(0, this._cacheTimestamp, !!this._cacheTimestamp, connected) ??
+          (!!this._cacheTimestamp && Date.now() >= this._cacheTimestamp &&
+            Date.now() - this._cacheTimestamp < 800 && connected))) {
+        return cached;
       }
 
       this.clearMessageCache();
@@ -1172,7 +1177,7 @@
 
         this._cachedMessages = messages;
         this._cacheTimestamp = Date.now();
-        this._messageCacheTimer = setTimeout(() => this.clearMessageCache(), 800);
+        this._messageCacheTimer = setTimeout(() => this.clearMessageCache(), this.browserEngine?.cacheTtl(0) ?? 800);
         // Avoid keeping a Node test process alive; browsers return a number.
         if (typeof this._messageCacheTimer?.unref === 'function') this._messageCacheTimer.unref();
 
@@ -1341,8 +1346,13 @@
       // A normal streaming token changes the contents of an existing turn,
       // but not the number or order of turns. Do not rescan the entire chat.
       const turnSelector = '[data-testid^="conversation-turn"], [data-message-author-role]';
-      let structuralChange = false;
-      for (const mutation of mutations) {
+      const nativeStructural = this.browserEngine?.mutations(mutations, 0, this.state.lastMessageCount === 0);
+      let structuralChange = nativeStructural ?? false;
+      if (nativeStructural == null) for (const mutation of mutations) {
+        if (mutation.type === 'attributes' && ['data-testid', 'data-message-author-role', 'data-message-id'].includes(mutation.attributeName)) {
+          structuralChange = true;
+          break;
+        }
         if (!mutation.addedNodes?.length && !mutation.removedNodes?.length) continue;
         const nodes = [...mutation.addedNodes, ...mutation.removedNodes];
         const bannerOnly = nodes.every(node => node?.nodeType === 1 &&
@@ -1362,6 +1372,7 @@
         return;
       }
       this.state.perf.mutationRefreshes++;
+      this.resourceSample = null;
       this.clearMessageCache();
       clearTimeout(this.refreshTimeout);
       this.refreshTimeout = setTimeout(() => {
@@ -1371,7 +1382,7 @@
           this.state.lastMessageCount = count;
           this.refresh();
         }
-      }, 700);
+      }, this.browserEngine?.mutationDelay() ?? 700);
     }
 
     createMoreBanner() {
@@ -1477,7 +1488,9 @@
       this.state.hiddenCount = startIndex;
       this.state.visibleCount = targetVisible;
 
-      messages.forEach((message, index) => {
+      const executed = this.browserEngine?.applyWindow(messages, targetVisible,
+        this.config.offscreenRendering, this.config.evictPausedMedia);
+      if (executed !== true) messages.forEach((message, index) => {
         if (index < startIndex) {
           this.hideMessage(message);
         } else {
