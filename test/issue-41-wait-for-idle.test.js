@@ -68,6 +68,7 @@ global.chrome = {
 
 require('../utils.js');
 
+require('./native-provider-fixture.js').resourceTransport();
 const {
     handleEnqueueMessage,
     handleStartSequence,

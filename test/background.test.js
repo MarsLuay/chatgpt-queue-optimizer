@@ -53,6 +53,7 @@ global.chrome = {
     }
 };
 
+require('./native-provider-fixture.js').resourceTransport();
 const { serializeError, previewText } = require('../background.js');
 
 test('serializeError - returns an empty object for falsy inputs', () => {

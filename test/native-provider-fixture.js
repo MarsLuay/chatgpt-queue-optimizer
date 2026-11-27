@@ -13,11 +13,14 @@ function attach(adapter,owner={}){
     adapter.setNativeMessageDiscovery?.((provider,doc,main)=>bridge.discover(provider,doc,main));
     return adapter;
 }
-function initialize(){
+function initializeQueue(){
     if(queue.status!=='Rust/WASM')queue.install(new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(path.join(root,'optimizer_queue.wasm'))),{}).exports);
+}
+function initialize(){
+    initializeQueue();
     for(const id of ['chatgpt','gemini','claude'])attach(registry.getProvider(id));
 }
-module.exports={initialize,attach};
+module.exports={initialize,initializeQueue,attach};
 
 // Simulate extension resource URLs using only the checked-in build outputs.
 const originalFetch=globalThis.fetch;
@@ -33,6 +36,6 @@ function resourceTransport(){
         const bytes=fs.readFileSync(path.join(root,name));
         return {ok:true,status:200,arrayBuffer:async()=>bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength)};
     };
-    if(queue.status!=='Rust/WASM')queue.install(new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(path.join(root,'optimizer_queue.wasm'))),{}).exports);
+    initializeQueue();
 }
 module.exports.resourceTransport=resourceTransport;

@@ -41,6 +41,7 @@ global.chrome = {
     }
 };
 
+require('./native-provider-fixture.js').resourceTransport();
 const { previewText } = require('../background.js');
 
 test('previewText - returns empty string for null or undefined', () => {

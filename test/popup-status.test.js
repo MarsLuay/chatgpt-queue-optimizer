@@ -8,6 +8,8 @@ global.document = {
     addEventListener() {}
 };
 
+require('./native-provider-fixture.js').initializeQueue();
+
 const {
     formatPopupRunningInstanceText,
     getPopupQueueStatusLabel,

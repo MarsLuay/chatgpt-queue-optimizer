@@ -88,6 +88,7 @@ global.chrome = {
     scripting: { executeScript: () => {} }
 };
 
+require('./native-provider-fixture.js').resourceTransport();
 const api = require('../background.js');
 
 const identity = {

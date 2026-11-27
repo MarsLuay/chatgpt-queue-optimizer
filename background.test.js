@@ -80,6 +80,7 @@ global.chrome = {
   }
 };
 
+require('./test/native-provider-fixture.js').resourceTransport();
 const {
   sanitizeLogValue,
   logQueueEvent,

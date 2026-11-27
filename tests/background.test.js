@@ -49,7 +49,14 @@ const sandbox = {
     String: String
 };
 
+// Match the extension's dependency order in the isolated VM. The native
+// queue engine is installed synchronously before evaluating the background.
+Object.assign(sandbox,{TextEncoder,TextDecoder,WebAssembly,fetch,Uint8Array,Uint16Array,ArrayBuffer,DataView});
 vm.createContext(sandbox);
+for(const file of ['utils.js','rust-queue-bridge.js','rust-browser-bindings.js','rust-browser-bridge.js']){
+    vm.runInContext(fs.readFileSync(path.join(__dirname,'..',file),'utf8'),sandbox,{filename:file});
+}
+sandbox.CpoQueueEngine.install(new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(path.join(__dirname,'..','optimizer_queue.wasm'))),{}).exports);
 
 // Load background.js into the sandbox
 const backgroundCode = fs.readFileSync(path.join(__dirname, '../background.js'), 'utf8');

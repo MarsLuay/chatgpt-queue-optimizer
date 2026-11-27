@@ -122,11 +122,21 @@ test('native provider routing and marker matching preserve legacy identities', {
     ];
     const oldEngine = globalThis.CpoQueueEngine;
     try {
-        globalThis.CpoQueueEngine = undefined;
-        const expected = urls.map(url => registry.getConversationIdentity(url));
         engine.install(instance.exports);
         globalThis.CpoQueueEngine = engine;
-        assert.deepEqual(urls.map(url => registry.getConversationIdentity(url)), expected);
+        const identity=(provider,type,conversationId=null)=>({provider,type,conversationId,key:conversationId?provider+':c:'+conversationId:provider+':'+type});
+        const expected=[
+            identity('chatgpt','new'),identity('chatgpt','existing','abc-1'),
+            identity('chatgpt','existing','abc'),identity('chatgpt','new'),
+            identity('chatgpt','unsupported'),identity('chatgpt','unsupported'),
+            identity('gemini','new'),identity('gemini','existing','abc'),
+            identity('gemini','new'),identity('gemini','existing','xyz'),
+            identity('gemini','existing','app'),identity('gemini','unsupported'),
+            identity('claude','new'),identity('claude','existing','abc'),identity('claude','existing','abc'),
+            identity('claude','unsupported'),identity('claude','unsupported'),
+            identity('unknown','unsupported'),identity('unknown','unsupported')
+        ];
+        assert.deepEqual(urls.map(url=>registry.getConversationIdentity(url)),expected);
         const marker = 'deep research';
         for (const offset of [0, 1000, 1010, 1020, 2030, 10000]) {
             assert.equal(engine.contains('x'.repeat(offset)+marker+'x',marker),true);
