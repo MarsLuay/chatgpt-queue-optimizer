@@ -4349,7 +4349,8 @@ function flushQueueDebugLogs() {
             }
 
             const logs = Array.isArray(data[QUEUE_DEBUG_LOG_KEY]) ? data[QUEUE_DEBUG_LOG_KEY] : [];
-            const nextLogs = [...logs, ...entries]
+            const start=globalThis.CpoQueueEngine?.call('cpo_log_keep_start',[logs.length,entries.length,MAX_QUEUE_DEBUG_LOG_ENTRIES])??Math.max(0,logs.length+entries.length-MAX_QUEUE_DEBUG_LOG_ENTRIES);
+            const nextLogs = [...logs.slice(Math.min(start,logs.length)), ...entries.slice(Math.max(0,start-logs.length))]
                 .map((entry) => ({
                     ...entry,
                     details: sanitizeLogValue(entry?.details)
@@ -4405,6 +4406,9 @@ function writeLocalStorage(items) {
 async function getQueueSettings() {
     try {
         const data = await readSyncStorage(QUEUE_SETTINGS_DEFAULTS);
+        await globalThis.CpoQueueEngine?.load();
+        const native=globalThis.CpoQueueEngine?.settings({...QUEUE_SETTINGS_DEFAULTS,...data},'queue');
+        if(native)return native;
 
         /** @type {QueueSettings} */
         const settings = {
@@ -4547,6 +4551,8 @@ function isSensitiveLogKey(key) {
     if (!normalized) {
         return false;
     }
+    const native=globalThis.CpoQueueEngine?.sensitiveKey(normalized);
+    if(native!=null)return native===1;
     if (
         normalized === 'currentmessage' ||
         normalized === 'text' ||
@@ -4643,7 +4649,8 @@ function sanitizeLogValue(value, depth = 0, key = '') {
     }
 
     if (typeof value === 'string') {
-        return value.length > 700 ? `${value.slice(0, 697)}...` : value;
+        const limit=globalThis.CpoQueueEngine?.call('cpo_log_limit',[0,depth,value.length])??(value.length>700?697:value.length);
+        return value.length>limit?value.slice(0,limit)+'...':value;
     }
 
     if (typeof value === 'number' || typeof value === 'boolean') {
@@ -4655,7 +4662,7 @@ function sanitizeLogValue(value, depth = 0, key = '') {
             return `[${value.length} items]`;
         }
 
-        return value.slice(0, 12).map(item => sanitizeLogValue(item, depth + 1));
+        return value.slice(0, globalThis.CpoQueueEngine?.call('cpo_log_limit',[1,depth,value.length])??12).map(item => sanitizeLogValue(item, depth + 1));
     }
 
     if (typeof value === 'object') {
@@ -4664,7 +4671,8 @@ function sanitizeLogValue(value, depth = 0, key = '') {
         }
 
         const clean = {};
-        const entries = Object.entries(value).slice(0, 30);
+        const allEntries=Object.entries(value);
+        const entries = allEntries.slice(0,globalThis.CpoQueueEngine?.call('cpo_log_limit',[2,depth,allEntries.length])??30);
 
         for (const [entryKey, item] of entries) {
             if (typeof item === 'function' || item === undefined) continue;
