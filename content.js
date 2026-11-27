@@ -149,7 +149,7 @@
       switch (message.type) {
         case 'GET_NATIVE_SUBMISSION_CAPABILITY':
           Promise.resolve(this.loadRustBrowserEngine()).then(ready =>
-            sendResponse({ ok: !!ready && !!this.provider, nativeSubmission: !!ready && !!this.provider }),
+            sendResponse({ ok: !!ready && !!this.provider && !!this.browserEngine?.exports, nativeSubmission: !!ready && !!this.provider && !!this.browserEngine?.exports }),
             () => sendResponse({ ok: false, nativeSubmission: false }));
           break;
 
