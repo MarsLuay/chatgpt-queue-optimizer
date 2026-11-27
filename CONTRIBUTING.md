@@ -9,7 +9,7 @@ For normal extension development you need:
 - Git.
 - Node.js 18+ with npm, including the built-in `node --test` test runner.
 - Google Chrome for testing the primary Manifest V3 build.
-- Python 3 only when building browser/store packages or generating the Firefox source.
+- Python 3 and Rust (rustup, with the `wasm32-unknown-unknown` target) for building the optimizer WASM and browser/store packages.
 - Firefox 140+ when testing the generated Firefox build.
 
 Install development dependencies from the repository root before running lint, typecheck, or the combined verification command:
@@ -18,7 +18,13 @@ Install development dependencies from the repository root before running lint, t
 npm install
 ```
 
-The extension still loads unpacked from the repository root. There is no required transpile or bundle step.
+Build the local Rust module before loading the unpacked extension or running the WASM integration tests:
+
+```bash
+python Installers/build_optimizer.py
+```
+
+The extension loads unpacked from the repository root after this build. JavaScript does not require transpilation. Browser packages compile the Rust module automatically.
 
 ## Development setup
 
@@ -74,7 +80,9 @@ The generated Firefox package requires Firefox 140 or newer. Temporary add-ons a
 - `manifest.json` - primary Chrome Manifest V3 manifest.
 - `background.js` - service worker and queue orchestration.
 - `background.test.js` - Node tests for background behavior.
-- `content.js` - ChatGPT page integration and DOM interaction.
+- `content.js` - ChatGPT page integration, DOM interaction and WASM bridge.
+- `rust/optimizer_core.rs` - dependency-free Rust window policy and native unit tests.
+- `Installers/build_optimizer.py` - reproducible local WASM build.
 - `utils.js` - shared extension utilities.
 - `popup.html` / `popup.js` - queue, settings, logging, and optimizer UI.
 - `options.html` - extension options/about page.
