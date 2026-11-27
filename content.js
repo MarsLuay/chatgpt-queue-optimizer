@@ -112,9 +112,19 @@
       }
 
       if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
-        chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-          this.handleMessage(message, sender, sendResponse);
-          return true;
+        globalThis.CpoBrowserApi.listen(async(message,sender,sendResponse)=>{
+          const kinds={CHECK_GENERATION_STATE:1,GET_COMMAND_TURN_SNAPSHOT:1,GET_COMMAND_RESPONSE_STATE:1,
+            INSPECT_GENERATION_STATE:1,CLICK_RETRY_BUTTON:2,NATIVE_SUBMIT_PROMPT:2,
+            CPO_HISTORY_BATCH:3,CAN_DISCARD_INACTIVE_TAB:4};
+          const kind=kinds[message?.type];
+          if(kind){
+            const [browserReady,queueReady]=await Promise.all([this.loadRustBrowserEngine(),globalThis.CpoQueueEngine?.load()]);
+            if(!browserReady||this.browserEngine?.eventReady(kind,queueReady)!==true){
+              sendResponse({ok:false,safe:false,error:'Required Rust browser event engine unavailable.'});
+              return;
+            }
+          }
+          this.handleMessage(message,sender,sendResponse);
         });
       }
     }
@@ -223,7 +233,7 @@
               compatibility: this.getCompatibilityDiagnostics(),
               enterDiagnostics: this.state.enterDiagnostics || [],
               browserEngine: this.browserEngine?.status || 'not loaded',
-              optimizerEngine: this.nativeCoreState === 'Rust/WASM' ? 'Rust/WASM' : 'JavaScript fallback (' + (this.nativeCoreState || 'not loaded') + ')',
+              optimizerEngine: this.nativeCoreState === 'Rust/WASM' ? 'Rust/WASM' : 'Unavailable (' + (this.nativeCoreState || 'not loaded') + ')',
               resources: this.getResourceDiagnostics(messages),
               performance: { ...this.state.perf }
             }
@@ -746,9 +756,7 @@
           if(next===3)return failure('composer','Composer changed while queued message was pending; draft preserved.',{composerConflict:true,deferred:true,draftPreserved:true});
           return failure('sendButton','Send action unavailable, disabled, or target changed.',restore());
         }
-        const authorized=await extensionApiPromise(
-          done=>chrome.runtime.sendMessage({action:'authorizeNativeQueueClick',token:message.token},done),
-          ()=>chrome.runtime.sendMessage({action:'authorizeNativeQueueClick',token:message.token}));
+        const authorized=await globalThis.CpoBrowserApi.invoke('runtimeSend',{action:'authorizeNativeQueueClick',token:message.token});
         if(!authorized?.ok||engine.submitStage(1,stageFlags())!==6||
           provider.getSendActionMatch(document)?.element!==button)
           return failure('submission','Queue authorization or composer state changed before click.',restore());
@@ -772,7 +780,9 @@
         return;
       }
 
+      const epoch=(this.optimizerBindEpoch||0)+1;this.optimizerBindEpoch=epoch;
       const ready=await Promise.all([this.loadRustCore(),this.loadRustBrowserEngine()]);
+      if(this.optimizerBindEpoch!==epoch)return;
       if(!ready.every(Boolean)||!this.nativeCore||!this.browserEngine?.exports){
         this.unbindOptimizer();
         console.warn('CPO: Optimizer disabled because required Rust engines are unavailable.');
@@ -788,6 +798,7 @@
     }
 
     unbindOptimizer() {
+      this.optimizerBindEpoch=(this.optimizerBindEpoch||0)+1;
       this.provider?.setTurnScanCacheEnabled?.(false);
       this.disable();
       this.clearConversationRoot();
