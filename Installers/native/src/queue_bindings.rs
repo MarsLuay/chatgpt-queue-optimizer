@@ -295,6 +295,20 @@ const HOST:&str=r####"(() => {
         }
         function read(id, field, index=0) {
             return native(e=>{
+                if(field<fields.size&&(field!==queueField||index!==NONE)){
+                    // Synchronous borrowed view: no WASM call, await, user
+                    // callback or retained memory view during decoding.
+                    const packed=e.cpo_live_read_view(id,field,index);
+                    if(packed===0n)return undefined;
+                    const ptr=Number(packed&0xffffffffn),length=Number(packed>>32n);
+                    const bytes=new Uint8Array(e.memory.buffer,ptr,length);
+                    if(length===4&&bytes[0]===116&&bytes[1]===114&&bytes[2]===117&&bytes[3]===101)return true;
+                    if(length===5&&bytes[0]===102&&bytes[1]===97&&bytes[2]===108&&bytes[3]===115&&bytes[4]===101)return false;
+                    if(length===4&&bytes[0]===110&&bytes[1]===117&&bytes[2]===108&&bytes[3]===108)return null;
+                    if(length===2&&bytes[0]===34&&bytes[1]===34)return '';
+                    if(length===1&&bytes[0]>=48&&bytes[0]<=57)return bytes[0]-48;
+                    return JSON.parse(decoder.decode(bytes));
+                }
                 const size=e.cpo_live_read(id,field,index)>>>0;
                 if(!size)return undefined;
                 try {
@@ -336,6 +350,7 @@ const HOST:&str=r####"(() => {
                     const field=fields.get(key);if(field===undefined||field===queueField)throw new Error('Invalid job patch field: '+key);
                     return [field,value===undefined?new Uint8Array(0):encoder.encode(JSON.stringify(value))];
                 });
+                if(!entries.length)return e.cpo_live_transaction_empty(id,op,arg,now)===1;
                 const length=entries.reduce((sum,[,bytes])=>sum+8+bytes.length,0);
                 const ptr=e.cpo_live_input(length)>>>0;if(!ptr)throw new Error('Native transaction too large');
                 const view=new DataView(e.memory.buffer,ptr,length);
@@ -395,7 +410,7 @@ const HOST:&str=r####"(() => {
                         if(remove!==0||!Number.isInteger(index)||index<0||index>len())throw new Error('Unsupported queue splice');
                         add(3,index,values);return [];
                     };
-                    if(typeof key==='string'&&/^(0|[1-9]\d*)$/.test(key))return Number(key)<len()?at(Number(key)):undefined;
+                    if(typeof key==='string'&&/^(0|[1-9]\d*)$/.test(key)){const index=Number(key);return index<NONE?at(index):undefined;}
                     return Reflect.get(_target,key);
                 },
                 set(){throw new Error('Native queue cannot be assigned by index');}

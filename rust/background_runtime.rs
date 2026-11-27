@@ -37,7 +37,9 @@ impl ResponseWait{
         let changed=force||self.research_preview!=preview;
         if changed{
             self.research_preview.fill(0);
-            self.research_preview=preview;
+            if self.research_preview.capacity()<=4096{
+                self.research_preview.clear();self.research_preview.extend_from_slice(&preview);
+            }else{self.research_preview=preview;return changed;}
         }
         changed
     }

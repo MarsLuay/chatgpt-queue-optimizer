@@ -901,7 +901,7 @@ mod live_state {
     fn quoted(text:&str)->Vec<u8>{let mut v=Vec::with_capacity(text.len()+2);v.push(b'"');v.extend_from_slice(text.as_bytes());v.push(b'"');v}
     // Patch wire: repeated field index, byte length, JSON scalar bytes.
     // Parse the entire frame before any state mutation.
-    fn patch(input:&[u8])->Option<Vec<(usize,Option<Vec<u8>>)>>{
+    fn patch(input:&[u8])->Option<Vec<(usize,Option<&[u8]>)>>{
         let mut at=0;let mut out=Vec::new();
         while at<input.len(){
             let idx=u32::from_le_bytes(input.get(at..at+4)?.try_into().ok()?) as usize;
@@ -909,7 +909,7 @@ mod live_state {
             at+=8;let end=at.checked_add(len)?;
             if idx==QUEUE||idx>super::DURABLE_FIELDS.len(){return None;}
             let value=input.get(at..end)?;
-            out.push((idx,if len==0{None}else{Some(value.to_vec())}));at=end;
+            out.push((idx,if len==0{None}else{Some(value)}));at=end;
         }
         Some(out)
     }
@@ -1194,7 +1194,13 @@ mod live_state {
         // Atomic length-prefixed queue update. The host supplies JSON string
         // bytes so ECMAScript lone-surrogate semantics remain unchanged.
         fn bulk(&mut self,id:u32,op:u32,index:u32)->u32 {
-            let input=std::mem::take(&mut self.input);
+            let mut input=std::mem::take(&mut self.input);
+            let result=self.bulk_frame(id,op,index,&input);
+            input.fill(0);input.clear();
+            if input.capacity()<=256*1024{self.input=input;}
+            result
+        }
+        fn bulk_frame(&mut self,id:u32,op:u32,index:u32,input:&[u8])->u32 {
             let Some(job)=self.jobs.get_mut(&id) else{return 0;};
             if !matches!(op,1..=3)||op==3&&index as usize>job.queue.len(){return 0;}
             let mut items=Vec::new();let mut at=0usize;
@@ -1648,7 +1654,7 @@ mod live_state {
                 },
                 _=>return false
             }
-            if op==0{for (i,v) in fields{job.fields[i]=v;}}
+            if op==0{for (i,v) in fields{if job.fields[i].as_deref()!=v{if let Some(old)=job.fields[i].as_mut(){old.fill(0);}job.fields[i]=v.map(<[u8]>::to_vec);}}}
             if op!=1&&op!=11{job.set("updatedAt",now.to_string().as_bytes());}
             self.changed(id);true
         }
@@ -1710,6 +1716,20 @@ mod live_state {
                 else{super::command_identity::fingerprint_json(&text)?};
             let mut out=b"{\"text\":".to_vec();out.extend_from_slice(&text);
             out.extend_from_slice(b",\"fingerprint\":");out.extend_from_slice(&fp);out.push(b'}');Some(out)
+        }
+        // Borrow an individual immutable JSON value directly. The caller
+        // must consume it synchronously, before any subsequent WASM call.
+        // Low 32 bits: address, high 32 bits: byte count. Zero means absent.
+        #[cfg(target_arch="wasm32")]
+        fn read_view(&self,id:u32,field:u32,index:u32)->u64{
+            let Some(job)=self.jobs.get(&id)else{return 0;};
+            let bytes=if field as usize==QUEUE{
+                if index==u32::MAX{return 0;}
+                job.queue.get(index as usize).map(Vec::as_slice)
+            }else{job.fields.get(field as usize).and_then(Option::as_deref)};
+            let Some(bytes)=bytes else{return 0;};
+            if bytes.is_empty(){return 0;}
+            ((bytes.len() as u64)<<32)|(bytes.as_ptr() as u32 as u64)
         }
         // Bitmask selects only requested scalar fields. Never materialize
         // pending prompts or unrelated metadata for a hot-path read.
@@ -1850,6 +1870,15 @@ mod live_state {
     #[no_mangle]
     pub extern "C" fn cpo_live_transaction(id:u32,op:u32,arg:u32,now:f64)->u32{
         STORE.with(|s|s.borrow_mut().transaction(id,op,arg,now) as u32)
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_live_transaction_empty(id:u32,op:u32,arg:u32,now:f64)->u32{
+        STORE.with(|s|s.borrow_mut().transaction_frame(id,op,arg,now,&[]) as u32)
+    }
+    #[cfg(target_arch="wasm32")]
+    #[no_mangle]
+    pub extern "C" fn cpo_live_read_view(id:u32,field:u32,index:u32)->u64{
+        STORE.with(|s|s.borrow().read_view(id,field,index))
     }
     #[no_mangle]
     pub extern "C" fn cpo_live_read(id: u32, field: u32, index: u32) -> u32 {

@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 41);
+    assert.equal(e.cpo_queue_abi(), 42);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -986,4 +986,17 @@ test('hot-path selective reads and native poll admission avoid full queue copies
     jobs.waitControl(job,lease,2);
     assert.equal(jobs.pollAdmit(job,lease,0,12000,1000,10000,20000,5000),3);
     jobs.delete(7);assert.equal(jobs.pollAdmit(job,lease,0,1200,1000,10000,20000,5000),1);
+});
+
+
+test('borrowed native reads preserve scalar and queue values without copying into output',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});engine.install(instance.exports);
+    const jobs=engine.createLiveJobs();jobs.set(7,{tabId:7,isRunning:true,isPaused:false,currentMessage:null,runId:'',completedCount:3,queue:['a\ud800🌍','second']});
+    const job=jobs.get(7);
+    assert.equal(job.isRunning,true);assert.equal(job.isPaused,false);assert.equal(job.currentMessage,null);
+    assert.equal(job.runId,'');assert.equal(job.completedCount,3);assert.equal(job.queue[0],'a\ud800🌍');
+    assert.equal(job.queue[100],undefined);assert.equal(job.queue[4294967295],undefined);
+    assert.equal(job.commandId,undefined);job.commandId='new';assert.equal(job.commandId,'new');
+    jobs.transaction(job,1,4);assert.equal(job.commandId,'');assert.deepEqual([...job.queue],['a\ud800🌍','second']);
+    jobs.delete(7);assert.equal(job.commandId,undefined);
 });
