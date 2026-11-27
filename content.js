@@ -123,6 +123,9 @@
       try {
         const stored = await storageSyncGet(this.config);
         this.config = { ...this.config, ...stored };
+        // Normalize loaded values once native policy becomes available.
+        await globalThis.CpoQueueEngine?.load();
+        Object.assign(this.config,globalThis.CpoQueueEngine?.settings(this.config)??{});
       } catch (error) {
         console.warn('CPO: Could not load config, using defaults', error);
       }
@@ -178,6 +181,7 @@
           const mediaChanged = Object.prototype.hasOwnProperty.call(message.config || {}, 'evictPausedMedia') &&
             message.config.evictPausedMedia !== this.config.evictPausedMedia;
           this.config = { ...this.config, ...message.config };
+          Object.assign(this.config,globalThis.CpoQueueEngine?.settings(this.config)??{});
           if (mediaChanged && this.state.container) {
             for (const message of this.state.container.querySelectorAll('.cpo-hidden')) {
               if (this.config.evictPausedMedia) this.evictPlayback(message);
