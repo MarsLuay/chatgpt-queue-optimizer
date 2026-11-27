@@ -1471,9 +1471,13 @@
       let targetVisible;
       if (this.config.adaptiveBudget === true) {
         this.state.adaptiveTarget = this.policyAdaptiveTarget(messages);
-        targetVisible = Math.min(totalMessages, Math.max(this.state.adaptiveTarget, this.state.manualVisibleCount || 0));
-        if (targetVisible < this.state.visibleCount && !this.canShrinkAdaptiveWindow(messages)) {
-          targetVisible = Math.min(totalMessages, this.state.visibleCount);
+        const manual = this.state.manualVisibleCount || 0;
+        const previous = this.state.visibleCount || 0;
+        targetVisible = this.browserEngine?.windowVisible(totalMessages, this.state.adaptiveTarget, manual, previous, true) ??
+          Math.min(totalMessages, Math.max(this.state.adaptiveTarget, manual));
+        if (targetVisible < previous && !this.canShrinkAdaptiveWindow(messages)) {
+          targetVisible = this.browserEngine?.windowVisible(totalMessages, this.state.adaptiveTarget, manual, previous, false) ??
+            Math.min(totalMessages, previous);
         }
       } else {
         this.state.adaptiveTarget = 0;
