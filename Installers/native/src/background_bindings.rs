@@ -1794,9 +1794,7 @@ async function handleProcessWaitForIdle(tabId, job) {
 }
 
 async function handleProcessSending(tabId, job) {
-    const prompt=job.queue[0];
-    const number=Number(job.completedCount||0)+1;
-    jobs.transaction(job,7,0,{currentMessage:prompt,commandId:`${job.runId||'run'}:${number}`,commandFingerprint:fingerprintCommandTextForJob(prompt)});
+    jobs.transaction(job,17);
     const totalMessages = getTotalMessages(job);
     const queueSettings = await getQueueSettings();
 
@@ -1844,7 +1842,7 @@ async function handleProcessSending(tabId, job) {
         return { action: 'return' };
     }
 
-    jobs.transaction(job,0,0,{currentPhase:'awaiting-response',deliveryState:'confirmed-submission',submittedUserTurnId:sendResult.details?.userTurnId||job.submittedUserTurnId||null,submissionAckSource:sendResult.details?.submissionAckSource||job.submissionAckSource||'',commandFingerprint:sendResult.details?.commandFingerprint||job.commandFingerprint});
+    jobs.transaction(job,18,3,{submittedUserTurnId:sendResult.details?.userTurnId||null,submissionAckSource:sendResult.details?.submissionAckSource||'',commandFingerprint:sendResult.details?.commandFingerprint||''});
     await updateRunningJobsStorage({ force: true });
 
     logQueueEvent(tabId, 'success', `Submitted command ${job.currentCommandNumber}/${totalMessages}.`, {
@@ -2394,15 +2392,14 @@ async function waitForSubmissionAck(tabId, { expectedText, beforeSnapshot, timeo
     if(supportsTurnAck&&!baseline)return {ok:false,error:'Native submission baseline unavailable.',details:{failureClass:'submission-unconfirmed'}};
     try{
     if (job) {
-        await persistCommandDelivery(tabId, job, {
-            currentPhase: 'awaiting-submission-ack',
-            deliveryState: 'unknown-acceptance'
-        });
+        if(jobs.processing(job,2)!==1)return {ok:false,error:'Queue ownership changed.',details:{failureClass:'user-stop'}};
+        jobs.transaction(job,18,0);
+        await updateRunningJobsStorage({force:true});
     }
 
     while (true) {
         const liveJob = jobs.get(tabId);
-        const cancelled = !!(job && liveJob !== job) || !!(liveJob && (liveJob.isStopped || liveJob.isPaused || !liveJob.isRunning));
+        const cancelled = job ? jobs.processing(job,2)!==1 : !!liveJob;
         const elapsed = Date.now() - startedAt;
         const poll = globalThis.CpoQueueEngine?.numeric('cpo_submission_poll', [elapsed, timeout, Number(cancelled)]) ??
             0;
@@ -2430,16 +2427,15 @@ async function waitForSubmissionAck(tabId, { expectedText, beforeSnapshot, timeo
             const selected=workerCollection(5,baseline,fields);
             if(selected==null)return {ok:false,error:'Native submission acknowledgment unavailable.',details:{failureClass:'submission-unconfirmed'}};
             const matched=selected>0?turns[selected-1]:null;
-            if (job && (jobs.get(tabId) !== job || job.isPaused || job.isStopped || !job.isRunning)) continue;
+            if(job?jobs.processing(job,2)!==1:!!jobs.get(tabId))continue;
 
             if (matched) {
                 if (liveJob) {
-                    await persistCommandDelivery(tabId, liveJob, {
-                        deliveryState: 'confirmed-submission',
-                        submittedUserTurnId: matched.turnId,
-                        submissionAckSource: inspected.source || 'user-turn',
-                        commandFingerprint: matched.fingerprint || liveJob.commandFingerprint
-                    });
+                    if(jobs.processing(liveJob,2)!==1)return {ok:false,error:'Queue ownership changed.',details:{failureClass:'user-stop'}};
+                    jobs.transaction(liveJob,18,1,{submittedUserTurnId:matched.turnId,
+                        submissionAckSource:inspected.source||'user-turn',commandFingerprint:matched.fingerprint||''});
+                    await updateRunningJobsStorage({force:true});
+                    if(jobs.processing(liveJob,2)!==1)return {ok:false,error:'Queue ownership changed.',details:{failureClass:'user-stop'}};
                 }
                 return {
                     ok: true,
@@ -2458,13 +2454,13 @@ async function waitForSubmissionAck(tabId, { expectedText, beforeSnapshot, timeo
                 const response = await sendTabMessage(tabId, { type: 'CHECK_GENERATION_STATE' });
                 const state = response?.state || {};
                 const generating = !!(state.generating || state.deepResearchActive);
-                if (job && (jobs.get(tabId) !== job || job.isPaused || job.isStopped || !job.isRunning)) continue;
+                if(job?jobs.processing(job,2)!==1:!!jobs.get(tabId))continue;
                 if ((globalThis.CpoQueueEngine?.call('cpo_submission_ack', [Number(generating) << 4]) ?? 0) === 2) {
                     if (liveJob) {
-                        await persistCommandDelivery(tabId, liveJob, {
-                            deliveryState: 'confirmed-submission',
-                            submissionAckSource: 'generation-started'
-                        });
+                        if(jobs.processing(liveJob,2)!==1)return {ok:false,error:'Queue ownership changed.',details:{failureClass:'user-stop'}};
+                        jobs.transaction(liveJob,18,2);
+                        await updateRunningJobsStorage({force:true});
+                        if(jobs.processing(liveJob,2)!==1)return {ok:false,error:'Queue ownership changed.',details:{failureClass:'user-stop'}};
                     }
                     return {
                         ok: true,

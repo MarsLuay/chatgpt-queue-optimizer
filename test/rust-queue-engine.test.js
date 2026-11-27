@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 31);
+    assert.equal(e.cpo_queue_abi(), 32);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -840,4 +840,20 @@ test('native wait settlement and research progress stay scoped to live owners',{
     assert.equal(jobs.waitControl(job,lease,8,8|16|32,2,1400),4);
     assert.equal(jobs.waitControl(job,lease,8,8|16|32,2,1500),260);
     jobs.waitControl(job,lease,6);assert.equal(jobs.waitProgress(job,lease,6,'stale',1600),null);
+});
+
+
+test('native command claim computes exact identity without host prompt transfer',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});engine.install(instance.exports);
+    const jobs=engine.createLiveJobs();const prompt='  a\t\ud800🌍\n b  ';
+    jobs.set(7,{tabId:7,runId:'run"\\id',queue:[prompt,'next'],completedCount:4,isRunning:true});
+    const job=jobs.get(7),rev=jobs.revision();jobs.transaction(job,17);
+    assert.equal(jobs.revision(),rev+1);assert.equal(job.currentMessage,prompt);assert.equal(job.commandFingerprint,legacy(prompt));
+    assert.equal(job.commandId,'run"\\id:5');assert.equal(job.currentCommandNumber,5);assert.deepEqual([...job.queue],['next']);
+    assert.throws(()=>jobs.transaction(job,17));assert.equal(job.currentMessage,prompt);
+    jobs.transaction(job,18,0);assert.equal(job.deliveryState,'unknown-acceptance');
+    jobs.transaction(job,18,1,{submittedUserTurnId:'user-1',submissionAckSource:'user-turn'});
+    jobs.transaction(job,18,3);assert.equal(job.currentPhase,'awaiting-response');assert.equal(job.submittedUserTurnId,'user-1');
+    assert.equal(job.commandFingerprint,legacy(prompt));
+    jobs.delete(7);assert.throws(()=>jobs.transaction(job,18,3));
 });

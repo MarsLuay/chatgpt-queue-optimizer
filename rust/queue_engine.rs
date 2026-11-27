@@ -5,6 +5,7 @@ mod queue_schema;
 mod background_controller;
 pub use background_controller::*;
 mod background_runtime;
+mod command_identity;
 mod recovery_effects;
 pub use recovery_effects::cpo_worker_outcome;
 mod background_schedule;
@@ -1410,6 +1411,43 @@ mod live_state {
                     if arg==0{job.set("currentPhase",b"\"waiting-for-idle\"");}
                     else if arg==1{job.set("waitForIdleBeforeSend",FALSE);job.set("currentPhase",b"\"queued\"");}
                     else{return false;}
+                },
+                17=>{ // Claim the exact native queue head, without host copies.
+                    if !job.truth("isRunning")||job.truth("isPaused")||job.truth("isStopped")||
+                        job.truth("currentMessage")||job.truth("waitForIdleBeforeSend")||job.truth("rolloverInProgress"){return false;}
+                    let Some(prompt)=job.queue.front()else{return false;};
+                    let Some(fp)=super::command_identity::fingerprint_json(prompt)else{return false;};
+                    let n=job.num("completedCount").saturating_add(1);
+                    let Some(cid)=super::command_identity::command_id(job.get("runId"),n)else{return false;};
+                    // Every fallible validation precedes the mutation.
+                    let prompt=job.queue.pop_front().unwrap();
+                    job.fields[field("currentMessage")]=Some(prompt);
+                    job.set("currentCommandNumber",n.to_string().as_bytes());
+                    job.set("lastError",EMPTY);job.set("currentPhase",b"\"sending\"");job.reset(6);
+                    job.set("deliveryState",b"\"pre-click\"");
+                    job.set("commandFingerprint",&fp);job.set("commandId",&cid);
+                },
+                18=>{ // Submission acknowledgment, atomically preserving prior IDs.
+                    if !job.truth("isRunning")||job.truth("isPaused")||job.truth("isStopped"){return false;}
+                    match arg{
+                        0=>{job.set("currentPhase",b"\"awaiting-submission-ack\"");job.set("deliveryState",b"\"unknown-acceptance\"");},
+                        1|2=>{
+                            if arg==1&&!value("submittedUserTurnId").is_some_and(present){return false;}
+                            job.set("deliveryState",b"\"confirmed-submission\"");
+                            for name in ["submittedUserTurnId","submissionAckSource","commandFingerprint"]{
+                                if let Some(v)=value(name){if present(v){job.set(name,v);}}
+                            }
+                            if arg==2{job.set("submissionAckSource",b"\"generation-started\"");}
+                        },
+                        3=>{
+                            if !job.truth("currentMessage"){return false;}
+                            job.set("currentPhase",b"\"awaiting-response\"");job.set("deliveryState",b"\"confirmed-submission\"");
+                            for name in ["submittedUserTurnId","submissionAckSource","commandFingerprint"]{
+                                if let Some(v)=value(name){if present(v){job.set(name,v);}}
+                            }
+                        },
+                        _=>return false
+                    }
                 },
                 _=>return false
             }
