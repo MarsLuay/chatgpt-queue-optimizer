@@ -43,7 +43,14 @@ From the repository root in PowerShell:
 
 The launcher prompts for `1. Firefox` or `2. Chromium` before building and
 installs into only the selected browser. Explicit command-line selection skips
-the prompt. Google Chrome and installing both browsers (`-Browser All`) remain
+the prompt. The batch window stays open after success or failure until you
+press a key, then returns the installer exit code. Packaging output and browser
+setup diagnostics (including stderr, failing setup stage, per-browser exit
+codes and total elapsed time) stream to the console and are retained in a
+unique timestamped `build/logs/install-local-*.log` file for each run. The
+exact log path is printed at the beginning and end of the run. If PowerShell
+cannot start or initialize logging, the batch still pauses and displays the
+failure; in that case a log may not exist. Google Chrome and installing both browsers (`-Browser All`) remain
 available only through explicit command-line selection:
 
 ```powershell
