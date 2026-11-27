@@ -15,6 +15,7 @@
     let meta = null;
     let pageStart = 0;
     let historyStore = null;
+    let ui = null;
     let busy = false;
     let renderEpoch = 0;
 
@@ -55,29 +56,15 @@
         const result = await historyStore.page(pageStart);
         if (epoch !== renderEpoch) return;
         meta = result.current || null;
-        el('turns').replaceChildren();
         if (!meta?.complete) {
+            el('turns').replaceChildren();
             el('page').textContent = 'No completed snapshot';
             updateButtons();
             return;
         }
         pageStart = result.start;
-        for (const row of result.records) {
-            const article = document.createElement('article');
-            article.className = 'turn';
-            const label = document.createElement('h2');
-            label.textContent = (row.index + 1) + '. ' + row.role;
-            const body = document.createElement('p');
-            body.textContent = row.text;
-            article.append(label, body);
-            if (row.truncated) {
-                const notice = document.createElement('p');
-                notice.className = 'notice';
-                notice.textContent = 'This turn was truncated by the snapshot limit.';
-                article.append(notice);
-            }
-            el('turns').append(article);
-        }
+        const rows=result.records.map(row=>({fields:[(row.index+1)+'. '+row.role,row.text],flags:Number(!!row.truncated)}));
+        if(ui.renderUI(6,el('turns'),rows)!==true)throw new Error('Native history renderer failed. Reopen the reader.');
         el('page').textContent = (meta.count ? pageStart + 1 : 0) + '–' +
             Math.min(pageStart + PAGE_SIZE, meta.count) + ' of ' + meta.count;
         setStatus('Saved ' + new Date(meta.created).toLocaleString() + ' · ' +
@@ -197,11 +184,13 @@
             };
             db = await request(open);
             historyStore = new globalThis.CpoHistoryStore(db);
-            await historyStore.load();
+            ui=new globalThis.CpoRustBrowserBridge(null);
+            const ready=await Promise.all([historyStore.load(),ui.load()]);
+            if(!historyStore.core||!ready[1])throw new Error('Required Rust history modules unavailable. Rebuild the extension.');
             await renderPage();
             if (!meta?.complete) setStatus(meta ? 'An incomplete snapshot exists. Delete it or capture again.' : 'No saved snapshot. Capture a loaded conversation to begin.');
-        } catch { setStatus('Local history storage could not be opened or is unavailable in this private context.'); }
-        finally { busy = false; updateButtons(); if (!db) captureButton.disabled = true; }
+        } catch(error) { setStatus(error?.message||'Local history storage could not be opened.'); }
+        finally { busy = false; updateButtons(); if (!db||!historyStore?.core||!ui?.exports) { for(const button of [captureButton,discardButton,originalButton,deleteButton,prevButton,nextButton])button.disabled=true; } }
     }
     init();
 })();
