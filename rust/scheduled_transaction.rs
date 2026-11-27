@@ -59,7 +59,7 @@ fn patch(raw:&[u8],updates:&[(&str,&[u8])])->Option<Vec<u8>>{
     }
     out.push(b'}');Some(out)
 }
-struct Row<'a>{id:&'a[u8],state:u32,due:f64,created:f64,raw:std::borrow::Cow<'a,[u8]>,effect:u8,selected:bool}
+struct Row<'a>{id:&'a[u8],state:u32,due:f64,created:f64,raw:std::borrow::Cow<'a,[u8]>,effect:u8,selected:bool,original:Option<usize>}
 impl Row<'_>{
     fn transition(&mut self,op:u32,now:f64,next:f64,reason:&[u8])->Option<()>{
         let now_text=now.to_string();let next_text=next.to_string();
@@ -85,15 +85,25 @@ fn error(code:u32)->Vec<u8>{format!("{{\"code\":{code}}}").into_bytes()}
 // Result: code, sorted records, selected index, alarm actions and optional
 // claim. The only persistent native state is an actual in-flight claim.
 pub(super) fn transact(f:&[&[u8]],token:u32,leases:&mut BTreeMap<Vec<u8>,u32>,next_token:&mut u32)->Option<Vec<u8>>{
+    transact_mode(f,token,leases,next_token,false)
+}
+pub(super) fn transact_sparse(f:&[&[u8]],token:u32,leases:&mut BTreeMap<Vec<u8>,u32>,next_token:&mut u32)->Option<Vec<u8>>{
+    transact_mode(f,token,leases,next_token,true)
+}
+fn transact_mode(f:&[&[u8]],token:u32,leases:&mut BTreeMap<Vec<u8>,u32>,next_token:&mut u32,sparse:bool)->Option<Vec<u8>>{
     if f.len()<5||(f.len()-5)%5!=0{return None;}
     let op=std::str::from_utf8(f[0]).ok()?.parse::<u32>().ok()?;
     if !(1..=8).contains(&op){return None;}
     let target=f[1];let now=num(f[2])?;if now<=0.0{return None;}
     let next=num(f[3])?;
     let mut rows=Vec::with_capacity((f.len()-5)/5);
-    for v in f[5..].chunks_exact(5){
-        if v[4].first()!=Some(&b'{')||v[4].last()!=Some(&b'}'){return None;}
-        rows.push(Row{id:v[0],state:state(v[1])?,due:num(v[2])?,created:num(v[3])?,raw:std::borrow::Cow::Borrowed(v[4]),effect:0,selected:false});
+    for (i,v) in f[5..].chunks_exact(5).enumerate(){
+        let state=state(v[1])?;
+        let required=!sparse||if op==5{state==2&&!leases.contains_key(v[0])}else{matches!(op,1|3|4|7|8)&&v[0]==target};
+        if required||!v[4].is_empty(){
+            if v[4].first()!=Some(&b'{')||v[4].last()!=Some(&b'}'){return None;}
+        }
+        rows.push(Row{id:v[0],state,due:num(v[2])?,created:num(v[3])?,raw:std::borrow::Cow::Borrowed(v[4]),effect:0,selected:false,original:Some(i)});
     }
     let mut found=None;
     if op!=5{
@@ -136,7 +146,7 @@ pub(super) fn transact(f:&[&[u8]],token:u32,leases:&mut BTreeMap<Vec<u8>,u32>,ne
             let due=next.to_string();let time=now.to_string();
             let raw=patch(f[4],&[("id",target),("status",b"\"pending\""),("failureReason",b"\"\""),
                 ("dueTs",due.as_bytes()),("createdAt",time.as_bytes()),("updatedAt",time.as_bytes())])?;
-            rows.push(Row{id:target,state:1,due:next,created:now,raw:std::borrow::Cow::Owned(raw),effect:2,selected:true});
+            rows.push(Row{id:target,state:1,due:next,created:now,raw:std::borrow::Cow::Owned(raw),effect:2,selected:true,original:None});
         },
         7|8=>{ // terminal settlement must match a live claim and firing row
             let Some(i)=found else{return Some(error(0));};
@@ -172,7 +182,16 @@ pub(super) fn transact(f:&[&[u8]],token:u32,leases:&mut BTreeMap<Vec<u8>,u32>,ne
     });
     let selected=rows.iter().position(|r|r.selected).map_or(-1,|i|i as i64);
     let mut out=format!("{{\"code\":1,\"changed\":{changed},\"claim\":{claim},\"index\":{selected},\"clearDeleted\":{clear_deleted},\"items\":[").into_bytes();
-    for (i,row) in rows.iter().enumerate(){if i!=0{out.push(b',');}out.extend_from_slice(&row.raw);}
+    for (i,row) in rows.iter().enumerate(){
+        if i!=0{out.push(b',');}
+        if sparse{
+            match (&row.raw,row.original){
+                (std::borrow::Cow::Borrowed(_),Some(index))=>out.extend_from_slice(index.to_string().as_bytes()),
+                (std::borrow::Cow::Owned(record),_)=>out.extend_from_slice(record),
+                _=>return None
+            }
+        }else{out.extend_from_slice(&row.raw);}
+    }
     out.extend_from_slice(b"],\"effects\":[");
     for (i,row) in rows.iter().enumerate(){if i!=0{out.push(b',');}out.push(b'0'+row.effect);}
     out.extend_from_slice(b"]}");

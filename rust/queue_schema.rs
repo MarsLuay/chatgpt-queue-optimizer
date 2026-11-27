@@ -1,5 +1,5 @@
 //! Canonical queue ABI and durable field descriptors.
-pub const ABI:u32=42;
+pub const ABI:u32=43;
 pub struct DurableField { pub name: &'static str, pub project: u32, pub restore: u32 }
 pub const DURABLE_FIELDS: &[DurableField] = &[
     DurableField { name: "tabId", project: 18, restore: 18 },

@@ -86,14 +86,22 @@ pub(super) fn project_raw(fields:&[&[u8]],prompts:&[&[u8]])->Option<Vec<u8>>{
 pub(super) fn project(fields:&[Option<Vec<u8>>],queue:&VecDeque<Vec<u8>>)->Option<Vec<u8>>{
     project_mode(fields,queue,0,0.0,EMPTY)
 }
+pub(super) fn project_into(out:&mut Vec<u8>,fields:&[Option<Vec<u8>>],queue:&VecDeque<Vec<u8>>)->Option<()>{
+    project_mode_into(out,fields,queue,0,0.0,EMPTY)
+}
 fn project_mode(fields:&[Option<Vec<u8>>],queue:&VecDeque<Vec<u8>>,mode:u32,now:f64,run_id:&[u8])->Option<Vec<u8>>{
+    let mut out=Vec::new();
+    project_mode_into(&mut out,fields,queue,mode,now,run_id)?;
+    Some(out)
+}
+fn project_mode_into(out:&mut Vec<u8>,fields:&[Option<Vec<u8>>],queue:&VecDeque<Vec<u8>>,mode:u32,now:f64,run_id:&[u8])->Option<()>{
     if fields.len()<DURABLE_FIELDS.len(){return None;}
     let read=|name:&str|DURABLE_FIELDS.iter().position(|f|f.name==name).and_then(|i|fields[i].as_deref()).unwrap_or(NULL);
     let id=read("conversationId");
     if mode==1&&super::cpo_restore_eligible(numeric(read("tabId"))? as f64,u32::try_from(queue.len()).ok()?,present(read("currentMessage")) as u32,(read("isStopped")==TRUE) as u32)!=1{return None;}
     let flags=(present(id) as u32)|((read("targetKey")==b"\"chatgpt:new\"") as u32)<<1
         |((read("waitForIdleBeforeSend")==TRUE) as u32)<<2|((present(read("currentMessage")) as u32)<<3);
-    let mut out=Vec::new();let mut first=true;out.push(b'{');
+    let mut first=true;out.push(b'{');
     let mut provider=b"\"chatgpt\"".to_vec();
     let mut kind=if present(id){b"\"existing\"".to_vec()}else{b"\"unknown\"".to_vec()};
     for (i,field) in DURABLE_FIELDS.iter().enumerate(){
@@ -105,6 +113,12 @@ fn project_mode(fields:&[Option<Vec<u8>>],queue:&VecDeque<Vec<u8>>,mode:u32,now:
             out.extend_from_slice(b"\"queue\":[");
             for (n,p) in queue.iter().enumerate(){if n!=0{out.push(b',');}out.extend_from_slice(p);}
             out.push(b']');continue;
+        }
+        if matches!(rule,1|2|7|8|9|10|11|12|15)&&string(v)&&present(v)&&
+            !(rule==15&&mode==1&&v!=b"\"finite\""&&v!=b"\"unlimited\""){
+            if field.name=="provider"{provider=v.to_vec();}
+            if field.name=="conversationType"{kind=v.to_vec();}
+            append(out,&mut first,field.name,v);continue;
         }
         let value=match rule{
             3|4|13|14=>{
@@ -159,9 +173,9 @@ fn project_mode(fields:&[Option<Vec<u8>>],queue:&VecDeque<Vec<u8>>,mode:u32,now:
         };
         if field.name=="provider"{provider=value.clone();}
         if field.name=="conversationType"{kind=value.clone();}
-        append(&mut out,&mut first,field.name,&value);
+        append(out,&mut first,field.name,&value);
     }
-    out.push(b'}');Some(out)
+    out.push(b'}');Some(())
 }
 #[cfg(test)]
 mod tests{

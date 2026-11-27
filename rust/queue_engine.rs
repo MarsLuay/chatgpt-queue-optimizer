@@ -1129,7 +1129,8 @@ mod live_state {
         // IDs and map keys are supplied by the host map (not by unrelated
         // stores sharing this WASM instance). Serialize both views in one call.
         fn checkpoint_batch(&mut self,mode:u32)->u32{
-            self.output.fill(0);self.output.clear();
+            let mut out=std::mem::take(&mut self.output);
+            out.fill(0);out.clear();
             let mut input=std::mem::take(&mut self.input);
             let result=(||{
                 if mode>2{return None;}
@@ -1142,7 +1143,7 @@ mod live_state {
                     if key.len()<2||key.first()!=Some(&b'"')||key.last()!=Some(&b'"')||!keys.insert(key){return None;}
                     rows.push((key,self.jobs.get(&id)?));
                 }
-                let mut out=vec![b'{'];
+                out.push(b'{');
                 if mode==0{out.extend_from_slice(b"\"serialized\":");out.extend_from_slice(self.epoch.to_string().as_bytes());out.extend_from_slice(b",\"items\":{\"runningJobs\":{");}
                 if mode!=2{
                     for (i,(key,job)) in rows.iter().enumerate(){
@@ -1153,18 +1154,20 @@ mod live_state {
                 if mode==0{out.extend_from_slice(b",\"queueDurableJobs\":{");}
                 if mode!=1{
                     for (i,(key,job)) in rows.iter().enumerate(){
-                        let bytes=super::durable_projection::project(&job.fields,&job.queue)?;
-                        if i!=0{out.push(b',');}out.extend_from_slice(key);out.push(b':');out.extend_from_slice(&bytes);
+                        if i!=0{out.push(b',');}out.extend_from_slice(key);out.push(b':');
+                        super::durable_projection::project_into(&mut out,&job.fields,&job.queue)?;
                         if out.len()>MAX_INPUT{return None;}
                     }
                     out.push(b'}');
                 }
                 if mode==0{out.extend_from_slice(if rows.is_empty(){b",\"isRunning\":false}}".as_slice()}else{b",\"isRunning\":true}}".as_slice()});}
                 if out.len()>MAX_INPUT{return None;}
-                Some(out)
+                Some(())
             })();
-            input.fill(0);
-            let Some(out)=result else{return 0;};self.output=out;self.output.len() as u32+1
+            input.fill(0);input.clear();
+            if input.capacity()<=256*1024{self.input=input;}
+            if result.is_none(){out.fill(0);return 0;}
+            self.output=out;self.output.len() as u32+1
         }
         fn mutate(&mut self, id: u32, field: u32, op: u32, index: u32) -> bool {
             let input = std::mem::take(&mut self.input);

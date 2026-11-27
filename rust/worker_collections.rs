@@ -216,6 +216,10 @@ impl Worker{
                 let Some(entry)=super::diagnostic_records::provider_summary(&f)else{return NONE;};
                 self.output=entry;self.output.len() as u32
             },
+            20=>{
+                let Some(result)=super::scheduled_transaction::transact_sparse(&f,token,&mut self.scheduled,&mut self.next)else{return NONE;};
+                self.output=result;u32::try_from(self.output.len()).unwrap_or(NONE)
+            },
             _=>NONE
         }
     }

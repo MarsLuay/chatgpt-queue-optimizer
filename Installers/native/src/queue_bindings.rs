@@ -94,7 +94,7 @@ const HOST:&str=r####"(() => {
             try{
                 const result=e.cpo_worker_dispatch(op,token)>>>0;
                 if(result===0xffffffff)return null;
-                if(op!==1&&op!==10&&op!==12&&op!==13&&op!==17&&op!==18&&op!==19)return result;
+                if(op!==1&&op!==10&&op!==12&&op!==13&&op!==17&&op!==18&&op!==19&&op!==20)return result;
                 return JSON.parse(workerDecoder.decode(new Uint8Array(e.memory.buffer,e.cpo_worker_output()>>>0,result)));
             }finally{e.cpo_worker_wipe();}
         }catch(error){fail(error);return null;}
@@ -944,9 +944,25 @@ const HOST:&str=r####"(() => {
     const scheduledRecordId=item=>typeof item?.id==='string'?JSON.stringify(item.id):'null';
     function scheduledTransaction(op,items,id='',now=Date.now(),next=0,payload='',lease=0){
         if(!Array.isArray(items))return null;
-        return workerCollection(13,lease,[String(op),JSON.stringify(String(id||'')),String(now),String(next),payload,
-            ...items.flatMap(item=>[scheduledRecordId(item),scheduledState(item),String(Number(item?.dueTs||0)),
-                String(Number(item?.createdAt||0)),JSON.stringify(item)])]);
+        const target=String(id||'');
+        const plan=workerCollection(20,lease,[String(op),JSON.stringify(target),String(now),String(next),payload,
+            ...items.flatMap(item=>{
+                // Only mutable records cross the boundary with their bodies.
+                const needed=op===5?item?.status==='firing':[1,3,4,7,8].includes(op)&&item?.id===target;
+                return [scheduledRecordId(item),scheduledState(item),String(Number(item?.dueTs||0)),
+                    String(Number(item?.createdAt||0)),needed?JSON.stringify(item):''];
+            })]);
+        if(plan?.code===1){
+            if(!Array.isArray(plan.items))return null;
+            plan.items=plan.items.map(row=>{
+                if(typeof row==='number'){
+                    if(!Number.isSafeInteger(row)||row<0||row>=items.length)throw new Error('Invalid native schedule index');
+                    return items[row];
+                }
+                return row;
+            });
+        }
+        return plan;
     }
     function scheduledRecoveryPlan(items){
         return workerCollection(10,0,items.flatMap(item=>[scheduledRecordId(item),scheduledState(item)]));
