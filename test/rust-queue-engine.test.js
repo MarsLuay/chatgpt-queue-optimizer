@@ -253,7 +253,8 @@ test('native durable projection and restoration preserve the complete checkpoint
     assert.equal(decoded.ok,true);
     assert.deepEqual(decoded.value,stored);
     assert.equal(engine.confirmed(decoded.value),1);
-    assert.equal(engine.next(decoded.value,true),3);
+    assert.equal(engine.next(decoded.value,true),1);
+    assert.equal(engine.next({...decoded.value,rolloverInProgress:false},true),3);
 });
 
 test('native deserialization reconstructs legacy defaults and trims long prompts without damaging Unicode', {skip}, async () => {
