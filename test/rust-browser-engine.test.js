@@ -23,7 +23,7 @@ async function engine(optimizer = owner()) {
         cpo: { host: (op, a, b, c) => bridge.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
     });
     bridge.exports = result.instance.exports;
-    assert.equal(bridge.exports.cpo_browser_abi(), 2);
+    assert.equal(bridge.exports.cpo_browser_abi(), 3);
     return bridge;
 }
 
@@ -208,4 +208,26 @@ test('Rust mutation engine skips streaming and banner changes, invalidates provi
     assert.equal(cache.has(parent), false);
     assert.equal(cache.has(target), false);
     assert.equal(bridge.context, null);
+});
+
+test('Rust provider selector traversal preserves priority, deduplicates and supports early exit', {skip}, async () => {
+    const bridge = await engine();
+    const a = {}, b = {}, c = {};
+    let queries = 0;
+    const root = {
+        querySelectorAll(selector) {
+            queries++;
+            if (selector === '.first') return [a,b];
+            if (selector === '.second') return [a,c];
+            throw new Error('bad selector');
+        }
+    };
+    const selectors = ['.first','.second','.bad'];
+    const matches = bridge.providerSelectors(root,selectors,'composer',(node,selector) => node !== b || selector === '.second');
+    assert.deepEqual(matches,[{element:a,selector:'.first',signalKey:'composer'},{element:c,selector:'.second',signalKey:'composer'}]);
+    assert.equal(queries,3);
+    queries=0;
+    assert.deepEqual(bridge.providerSelectors(root,selectors,'composer',null,true),[{element:a,selector:'.first',signalKey:'composer'}]);
+    assert.equal(queries,1);
+    assert.equal(bridge.context,null);
 });
