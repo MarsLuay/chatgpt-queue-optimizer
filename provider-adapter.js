@@ -648,7 +648,7 @@
         getCommandResponseState(doc, binding = {}) {
             const generation = this.getGenerationState(doc);
             const native = nativeResponse(generation, null);
-            if (native == null ? (generation.hasError || generation.hasTryAgainButton || generation.hasDeliveryTimedOut) : [3,4,5].includes(native)) {
+            if (native == null ? (generation.hasError || generation.hasTryAgainButton || generation.hasDeliveryTimedOut) : [1,2,3,4,5,6].includes(native)) {
                 return {
                     phase: 'error',
                     userTurnId: binding.userTurnId || null,
@@ -1556,7 +1556,7 @@
                     ''
                 ).toLowerCase().trim();
                 return this.compatibilitySignals.stopLabels.some(marker =>
-                    label === marker || label.includes(marker) || testId.includes(marker.replace(/ /g, '-'))
+                    label === marker || nativeContains(label, marker) || nativeContains(testId, marker.replace(/ /g, '-'))
                 );
             });
             const stopButton = stopSelectorMatch.element || semanticStopButton;
@@ -1589,8 +1589,8 @@
             const matchedResearchMarker = this.compatibilitySignals.researchMarkers.find(marker => nativeContains(activeTextLower, marker)) || '';
             const hasActiveToolOrResearch = !!matchedResearchMarker || hasActiveSpinner;
             const isDeepResearch = matchedResearchMarker === 'deep research' ||
-                activeTextLower.includes('deep research') ||
-                activeTextLower.includes('researching');
+                nativeContains(activeTextLower, 'deep research') ||
+                nativeContains(activeTextLower, 'researching');
 
             const alertMatches = this.getSelectorNodes(doc, 'errorAlerts', inActiveSurface);
             const errorSearchText = alertMatches
@@ -2181,7 +2181,7 @@
                     button.getAttribute('data-test-id') ||
                     ''
                 ).toLowerCase();
-                if (testId.includes('stop')) {
+                if (nativeContains(testId, 'stop')) {
                     return true;
                 }
                 const label = (
@@ -2197,10 +2197,10 @@
                 return (
                     label === 'stop' ||
                     label === 'stop response' ||
-                    label.includes('stop response') ||
-                    label.includes('stop generating') ||
-                    label.includes('stop streaming') ||
-                    className.includes('stop-button')
+                    nativeContains(label, 'stop response') ||
+                    nativeContains(label, 'stop generating') ||
+                    nativeContains(label, 'stop streaming') ||
+                    nativeContains(className, 'stop-button')
                 );
             });
             const hasActiveStopButton = !!stopButton;
@@ -2546,7 +2546,7 @@
                     button.getAttribute('data-test-id') ||
                     ''
                 ).toLowerCase();
-                if (testId.includes('stop')) {
+                if (nativeContains(testId, 'stop')) {
                     return true;
                 }
                 const label = (
@@ -2563,10 +2563,10 @@
                     label === 'stop' ||
                     label === 'stop response' ||
                     label === 'stop generating' ||
-                    label.includes('stop response') ||
-                    label.includes('stop generating') ||
-                    label.includes('stop streaming') ||
-                    className.includes('stop-button')
+                    nativeContains(label, 'stop response') ||
+                    nativeContains(label, 'stop generating') ||
+                    nativeContains(label, 'stop streaming') ||
+                    nativeContains(className, 'stop-button')
                 );
             });
             const hasActiveStopButton = !!stopButton;
