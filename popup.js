@@ -722,6 +722,8 @@ document.addEventListener('DOMContentLoaded', function () {
 
         const titleMap = await getScheduledTargetTitleMap();
         const sortedItems = (Array.isArray(items) ? items : []).slice().sort((a, b) => {
+            const native=globalThis.CpoQueueEngine?.numeric('cpo_schedule_compare',[Number(a?.dueTs||0),Number(b?.dueTs||0),Number(a?.createdAt||0),Number(b?.createdAt||0)]);
+            if(native!=null)return native-1;
             const dueDiff = Number(a?.dueTs || 0) - Number(b?.dueTs || 0);
             return dueDiff || Number(a?.createdAt || 0) - Number(b?.createdAt || 0);
         });
@@ -756,7 +758,8 @@ document.addEventListener('DOMContentLoaded', function () {
             const actions = document.createElement('div');
             actions.className = 'scheduled-actions';
 
-            if (item.status === 'pending') {
+            const actionMask=globalThis.CpoQueueEngine?.scheduledActions(item.status)??((item.status==='pending'?1:0)|(item.status==='failed'||item.status==='cancelled'?2:0)|(item.status!=='firing'?4:0));
+            if (actionMask & 1) {
                 const cancelButton = document.createElement('button');
                 cancelButton.type = 'button';
                 cancelButton.textContent = 'Cancel';
@@ -764,7 +767,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 actions.appendChild(cancelButton);
             }
 
-            if (item.status === 'failed' || item.status === 'cancelled') {
+            if (actionMask & 2) {
                 const retryButton = document.createElement('button');
                 retryButton.type = 'button';
                 retryButton.textContent = 'Retry';
@@ -772,7 +775,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 actions.appendChild(retryButton);
             }
 
-            if (item.status !== 'firing') {
+            if (actionMask & 4) {
                 const deleteButton = document.createElement('button');
                 deleteButton.type = 'button';
                 deleteButton.className = 'scheduled-delete-btn';
