@@ -6,7 +6,7 @@ const { ChatGPTOptimizer } = require('../content.js');
 const { CpoRustBrowserBridge } = require('../rust-browser-bridge.js');
 
 const wasmPath = path.join(__dirname, '..', 'optimizer_browser.wasm');
-const skip = !fs.existsSync(wasmPath) && 'Build WASM first using Installers/build_optimizer.py';
+const skip = !fs.existsSync(wasmPath) && 'Build WASM first using cargo run --release --manifest-path Installers/native/Cargo.toml -- build';
 
 function owner() {
     const value = Object.create(ChatGPTOptimizer.prototype);

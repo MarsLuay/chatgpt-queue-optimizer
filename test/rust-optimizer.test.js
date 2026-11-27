@@ -24,7 +24,7 @@ test('fallback policy preserves configured and expanded windows', () => {
 });
 
 test('compiled Rust WASM implements the same window and batch policy', {
-    skip: !fs.existsSync(wasmPath) && 'Build WASM with python Installers/build_optimizer.py'
+    skip: !fs.existsSync(wasmPath) && 'Build WASM with cargo run --release --manifest-path Installers/native/Cargo.toml -- build'
 }, async () => {
     const { instance } = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const core = instance.exports;

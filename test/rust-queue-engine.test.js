@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const engine = require('../rust-queue-bridge.js');
 const wasmPath = path.join(__dirname,'..','optimizer_queue.wasm');
-const skip = !fs.existsSync(wasmPath) && 'Build WASM first using Installers/build_optimizer.py';
+const skip = !fs.existsSync(wasmPath) && 'Build WASM first using cargo run --release --manifest-path Installers/native/Cargo.toml -- build';
 
 function legacy(text) {
     const normalized = String(text || '').replace(/\s+/g,' ').trim();

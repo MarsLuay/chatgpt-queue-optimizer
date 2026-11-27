@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import configparser
+from functools import lru_cache
 import hashlib
 import json
 import os
@@ -88,15 +89,20 @@ def ensure_repo(repo_dir, repo_url, update_repo=False):
         raise RuntimeError(f"Could not clone {repo_url}:\n{clone.stdout}")
 
 
-def copy_source(repo_dir, target_dir):
-    repo_dir = Path(repo_dir).resolve()
+@lru_cache(maxsize=4)
+def build_native_artifacts(repo_dir):
     cargo = shutil.which("cargo")
     if not cargo:
         raise RuntimeError("Rust/Cargo is required to build the extension.")
     subprocess.run([cargo, "run", "--release", "--manifest-path",
                     str(repo_dir / "Installers/native/Cargo.toml"),
                     "--", "build", "--repo-dir", str(repo_dir)], check=True)
-    wasm = repo_dir / "optimizer_core.wasm"
+    return repo_dir / "optimizer_core.wasm"
+
+
+def copy_source(repo_dir, target_dir):
+    repo_dir = Path(repo_dir).resolve()
+    wasm = build_native_artifacts(repo_dir)
     if target_dir.exists():
         shutil.rmtree(target_dir)
     target_dir.mkdir(parents=True)

@@ -5,7 +5,7 @@ const path = require('node:path');
 const { CpoHistoryStore } = require('../history-store.js');
 
 const wasmPath = path.join(__dirname, '..', 'optimizer_history.wasm');
-const skip = !fs.existsSync(wasmPath) && 'Build WASM first using Installers/build_optimizer.py';
+const skip = !fs.existsSync(wasmPath) && 'Build WASM first using cargo run --release --manifest-path Installers/native/Cargo.toml -- build';
 
 async function nativeStore() {
     const store = new CpoHistoryStore(null);

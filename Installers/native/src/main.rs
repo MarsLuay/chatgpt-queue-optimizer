@@ -192,9 +192,22 @@ fn publish(repo:&Path,local_only:bool,configured:Option<(String,String)>)->Resul
         .args(["--no-config-discovery","--start-url","https://chatgpt.com/"]).env_remove("WEB_EXT_API_KEY").env_remove("WEB_EXT_API_SECRET")
         .stdin(Stdio::null()).stdout(Stdio::from(output.try_clone()?)).stderr(Stdio::from(output));
     #[cfg(windows)] {use std::os::windows::process::CommandExt;command.creation_flags(0x00000200);}
-    let child=command.spawn()?;fs::write(logs.join("upload-firefox-test.pid"),format!("{}\n",child.id()))?;
+    let managed=configured.is_some();
+    let mut child=command.spawn()?;fs::write(logs.join("upload-firefox-test.pid"),format!("{}\n",child.id()))?;
     println!("Started isolated Firefox test for v{version}; see build/logs/upload-firefox-test.log.");
-    if local_only{return Ok(());}
+    let local_failed=if managed{false}else{
+        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(20);
+        loop{
+            let output=fs::read(logs.join("upload-firefox-test.log")).unwrap_or_default();
+            let lower=String::from_utf8_lossy(&output).to_ascii_lowercase();
+            if lower.contains("installed")&&lower.contains("temporary add-on"){break false;}
+            if child.try_wait()?.is_some(){break true;}
+            if std::time::Instant::now()>=deadline{break false;}
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    };
+    if local_failed{eprintln!("Temporary Firefox test failed; see build/logs/upload-firefox-test.log.");}
+    if local_only{return if local_failed{Err(err("Temporary Firefox test failed"))}else{Ok(())};}
     // Never expose signing secrets on a command line or in raw logs.
     let (key,secret)=match configured{Some(values)=>values,None=>credentials()?};
     if key.trim().is_empty()||secret.trim().is_empty(){return Err(err("Set WEB_EXT_API_KEY and WEB_EXT_API_SECRET before explicit publishing."));}
@@ -205,7 +218,9 @@ fn publish(repo:&Path,local_only:bool,configured:Option<(String,String)>)->Resul
     let message=format!("{}\n{}",redact(&result.stdout),redact(&result.stderr));
     fs::write(logs.join("upload.log"),&message)?;println!("{message}");
     if !result.status.success(){return Err(err("AMO submission failed; see redacted upload.log"));}
-    println!("AMO accepted the submission request; approval may remain pending.");Ok(())
+    println!("AMO accepted the submission request; approval may remain pending.");
+    if local_failed{return Err(err("AMO submission accepted, but temporary Firefox test failed; inspect logs before retrying."));}
+    Ok(())
 }
 fn git_output(repo:&Path,args:&[&str])->Result<String>{
     let result=Command::new("git").current_dir(repo).args(args).output()?;
@@ -363,6 +378,23 @@ mod tests{
         let mut manifest=json!({"name":"Demo","version":"1.0.7","other":true});
         manifest["version"]=json!(next_patch_version(manifest["version"].as_str().unwrap()).unwrap());
         assert_eq!(manifest,json!({"name":"Demo","version":"1.0.8","other":true}));
+    }
+    #[test]fn managed_publish_refuses_invalid_checkout_before_any_external_effect(){
+        let root=env::temp_dir().join(format!("cpo-release-guard-{}-{}",std::process::id(),stamp()));
+        fs::create_dir_all(&root).unwrap();
+        let _cleanup=Cleanup(root.clone());
+        let root=root.canonicalize().unwrap();
+        checked(Command::new("git").current_dir(&root).args(["init","-b","main"])).unwrap();
+        fs::write(root.join("manifest.json"),r#"{"version":"1.0.7"}"#).unwrap();
+        checked(Command::new("git").current_dir(&root).args(["add","manifest.json"])).unwrap();
+        checked(Command::new("git").current_dir(&root).args(["-c","user.name=CPO Test","-c","user.email=test@example.invalid","commit","-m","fixture"])).unwrap();
+        fs::write(root.join("dirty.txt"),"untracked").unwrap();
+        assert!(managed_publish(&root).unwrap_err().to_string().contains("clean"));
+        assert_eq!(fs::read_to_string(root.join("manifest.json")).unwrap(),r#"{"version":"1.0.7"}"#);
+        fs::remove_file(root.join("dirty.txt")).unwrap();
+        checked(Command::new("git").current_dir(&root).args(["switch","-c","feature"])).unwrap();
+        assert!(managed_publish(&root).unwrap_err().to_string().contains("main branch"));
+        assert_eq!(fs::read_to_string(root.join("manifest.json")).unwrap(),r#"{"version":"1.0.7"}"#);
     }
     #[test]fn manifest_conversion(){
         let base=json!({"manifest_version":3,"name":"test","description":"test","version":"1.0","action":{},
