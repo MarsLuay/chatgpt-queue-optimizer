@@ -9,3 +9,5 @@ node_modules/
 
 # Locally compiled Rust WebAssembly (reproducible from rust/optimizer_core.rs).
 /optimizer_core.wasm
+
+/optimizer_browser.wasm
