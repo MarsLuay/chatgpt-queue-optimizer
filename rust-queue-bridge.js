@@ -15,9 +15,11 @@
             'cpo_restore_action','cpo_restore_eligible','cpo_restore_command_number','cpo_persist_action',
             'cpo_schedule_action','cpo_schedule_compare','cpo_schedule_identity',
             'cpo_provider_host','cpo_provider_route','cpo_marker_contains','cpo_generation_state',
-            'cpo_response_class','cpo_wait_failure','cpo_wait_settle','cpo_rollover_next','cpo_rollover_fresh','cpo_rollover_generation'];
+            'cpo_response_class','cpo_wait_failure','cpo_wait_settle','cpo_rollover_next','cpo_rollover_fresh','cpo_rollover_generation',
+            'cpo_json_output','cpo_json_escape','cpo_json_wipe','cpo_json_token','cpo_tab_discard','cpo_tab_alarm',
+            'cpo_tab_reload_next','cpo_tab_recover_poll','cpo_tab_close_action'];
         if (!names.every(name => typeof exports[name] === 'function') ||
-            exports.cpo_queue_abi() !== 3 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
+            exports.cpo_queue_abi() !== 4 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
         core = exports;
         status = 'Rust/WASM';
     }
@@ -125,6 +127,88 @@
         }
         return false;
     }
+    // Serialize the existing plain-data snapshot, retaining the browser's
+    // ECMAScript number formatting and property enumeration semantics.
+    function serialize(value) {
+        if (!core) return null;
+        const e = core;
+        let input, output;
+        const parts = [];
+        const ancestors = new Set();
+        try {
+            const capacity = e.cpo_fingerprint_capacity() >>> 0;
+            input = new Uint16Array(e.memory.buffer,e.cpo_fingerprint_buffer() >>> 0,capacity);
+            output = new Uint16Array(e.memory.buffer,e.cpo_json_output() >>> 0,capacity*6);
+            const token = kind => {
+                if (kind === 9) { parts.push('false'); return; }
+                const packed = e.cpo_json_token(kind) >>> 0;
+                if (kind >= 7) parts.push(String.fromCharCode(packed&255,(packed>>>8)&255,(packed>>>16)&255,packed>>>24));
+                else parts.push(String.fromCharCode(packed));
+            };
+            const string = text => {
+                token(6);
+                for (let start=0;start<text.length;) {
+                    let end = Math.min(start+capacity,text.length);
+                    // Preserve surrogate pairs across the chunk boundary.
+                    if (end < text.length && text.charCodeAt(end-1)>=0xd800 && text.charCodeAt(end-1)<=0xdbff &&
+                        text.charCodeAt(end)>=0xdc00 && text.charCodeAt(end)<=0xdfff) end--;
+                    const length = end-start;
+                    for (let i=0;i<length;i++) input[i]=text.charCodeAt(start+i);
+                    const written=e.cpo_json_escape(length)>>>0;
+                    if (written < length || written > capacity*6) throw new Error('Invalid JSON codec output');
+                    parts.push(String.fromCharCode(...output.subarray(0,written)));
+                    input.fill(0,0,length);
+                    e.cpo_json_wipe(written);
+                    start=end;
+                }
+                token(6);
+            };
+            const visit = (item,depth) => {
+                if (depth>64) throw new Error('Unsupported snapshot depth');
+                if (item===null || item===undefined) { token(7); return; }
+                if (typeof item==='string') { string(item); return; }
+                if (typeof item==='boolean') { token(item?8:9); return; }
+                if (typeof item==='number') { if (Number.isFinite(item)) parts.push(String(item)); else token(7); return; }
+                if (typeof item!=='object' || typeof item.toJSON==='function' || ancestors.has(item)) throw new Error('Unsupported snapshot value');
+                ancestors.add(item);
+                if (Array.isArray(item)) {
+                    token(2);
+                    for(let i=0;i<item.length;i++){ if(i)token(4);visit(item[i],depth+1); }
+                    token(3);
+                } else {
+                    const proto=Object.getPrototypeOf(item);
+                    if(proto!==Object.prototype && proto!==null)throw new Error('Unsupported snapshot object');
+                    token(0);
+                    let first=true;
+                    for(const key of Object.keys(item)){
+                        const v=item[key];
+                        if(v===undefined || typeof v==='function' || typeof v==='symbol')continue;
+                        if(!first)token(4);
+                        first=false;string(key);token(5);visit(v,depth+1);
+                    }
+                    token(1);
+                }
+                ancestors.delete(item);
+            };
+            if(value===undefined)return null;
+            visit(value,0);
+            return parts.join('');
+        } catch { return null; }
+        finally {
+            if(input)input.fill(0);
+            if(output)try{e.cpo_json_wipe(output.length);}catch{}
+        }
+    }
+    function tabDiscard(tab, stage, mode, minutes, now, provider, work=false, unchanged=false, safe=false) {
+        const flags=Number(!!tab && Number.isInteger(tab.id)) |
+            (Number(tab?.active===false)<<1) | (Number(tab?.status==='complete')<<2) |
+            (Number(provider==='chatgpt')<<3) |
+            (Number(!!(tab?.highlighted===true || tab?.discarded===true || tab?.pinned===true ||
+                tab?.audible===true || tab?.incognito===true || tab?.autoDiscardable===false))<<4) |
+            (Number(!!work)<<5) | (Number(!!unchanged)<<6) | (Number(!!safe)<<7);
+        const elapsed=Number.isFinite(tab?.lastAccessed)&&tab.lastAccessed>0 ? now-tab.lastAccessed : -1;
+        return numeric('cpo_tab_discard',[stage,mode,flags,minutes,elapsed]);
+    }
     function fingerprint(text) {
         if (!core) return null;
         const value = String(text || '');
@@ -161,7 +245,7 @@
             (Number(!!job.waitForIdleBeforeSend) << 6);
         return call('cpo_queue_next', [flags, phase, job.queue.length]);
     }
-    const api = { load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, install, get status() { return status; } };
+    const api = { load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, tabDiscard, install, get status() { return status; } };
     globalThis.CpoQueueEngine = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();
