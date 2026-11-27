@@ -242,7 +242,13 @@
                 case 35: return Number(owner.mediaOriginals.has(ctx.group[a]) &&
                     ['src','srcset'].some(name => ctx.group[a].hasAttribute(name)));
                 case 36: owner.mediaOriginals.delete(ctx.group[a]); return 1;
-                case 37: return Number(owner.canEvictPlayback(ctx.group[0]));
+                case 37: {
+                    const media = ctx.group[0];
+                    return (media.paused === true ? 1 : 0) |
+                        (media.currentTime === 0 ? 2 : 0) |
+                        (media.srcObject ? 4 : 0) |
+                        (media.mediaKeys || media.autoplay ? 8 : 0);
+                }
                 case 38: return owner.policyCount(a === 0 ? ctx.group[0].naturalWidth : ctx.group[0].naturalHeight);
                 case 39: try { ctx.group[0].load(); } catch {} return 1;
                 case 40:
