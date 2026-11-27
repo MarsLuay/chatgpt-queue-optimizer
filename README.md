@@ -280,3 +280,5 @@ Rust generates unique imported sequence names, validates reserved names, and col
 ### Native-only policy cleanup
 
 Removed duplicated JavaScript provider catalogs, route classifiers, fingerprints, composer implementations, primary conversation discovery/deduplication, popup formatting and recursive diagnostic sanitization. Content startup resolves the provider and loads the required native DOM engine before binding automation. Failed native sanitization drops the entire diagnostic detail object. Browser URL/date parsing, DOM/API effects, large-string host normalization, emergency cancellation and media rollback remain host operations. Legacy no-WASM tests require native fixtures; live browser integration and native compilation remain unverified.
+
+The cleanup also removes duplicate response classification and direct retry-click paths. If native policy is unavailable, provider automation fails closed; emergency cancellation and media rollback remain available. Legacy host-only unit tests have not been migrated or run.

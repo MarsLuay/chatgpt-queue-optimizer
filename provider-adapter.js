@@ -24,7 +24,7 @@
             generation.hasTryAgainButton, assistant?.errorSignal, waiting, interrupted,
             assistant?.hasCompletedText, generation.generating, generation.deepResearchActive,
             assistant?.streaming, assistant?.hasIncompleteToolTurn].reduce((mask,value,i) => mask | (Number(!!value)<<i),0);
-        return globalThis.CpoQueueEngine?.call('cpo_response_class', [flags]) ?? null;
+        return requireNative(globalThis.CpoQueueEngine?.call('cpo_response_class',[flags]));
     }
 
     function requireNative(value){
@@ -89,17 +89,7 @@
             (Number(!!node?.querySelector?.('[data-message-author-role="user"]'))<<2)|
             (Number(!!node?.querySelector?.('[data-message-author-role="assistant"]'))<<3);
         const native=engine?.nodeRole(flags);
-        if(native!=null)return ['','user','assistant'][native]||'';
-        if (attr === 'user' || attr === 'assistant') {
-            return attr;
-        }
-        if (node?.querySelector?.('[data-message-author-role="user"]')) {
-            return 'user';
-        }
-        if (node?.querySelector?.('[data-message-author-role="assistant"]')) {
-            return 'assistant';
-        }
-        return '';
+        return ['','user','assistant'][requireNative(native)]||'';
     }
 
     function getNodeText(node) {
@@ -127,30 +117,7 @@
 
     function hasAssistantErrorStop(node, engine = null) {
         const native=engine?.assistantError(node,ASSISTANT_ERROR_STATUS_ATTRIBUTES,ASSISTANT_ERROR_STATUS_VALUES);
-        if(native!=null)return native;
-        if (!node || typeof node.getAttribute !== 'function') {
-            return false;
-        }
-
-        const candidates = [node];
-        try {
-            candidates.push(...Array.from(node.querySelectorAll?.(
-                ASSISTANT_ERROR_STATUS_ATTRIBUTES.map(attribute => `[${attribute}]`).join(',')
-            ) || []));
-        } catch {
-            // A provider DOM can change while it is being inspected.
-        }
-
-        return candidates.some(candidate => ASSISTANT_ERROR_STATUS_ATTRIBUTES.some(attribute => {
-            const value = String(candidate.getAttribute?.(attribute) || '').trim().toLowerCase();
-            if (!value) {
-                return false;
-            }
-            if (attribute === 'data-error') {
-                return value === 'true' || value === '1' || value === 'yes' || ASSISTANT_ERROR_STATUS_VALUES.has(value);
-            }
-            return ASSISTANT_ERROR_STATUS_VALUES.has(value);
-        }));
+        return requireNative(native);
     }
 
     const TOOL_TURN_SELECTORS = [
@@ -165,43 +132,7 @@
 
     function hasIncompleteToolTurn(node, engine = null) {
         const native=engine?.incompleteTool(node,TOOL_TURN_SELECTORS,INCOMPLETE_TOOL_STATES,normalizeCommandText);
-        if(native!=null)return native;
-        if (!node || typeof node.getAttribute !== 'function') {
-            return false;
-        }
-
-        const candidates = [node];
-        try {
-            candidates.push(...Array.from(node.querySelectorAll?.(TOOL_TURN_SELECTORS.join(',')) || []));
-        } catch {
-            // A provider DOM can change while it is being inspected.
-        }
-
-        const toolNode = candidates.find(candidate => TOOL_TURN_SELECTORS.some(selector => {
-            try {
-                return candidate.matches?.(selector);
-            } catch {
-                return false;
-            }
-        }));
-        if (!toolNode) {
-            return false;
-        }
-
-        const explicitState = candidates
-            .map(candidate => TOOL_TURN_SELECTORS
-                .flatMap(selector => selector.match(/\[([^=\]]+)/g) || [])
-                .map(attribute => attribute.slice(1))
-                .map(attribute => String(candidate.getAttribute?.(attribute) || '').trim().toLowerCase())
-                .find(Boolean))
-            .find(value => INCOMPLETE_TOOL_STATES.has(value));
-        if (explicitState) {
-            return true;
-        }
-
-        const turnText = getNodeText(node);
-        const toolText = getNodeText(toolNode);
-        return !turnText || turnText === toolText;
+        return requireNative(native);
     }
 
     function getTurnId(node, index, role, fingerprint) {
@@ -488,7 +419,7 @@
         getCommandResponseState(doc, binding = {}) {
             const generation = this.getGenerationState(doc);
             const native = nativeResponse(generation, null);
-            if (native == null ? (generation.hasError || generation.hasTryAgainButton || generation.hasDeliveryTimedOut) : [1,2,3,4,5,6].includes(native)) {
+            if ([1,2,3,4,5,6].includes(native)) {
                 return {
                     phase: 'error',
                     userTurnId: binding.userTurnId || null,
@@ -500,7 +431,7 @@
                     source: generation.hasDeliveryTimedOut ? 'delivery-timeout' : (generation.hasTryAgainButton ? 'retry-visible' : 'generation-error')
                 };
             }
-            if (native == null ? (generation.generating || generation.deepResearchActive) : [10,12].includes(native)) {
+            if ([10,12].includes(native)) {
                 return {
                     phase: 'active',
                     userTurnId: binding.userTurnId || null,
@@ -515,7 +446,7 @@
             const lastAssistant = typeof this.getLastAssistantTurn === 'function'
                 ? this.getLastAssistantTurn(doc)
                 : null;
-            if ((nativeResponse(generation, {hasCompletedText: !!(lastAssistant?.isAssistant && lastAssistant?.hasCompletedText)}) ?? (lastAssistant?.isAssistant && lastAssistant?.hasCompletedText ? 13 : 0)) === 13) {
+            if (nativeResponse(generation, {hasCompletedText: !!(lastAssistant?.isAssistant && lastAssistant?.hasCompletedText)}) === 13) {
                 return {
                     phase: 'terminal',
                     userTurnId: binding.userTurnId || null,
@@ -870,7 +801,7 @@
             const incompleteToolTurn = followingAssistant?.hasIncompleteToolTurn === true;
             const native = nativeResponse(generation, followingAssistant, waitingForUser, interrupted);
 
-            if (native == null ? (generation.conversationCapacityReached || generation.requiresNewConversation) : native === 1) {
+            if (native === 1) {
                 return {
                     phase: 'error',
                     userTurnId,
@@ -883,7 +814,7 @@
                 };
             }
 
-            if (native == null ? (followingAssistant?.hasErrorStop) : native === 2) {
+            if (native === 2) {
                 return {
                     phase: 'error',
                     userTurnId,
@@ -896,7 +827,7 @@
                 };
             }
 
-            if (native == null ? (generation.hasError || generation.hasTryAgainButton || generation.hasDeliveryTimedOut) : [3,4,5].includes(native)) {
+            if ([3,4,5].includes(native)) {
                 return {
                     phase: 'error',
                     userTurnId,
@@ -909,7 +840,7 @@
                 };
             }
 
-            if (native == null ? (followingAssistant?.errorSignal) : native === 6) {
+            if (native === 6) {
                 return {
                     phase: 'error',
                     userTurnId,
@@ -923,7 +854,7 @@
                 };
             }
 
-            if (native == null ? (waitingForUser) : native === 7) {
+            if (native === 7) {
                 return {
                     phase: 'waiting-for-user',
                     userTurnId,
@@ -936,7 +867,7 @@
                 };
             }
 
-            if (native == null ? (interrupted && !(followingAssistant?.hasCompletedText)) : native === 8) {
+            if (native === 8) {
                 return {
                     phase: 'interrupted',
                     userTurnId,
@@ -950,7 +881,7 @@
             }
 
             const boundActivity = !!(generation.generating || generation.deepResearchActive || followingAssistant?.streaming || incompleteToolTurn);
-            if (native == null ? (boundActivity) : [9,10,11,12].includes(native)) {
+            if ([9,10,11,12].includes(native)) {
                 return {
                     phase: 'active',
                     userTurnId,
@@ -966,7 +897,7 @@
                 };
             }
 
-            if (native == null ? (followingAssistant && followingAssistant.hasCompletedText && !followingAssistant.streaming) : native === 13) {
+            if (native === 13) {
                 return {
                     phase: 'terminal',
                     userTurnId,
@@ -1417,13 +1348,7 @@
             const btn = this.getRetryButton(doc);
             if (!btn) return false;
             const native=this._nativeSelectorEngine?.click(btn);
-            if(this._nativeSelectorEngine)return native===true;
-            try {
-                btn.click();
-                return true;
-            } catch {
-                return false;
-            }
+            return native===true;
         }
 
         getLastAssistantTurn(doc = (typeof document !== 'undefined' ? document : null)) {

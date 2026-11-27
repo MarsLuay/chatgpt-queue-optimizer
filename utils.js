@@ -137,10 +137,6 @@ function isClaudeUrl(url) {
 if (typeof globalThis !== 'undefined') {
     globalThis.extensionApiPromise = extensionApiPromise;
     globalThis.CpoBrowserApi = CpoBrowserApi;
-    globalThis.CHATGPT_HOSTS = CHATGPT_HOSTS;
-    globalThis.GEMINI_HOSTS = GEMINI_HOSTS;
-    globalThis.CLAUDE_HOSTS = CLAUDE_HOSTS;
-    globalThis.PROVIDER_HOSTS = PROVIDER_HOSTS;
     globalThis.getUrlProvider = getUrlProvider;
     globalThis.isSupportedProviderUrl = isSupportedProviderUrl;
     globalThis.isChatGPTUrl = isChatGPTUrl;
@@ -150,10 +146,6 @@ if (typeof globalThis !== 'undefined') {
 
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
-        CHATGPT_HOSTS,
-        GEMINI_HOSTS,
-        CLAUDE_HOSTS,
-        PROVIDER_HOSTS,
         getUrlProvider,
         isSupportedProviderUrl,
         isChatGPTUrl,

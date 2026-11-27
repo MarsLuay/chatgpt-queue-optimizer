@@ -31,11 +31,6 @@ const QUEUE_WAIT_POLICY = {
     interCommandDelayMs: 2000
 };
 const WAITING_COMMAND_PHASES = new Set(['waiting', 'awaiting-response', 'active-response']);
-const CONFIRMED_DELIVERY_STATES = new Set([
-    'confirmed-submission',
-    'active-response',
-    'terminal-awaiting-bookkeeping'
-]);
 const RETRYABLE_FAILURE_CLASSES = new Set([
     'transient',
     'generation-error',
@@ -115,7 +110,7 @@ async function discardHistorySource(request, sender) {
 function configureIdleDiscardAlarm(minutes) {
     if (!chrome.alarms) return;
     chrome.alarms.clear(IDLE_DISCARD_ALARM_NAME);
-    if ((globalThis.CpoQueueEngine?.call('cpo_tab_alarm',[Number(minutes)]) ?? Number(ALLOWED_IDLE_DISCARD_MINUTES.has(Number(minutes)))) === 1) {
+    if ((globalThis.CpoQueueEngine?.call('cpo_tab_alarm',[Number(minutes)]) ?? 0) === 1) {
         chrome.alarms.create(IDLE_DISCARD_ALARM_NAME, { periodInMinutes: IDLE_DISCARD_PERIOD_MINUTES });
     }
 }
@@ -419,7 +414,7 @@ function isVerifiedFreshConversation(adapter, identity, fromConversationId, navi
 
 async function confirmFreshConversationIdentity(tabId, job, adapter, fromConversationId) {
     const now=Date.now();
-    const deadline=globalThis.CpoQueueEngine?.timestampMath?.(0,now,20000)??NaN;
+    const deadline=requiredQueueDecision(globalThis.CpoQueueEngine?.timestampMath?.(0,now,20000));
     const pollMs = Math.max(20, Number(QUEUE_WAIT_POLICY.submissionAckPollMs) || 50);
 
     while (Date.now() <= deadline) {
@@ -1865,7 +1860,7 @@ function handleProcessRecovered(tabId, job) {
 
 async function handleProcessRetryWait(tabId, job) {
     const retryNow=Date.now();
-    const remainingMs=globalThis.CpoQueueEngine?.timestampMath?.(2,Number(job.nextRetryAt||0),retryNow)??NaN;
+    const remainingMs=requiredQueueDecision(globalThis.CpoQueueEngine?.timestampMath?.(2,Number(job.nextRetryAt||0),retryNow));
     const interrupted = await interruptibleSleep(tabId, job, remainingMs);
 
     if (interrupted || !jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
@@ -2242,7 +2237,7 @@ function getDiagnosticTurnIdentity(job, details = {}) {
 }
 
 function collectDeliveryDiagnostics(job, extra = {}) {
-    const pick=(...values)=>globalThis.CpoQueueEngine?.diagnosticPick?.(...values)??values.find(Boolean)??'';
+    const pick=(...values)=>globalThis.CpoQueueEngine?.diagnosticPick?.(...values)??'';
     const turnIdentity = getDiagnosticTurnIdentity(job, extra);
     return {
         ...extra,
@@ -2397,7 +2392,7 @@ function getRetryExhaustionReason(job, lastReason) {
 async function interruptibleSleep(tabId, job, ms) {
     const duration = Math.max(0, Number(ms) || 0);
     const now=Date.now();
-    const deadline=globalThis.CpoQueueEngine?.timestampMath?.(0,now,duration)??NaN;
+    const deadline=requiredQueueDecision(globalThis.CpoQueueEngine?.timestampMath?.(0,now,duration));
     const sliceMs = Math.max(5, Number(QUEUE_RETRY_POLICY.sleepSliceMs) || 250);
 
     while (Date.now() < deadline) {
@@ -2461,7 +2456,7 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
     job.retryExhausted = false;
     job.nextRetryDelayMs = delayMs;
     const retryNow=Date.now();
-    job.nextRetryAt=globalThis.CpoQueueEngine?.timestampMath?.(0,retryNow,delayMs)??NaN;
+    job.nextRetryAt=requiredQueueDecision(globalThis.CpoQueueEngine?.timestampMath?.(0,retryNow,delayMs));
     job.lastError = classification.reason;
     job.currentPhase = 'retry-wait';
     job.updatedAt = Date.now();
@@ -3898,7 +3893,7 @@ function flushQueueDebugLogs() {
             }
 
             const logs = Array.isArray(data[QUEUE_DEBUG_LOG_KEY]) ? data[QUEUE_DEBUG_LOG_KEY] : [];
-            const start=globalThis.CpoQueueEngine?.call('cpo_log_keep_start',[logs.length,entries.length,MAX_QUEUE_DEBUG_LOG_ENTRIES])??Math.max(0,logs.length+entries.length-MAX_QUEUE_DEBUG_LOG_ENTRIES);
+            const start=globalThis.CpoQueueEngine?.call('cpo_log_keep_start',[logs.length,entries.length,MAX_QUEUE_DEBUG_LOG_ENTRIES])??logs.length+entries.length;
             const nextLogs = [...logs.slice(Math.min(start,logs.length)), ...entries.slice(Math.max(0,start-logs.length))]
                 .map((entry) => ({
                     ...entry,
