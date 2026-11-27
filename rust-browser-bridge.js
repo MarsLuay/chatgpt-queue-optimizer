@@ -21,11 +21,11 @@
                     cpo: { host: (op, a, b, c) => this.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
                 });
                 const core = result.instance.exports;
-                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 4 ||
+                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 5 ||
                     !['cpo_collect_resources', 'cpo_discover_messages', 'cpo_execute_media',
                         'cpo_apply_window', 'cpo_window_visible', 'cpo_capture_history', 'cpo_process_mutations',
                         'cpo_cache_ttl', 'cpo_cache_valid', 'cpo_cache_nodes_valid', 'cpo_mutation_delay', 'cpo_provider_selectors', 'cpo_dom_composer_write', 'cpo_dom_composer_read',
-                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool'].every(name => typeof core[name] === 'function')) {
+                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool', 'cpo_ui_render', 'cpo_ui_sequence_edit', 'cpo_ui_next_limit', 'cpo_ui_sequence_select'].every(name => typeof core[name] === 'function')) {
                     throw new Error('Browser WASM ABI mismatch');
                 }
                 this.exports = core;
@@ -189,6 +189,19 @@
                 return core.cpo_dom_incomplete_tool(ctx.candidates.length)===1;
             });
         }
+
+        renderUI(kind,root,rows,limit=rows.length,onAction=()=>{}) {
+            if(!root||!Array.isArray(rows))return false;
+            const doc=root.ownerDocument||document;
+            return this.invoke({root,doc,rows,onAction,uiNodes:[doc.createDocumentFragment()],decoder:new TextDecoder()},(core)=>
+                core.cpo_ui_render(kind,rows.length,limit)===1);
+        }
+        sequenceEdit(messages,action,index=0,text='') {
+            return this.invoke({messages,value:text},core=>
+                core.cpo_ui_sequence_edit(action,index,messages.length,Number(!!text))===1);
+        }
+        nextLimit(total,shown) { return this.invoke({},core=>core.cpo_ui_next_limit(total,shown)>>>0); }
+        sequenceSelection(flags,count) { return this.invoke({},core=>core.cpo_ui_sequence_select(flags,count)>>>0); }
 
         handle(node) {
             if (!node) return 0;
@@ -517,6 +530,51 @@
                     const tool=ctx.candidates[a];
                     return Number(turn===ctx.normalize(tool.innerText||tool.textContent||''));
                 }
+                case 110: {
+                    const tag=['div','span','article','h2','button','option','br','strong','p'][a];
+                    if(!tag)throw new Error('Invalid native UI tag');
+                    const node=ctx.doc.createElement(tag);
+                    if(tag==='button')node.type='button';
+                    ctx.uiNodes.push(node);
+                    return ctx.uiNodes.length-1;
+                }
+                case 111: case 112: case 113: case 120: {
+                    const value=ctx.decoder.decode(new Uint8Array(this.exports.memory.buffer,b,c));
+                    const node=ctx.uiNodes[a];
+                    if(op===111)node.className=value;
+                    else if(op===112)node.textContent=value;
+                    else if(op===113)node.style.cssText=value;
+                    else node.value=value;
+                    return 1;
+                }
+                case 114: {
+                    const value=ctx.rows[b]?.fields?.[c]??(c===1?ctx.rows[b]?.more:'')??'';
+                    ctx.uiNodes[a].textContent=String(value);
+                    return 1;
+                }
+                case 115: ctx.uiNodes[a].appendChild(ctx.uiNodes[b]);return 1;
+                case 116: return ctx.rows[a]?.flags||0;
+                case 117: {
+                    const dispatch=ctx.onAction;
+                    ctx.uiNodes[a].addEventListener('click',()=>dispatch(c,b));
+                    return 1;
+                }
+                case 118: ctx.uiNodes[a].value=String(ctx.rows[b]?.fields?.[c]??'');return 1;
+                case 119: ctx.uiNodes[a].disabled=!!(b&1);ctx.uiNodes[a].selected=!!(b&2);return 1;
+                case 121: {
+                    const value=String(ctx.rows[b]?.fields?.[c]??'');
+                    // Only a single safe class token may cross the boundary.
+                    if(/^[a-z0-9_-]+$/.test(value))ctx.uiNodes[a].classList.add(value);
+                    return 1;
+                }
+                case 122: ctx.root.replaceChildren(ctx.uiNodes[0]);return 1;
+                case 123:
+                    if(a===0)ctx.messages.push(ctx.value);
+                    else if(a===1)ctx.messages[b]=ctx.value;
+                    else if(a===2)ctx.messages.splice(b,1);
+                    else if(a===3)ctx.messages.length=0;
+                    else return 0;
+                    return 1;
                 default: throw new Error('Unknown Rust browser host operation: ' + op);
             }
         }
