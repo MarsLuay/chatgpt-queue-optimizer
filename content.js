@@ -48,6 +48,9 @@
       this._messageCacheTimer = null;
       /** @type {WeakMap<Element, Record<string, string>>} */
       this.mediaOriginals = new WeakMap();
+      this.mediaJournal = new Set();
+      this.mediaJournalKeys = new WeakMap();
+      this.mediaJournalFinalizer = typeof FinalizationRegistry==='function' ? new FinalizationRegistry(ref=>this.mediaJournal.delete(ref)) : null;
       this.mediaStats = { imagesEvicted: 0, playbackEvicted: 0, restored: 0, estimatedImageBytes: 0 };
       this._loggedSelector = null;
       this._isRefreshing = false;
@@ -595,43 +598,8 @@
     sampleResources(messages) {
       const nativeSample = this.browserEngine?.sample(messages);
       if (nativeSample) return nativeSample;
-      const sample = {
-        time: Date.now(), totalTurns: messages.length, sampledTurns: 0,
-        nodes: 0, textChars: 0, images: 0, media: 0, surfaces: 0,
-        truncatedTurns: 0, units: 0, available: false
-      };
-      if (typeof document === 'undefined' || typeof document.createTreeWalker !== 'function') return sample;
-      sample.available = true;
-      const start = Math.max(0, messages.length - 32);
-      for (let i = messages.length - 1; i >= start; i--) {
-        const root = messages[i];
-        if (!root || root.isConnected === false) continue;
-        // SHOW_ALL includes text nodes; reading Text.length does not copy text.
-        const walker = document.createTreeWalker(root, 0xffffffff);
-        let node = /** @type {Node | null} */ (root);
-        let visited = 0;
-        while (node && visited < 512) {
-          visited++;
-          sample.nodes++;
-          if (node.nodeType === 3) {
-            sample.textChars = Math.min(0xffffffff, sample.textChars + (/** @type {Text} */ (node)).length);
-          } else if (node.nodeType === 1) {
-            const tag = (/** @type {Element} */ (node)).localName;
-            if (tag === 'img') sample.images++;
-            else if (tag === 'video' || tag === 'audio') sample.media++;
-            else if (tag === 'canvas' || tag === 'iframe') sample.surfaces++;
-          }
-          node = walker.nextNode();
-        }
-        if (node) sample.truncatedTurns++;
-        sample.sampledTurns++;
-      }
-      const args = [sample.nodes, sample.textChars, sample.images, sample.media,
-        sample.surfaces, sample.truncatedTurns];
-      sample.units = this.policyCall('cpo_resource_units', args, () =>
-        Math.min(0xffffffff, sample.nodes + Math.ceil(sample.textChars / 128) +
-          sample.images * 32 + sample.media * 128 + sample.surfaces * 128 + sample.truncatedTurns * 512));
-      return sample;
+      return {time:Date.now(),totalTurns:messages.length,sampledTurns:0,nodes:0,textChars:0,
+        images:0,media:0,surfaces:0,truncatedTurns:0,units:0,available:false};
     }
 
     getResourceSample(messages) {
@@ -1554,6 +1522,7 @@
 
     applyWindowing(messages = null) {
       if (!this.config.enabled) return;
+      if(!this.nativeCore||!this.browserEngine?.exports){this.unbindOptimizer();return;}
 
       messages = messages || this.getMessageNodes();
       if (messages.length === 0) return;
@@ -1640,6 +1609,7 @@
       }
       if (!changed) return false;
       this.mediaOriginals.set(element, originals);
+      this.trackSources(element);
       for (const name of names) {
         if (Object.prototype.hasOwnProperty.call(originals, name) &&
             element.getAttribute(name) === originals[name]) element.removeAttribute(name);
@@ -1647,39 +1617,61 @@
       return true;
     }
 
+    trackSources(element) {
+      // Weak references avoid keeping detached conversation trees alive.
+      if(typeof WeakRef!=='function')return;
+      this.mediaJournal ||= new Set();
+      this.mediaJournalKeys ||= new WeakMap();
+      if(this.mediaJournalKeys.has(element))return;
+      const ref=new WeakRef(element);
+      this.mediaJournal.add(ref);this.mediaJournalKeys.set(element,ref);
+      this.mediaJournalFinalizer?.register(element,ref,ref);
+      if(!this.mediaJournalFinalizer && this.mediaJournal.size%256===0){
+        for(const entry of this.mediaJournal)if(!entry.deref())this.mediaJournal.delete(entry);
+      }
+    }
+
+    forgetSources(element) {
+      this.mediaOriginals.delete(element);
+      const ref=this.mediaJournalKeys?.get(element);
+      if(ref){
+        this.mediaJournal?.delete(ref);this.mediaJournalKeys.delete(element);
+        this.mediaJournalFinalizer?.unregister(ref);
+      }
+    }
+
     restoreSources(element) {
       const originals = this.mediaOriginals.get(element);
       if (!originals) return false;
-      // Site changes win over cached attributes. Never overwrite new values.
-      this.mediaOriginals.delete(element);
-      if (['src', 'srcset'].some(name => element.hasAttribute(name))) return false;
-      for (const [name, value] of Object.entries(originals)) element.setAttribute(name, value);
+      // A new application source takes precedence. Keep the journal until
+      // writes finish, so a failed restoration can still be recovered.
+      if (['src', 'srcset'].some(name => element.hasAttribute(name) &&
+          element.getAttribute(name)!==originals[name])) {
+        this.forgetSources(element);
+        return false;
+      }
+      for (const [name,value] of Object.entries(originals)){
+        if(!element.hasAttribute(name))element.setAttribute(name,value);
+      }
+      this.forgetSources(element);
       this.mediaStats.restored++;
       return true;
     }
 
-    preventImageLoading(element) {
-      if (this.browserEngine?.media(element, 0) != null) return;
-      for (const img of element.querySelectorAll('img')) {
-        const width = this.policyCount(img.naturalWidth);
-        const height = this.policyCount(img.naturalHeight);
-        let changed = false;
-        const picture = img.closest?.('picture');
-        const sources = picture && element.contains(picture) ? Array.from(picture.querySelectorAll('source[srcset]')) : [];
-        // Treat responsive image candidates as a group: leave the whole
-        // group alone if any candidate uses an application-owned payload.
-        if ([img, ...sources].some(node => ['src', 'srcset'].some(name =>
-          this.isProtectedMediaSource(node.getAttribute(name))))) continue;
-        for (const source of sources) changed = this.stashSources(source, ['srcset']) || changed;
-        changed = this.stashSources(img, ['srcset', 'src']) || changed;
-        if (changed) {
-          const bytes = this.policyCall('cpo_image_surface_bytes', [width, height],
-            () => Math.min(0xffffffff, width * height * 4));
-          this.mediaStats.imagesEvicted++;
-          this.mediaStats.estimatedImageBytes = Math.min(Number.MAX_SAFE_INTEGER,
-            this.mediaStats.estimatedImageBytes + bytes);
-        }
+    restoreMediaJournal() {
+      const entries=Array.from(this.mediaJournal||[]);
+      if(this.browserEngine?.restoreJournal(entries)===true)return;
+      // Last-resort platform rollback, not an alternative optimizer.
+      // A WASM instance that trapped cannot perform its own recovery.
+      for(const ref of entries){
+        const element=ref.deref();
+        if(!element){this.mediaJournal?.delete(ref);continue;}
+        try{this.restoreSources(element);}catch(error){console.warn('CPO: Media restoration needs a page reload.',error);}
       }
+    }
+
+    preventImageLoading(element) {
+      if(this.browserEngine?.media(element,0)==null)this.unbindOptimizer();
     }
 
     restoreImages(element) {
@@ -1691,7 +1683,7 @@
         const replaced = group.some(node => this.mediaOriginals.has(node) &&
           ['src', 'srcset'].some(name => node.hasAttribute(name)));
         if (replaced) {
-          for (const node of group) this.mediaOriginals.delete(node);
+          for (const node of group) this.forgetSources(node);
         } else {
           for (const source of sources) this.restoreSources(source);
           this.restoreSources(img);
@@ -1705,34 +1697,8 @@
       }
     }
 
-    canEvictPlayback(media) {
-      const sources = [media, ...media.querySelectorAll('source')];
-      const protectedSource = sources.some(source => {
-        const src = source.getAttribute('src') || '';
-        return this.isProtectedMediaSource(src);
-      }) || this.isProtectedMediaSource(media.currentSrc || '');
-      const flags = [media.paused === true ? 1 : 0, media.currentTime === 0 ? 1 : 0,
-        media.srcObject || media.mediaKeys || media.autoplay ? 1 : 0, protectedSource ? 1 : 0];
-      return this.policyCall('cpo_can_evict_playback', flags,
-        () => Number(flags[0] === 1 && flags[1] === 1 && !flags[2] && !flags[3])) === 1;
-    }
-
     evictPlayback(element) {
-      if (this.browserEngine?.media(element, 2) != null) return;
-      for (const media of element.querySelectorAll('video, audio')) {
-        if (!this.canEvictPlayback(media)) continue;
-        let changed = false;
-        for (const source of media.querySelectorAll('source[src]')) {
-          changed = this.stashSources(source, ['src']) || changed;
-        }
-        changed = this.stashSources(media, ['src']) || changed;
-        if (changed) {
-          this.mediaStats.playbackEvicted++;
-          // load() requests that the browser release the prior media pipeline.
-          // It may emit normal media lifecycle events.
-          try { media.load(); } catch {}
-        }
-      }
+      if(this.browserEngine?.media(element,2)==null)this.unbindOptimizer();
     }
 
     restorePlayback(element) {
@@ -1836,7 +1802,7 @@
     }
 
     refresh() {
-      if (!this.config.enabled) return;
+      if (!this.config.enabled || !this.nativeCore || !this.browserEngine?.exports) return;
       if (this._isRefreshing) return;
       if (this.provider?.supportsOptimizer && !this.getCurrentSurface().optimizerEligible) {
         this.unbindOptimizer();
@@ -1863,6 +1829,9 @@
         }
 
         this.applyWindowing(messages);
+      } catch(error) {
+        console.warn('CPO: Native optimization failed; restoring conversation.',error);
+        this.unbindOptimizer();
       } finally {
         this._isRefreshing = false;
       }
@@ -1889,12 +1858,17 @@
       const fromCache = Array.isArray(this._cachedMessages) ? this._cachedMessages : [];
       const messages = [...new Set([...fromDocument, ...fromContainer, ...fromCache])];
 
-      messages.forEach((message) => {
-        message.classList.remove('cpo-hidden');
-        message.classList.remove('cpo-offscreen');
-        this.restoreImages(message);
-        this.restorePlayback(message);
-      });
+      const restored=this.browserEngine?.restoreWindow(messages)===true;
+      if(!restored){
+        // Required emergency primitive path if the native runtime itself
+        // is missing or trapped. Never performs new optimization.
+        for(const message of messages){
+          try{this.restoreImages(message);this.restorePlayback(message);}
+          catch(error){console.warn('CPO: Media restoration needs a page reload.',error);}
+          finally{message.classList.remove('cpo-hidden','cpo-offscreen');}
+        }
+      }
+      this.restoreMediaJournal();
 
       if (this.state.moreBanner) {
         try {
