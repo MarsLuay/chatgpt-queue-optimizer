@@ -21,14 +21,16 @@ function Invoke-LoggedNative([string]$executable,[string[]]$arguments) {
     # Keep both streams visible and recorded without treating every stderr
     # line as a terminating error; the child exit code determines success.
     $ErrorActionPreference='Continue'
-    $LASTEXITCODE=$null
+    # PowerShell updates the global native exit-code variable. Do not shadow
+    # it with a function-local variable, which would remain null.
+    $global:LASTEXITCODE=$null
     & $executable @arguments 2>&1 | ForEach-Object {
         $line=[string]$_
         if ($_ -is [System.Management.Automation.ErrorRecord]) { $line='[stderr] '+$line }
         Write-InstallLog $line
     }
-    $code=$LASTEXITCODE
-    if ($null -eq $code) { throw 'Child process did not return an exit code.' }
+    $code=$global:LASTEXITCODE
+    if ($null -eq $code) { throw "Child process did not return an exit code: $executable" }
     return [int]$code
 }
 try {
@@ -54,12 +56,14 @@ try {
     $pythonArgs=@()
     foreach ($name in @('py.exe','python.exe')) {
         $command=Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $command) { continue }
+        if (-not $command) { Write-InstallLog "Python candidate not found: $name"; continue }
+        Write-InstallLog ("Probing Python: "+$command.Source)
         $prefix=@()
         if ($name -eq 'py.exe') { $prefix=@('-3') }
         $probe=@($prefix)+@('-c','import sys; sys.exit(0 if sys.version_info.major == 3 else 1)')
-        $code=Invoke-LoggedNative $command.Source $probe
-        if ($code -eq 0) { $python=$command.Source; $pythonArgs=@($prefix); break }
+        try { $code=Invoke-LoggedNative $command.Source $probe }
+        catch { Write-InstallLog ("Python candidate could not run: "+$_.Exception.Message); continue }
+        if ($code -eq 0) { $python=$command.Source; $pythonArgs=@($prefix); Write-InstallLog ("Python selected: "+$python); break }
         Write-InstallLog ("Python candidate failed with exit code "+$code)
     }
     if (-not $python) { throw 'Python 3 was not found or could not run. Install Python 3 and retry.' }
@@ -110,6 +114,16 @@ try {
     $timer.Stop()
     $summary='Finished with exit code {0}; elapsed {1:F1} seconds.' -f $result,$timer.Elapsed.TotalSeconds
     try { Write-InstallLog $summary } catch { [Console]::Error.WriteLine($summary) }
-    if ($logPath) { Write-Host ("Full diagnostic log: "+$logPath) }
+    if ($logPath) {
+        Write-Host ("Full diagnostic log: "+$logPath)
+        Write-Host ''
+        Write-Host '================ BEGIN FULL INSTALLER LOG ================'
+        try {
+            Get-Content -LiteralPath $logPath -Encoding UTF8 -ErrorAction Stop | ForEach-Object { Write-Host $_ }
+        } catch {
+            [Console]::Error.WriteLine("Could not display saved log: $($_.Exception.Message)")
+        }
+        Write-Host '================= END FULL INSTALLER LOG ================='
+    }
 }
 exit $result
