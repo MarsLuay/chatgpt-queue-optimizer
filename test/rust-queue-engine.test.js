@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 3);
+    assert.equal(e.cpo_queue_abi(), 4);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -178,4 +178,45 @@ test('native rollover decisions respect persisted stage checkpoints', {skip}, as
     assert.equal(e.cpo_rollover_fresh(2,16),0);
     assert.equal(e.cpo_rollover_generation(3,0),4);
     assert.equal(e.cpo_rollover_generation(4,1),4);
+});
+
+test('native queue serialization matches JSON.stringify for durable snapshots', {skip}, async () => {
+    const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
+    engine.install(instance.exports);
+    const values = [
+        {runningJobs:{},queueDurableJobs:{},isRunning:false},
+        {queue:['quote " slash \\', '\n\r\t\b\f\u0000', '\ud800', '\udc00', 'x'.repeat(1023)+'😀','a'.repeat(20000)],currentMessage:'こんにちは',n:123,negativeZero:-0,ts:1800000000000},
+        {2:'two',1:'one',a:undefined,b:null,c:[true,false,undefined,NaN,Infinity],d:1e-20,e:1e21},
+        {nested:{a:[{},[],null]}}
+    ];
+    for(const value of values)assert.equal(engine.serialize(value),JSON.stringify(value));
+    const cyclic={};cyclic.self=cyclic;
+    assert.equal(engine.serialize(cyclic),null);
+    assert.equal(engine.serialize(new Date()),null);
+    const e=instance.exports;
+    assert.ok(new Uint16Array(e.memory.buffer,e.cpo_fingerprint_buffer(),e.cpo_fingerprint_capacity()).every(n=>n===0));
+    assert.ok(new Uint16Array(e.memory.buffer,e.cpo_json_output(),e.cpo_fingerprint_capacity()*6).every(n=>n===0));
+});
+
+test('tab lifecycle rejects protected tabs and requires final safety confirmation', {skip}, async () => {
+    const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
+    engine.install(instance.exports);
+    const now=1800000000000;
+    const tab={id:5,active:false,status:'complete',lastAccessed:now-900000};
+    assert.equal(engine.tabDiscard(tab,0,0,15,now,'chatgpt'),1);
+    assert.equal(engine.tabDiscard({...tab,lastAccessed:now-899999},0,0,15,now,'chatgpt'),0);
+    for(const key of ['active','highlighted','pinned','audible','incognito','discarded']){
+        assert.equal(engine.tabDiscard({...tab,[key]:true},0,0,15,now,'chatgpt'),0);
+    }
+    assert.equal(engine.tabDiscard(tab,1,1,0,now,'chatgpt',false,true,true),1);
+    assert.equal(engine.tabDiscard(tab,1,1,0,now,'chatgpt',true,true,true),0);
+    assert.equal(engine.tabDiscard(tab,1,1,0,now,'chatgpt',false,false,true),0);
+    assert.equal(engine.tabDiscard(tab,1,1,0,now,'chatgpt',false,true,false),0);
+    const e=instance.exports;
+    assert.equal(e.cpo_tab_reload_next(0,0),1);
+    assert.equal(e.cpo_tab_reload_next(1,6),2);
+    assert.equal(e.cpo_tab_reload_next(2,6),3);
+    assert.equal(e.cpo_tab_reload_next(3,1),4);
+    assert.equal(e.cpo_tab_recover_poll(1,30000,2),0);
+    assert.equal(e.cpo_tab_recover_poll(1,30000,1),2);
 });
