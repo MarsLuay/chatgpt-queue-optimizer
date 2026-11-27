@@ -2350,10 +2350,10 @@ The sequence should do the following: `;
                     files: ['styles.css']
                 }).catch(() => {});
 
-                await executeScript({
-                    target: { tabId },
-                    files: ['rust-browser-bridge.js', 'content.js']
-                });
+                // Firefox MV2 accepts one script file per legacy injection.
+                for (const file of ['rust-browser-bridge.js', 'content.js']) {
+                    await executeScript({ target: { tabId }, files: [file] });
+                }
 
                 await sleep(250);
             } catch (injectError) {
