@@ -173,6 +173,11 @@
           sendResponse({ success: true, enabled: this.config.enabled });
           break;
 
+        case 'CPO_HISTORY_BATCH':
+          try { sendResponse(this.captureHistoryBatch(message)); }
+          catch { sendResponse({ ok: false, error: 'History capture failed.' }); }
+          break;
+
         case 'CAN_DISCARD_INACTIVE_TAB':
           sendResponse({ safe: this.canDiscardInactiveTab() });
           break;
@@ -331,6 +336,59 @@
         this.state.isInitialized = true;
         console.log('CPO: Initialized successfully');
       });
+    }
+
+    // Explicit snapshot requests only. No HTML, attachments, credentials,
+    // media URLs or React state are serialized; text is bounded per turn.
+    captureHistoryBatch(request) {
+      if (!this.provider?.supportsOptimizer || !this.canDiscardInactiveTab()) {
+        return { ok: false, error: 'Chat must be inactive, idle and free of drafts or uploads.' };
+      }
+      const surface = this.getCurrentSurface();
+      if (!surface.conversationId || !surface.optimizerEligible) {
+        return { ok: false, error: 'Open a saved ChatGPT conversation first.' };
+      }
+      const messages = this.sortMessagesByPosition(this.getMessageNodes());
+      const total = messages.length;
+      const offset = Number(request.offset || 0);
+      if (!Number.isSafeInteger(offset) || offset < 0 || offset > total) return { ok: false, error: 'Invalid history offset.' };
+      // A route or count change aborts the snapshot rather than mixing chats.
+      const identity = surface.key;
+      if (request.identity != null && (request.identity !== identity || request.total !== total)) {
+        return { ok: false, error: 'Conversation changed during capture. Start again.' };
+      }
+      const end = Math.min(total, offset + 16);
+      const records = [];
+      for (let index = offset; index < end; index++) {
+        const node = messages[index];
+        if (!node?.isConnected) return { ok: false, error: 'Conversation DOM changed during capture.' };
+        const roleNode = node.matches?.('[data-message-author-role]') ? node :
+          node.querySelector?.('[data-message-author-role]');
+        const rawRole = roleNode?.getAttribute('data-message-author-role');
+        const role = rawRole === 'user' || rawRole === 'assistant' ? rawRole : 'message';
+        // Walk text nodes, never serialize a full subtree or allocate its
+        // complete textContent. Skip controls, hidden tool markup and scripts.
+        const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+        const parts = [];
+        let chars = 0;
+        let visited = 0;
+        let textNode;
+        let truncated = false;
+        while ((textNode = walker.nextNode())) {
+          if (++visited > 4096 || chars >= 32768) { truncated = true; break; }
+          if (textNode.parentElement?.closest('button,script,style,noscript,textarea,input,select,[aria-hidden="true"],[contenteditable="true"]')) continue;
+          const text = /** @type {Text} */ (textNode);
+          const remaining = 32768 - chars;
+          const take = Math.min(text.length, remaining);
+          if (take) {
+            parts.push(text.substringData(0, take));
+            chars += take;
+          }
+          if (take < text.length) { truncated = true; break; }
+        }
+        records.push({ index, role, text: parts.join(' '), truncated });
+      }
+      return { ok: true, identity, total, next: end, records };
     }
 
     canDiscardInactiveTab() {
