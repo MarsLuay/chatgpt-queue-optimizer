@@ -1,7 +1,7 @@
 //! Queue execution decisions and streaming legacy-compatible UTF-16 fingerprints.
 
 #[no_mangle]
-pub extern "C" fn cpo_queue_abi() -> u32 { 12 }
+pub extern "C" fn cpo_queue_abi() -> u32 { 13 }
 
 const OFFSET: u32 = 2166136261;
 const PRIME: u32 = 16777619;
@@ -929,7 +929,102 @@ mod live_state {
         revision: u64,
         metadata: Option<(u64, Vec<u8>)>,
     }
+    // Field indices are obtained from the canonical durable schema.
+    fn field(name:&str)->usize{super::DURABLE_FIELDS.iter().position(|f|f.name==name).expect("known job field")}
+    const EMPTY:&[u8]=b"\"\"";
+    const NULL:&[u8]=b"null";
+    const ZERO:&[u8]=b"0";
+    const FALSE:&[u8]=b"false";
+    const TRUE:&[u8]=b"true";
+    fn json_len(bytes:&[u8])->usize{
+        // JSON.stringify emits UTF-8 with escaped control/lone surrogate
+        // units; count the original UTF-16 length without decoding a prompt.
+        if bytes.first()!=Some(&b'"')||bytes.last()!=Some(&b'"'){return 0;}
+        let mut i=1;let mut count=0;
+        while i+1<bytes.len(){
+            let c=bytes[i];count+=1;
+            if c==b'\\'{i+=if bytes.get(i+1)==Some(&b'u'){6}else{2};}
+            else if c<128{i+=1;}
+            else if c<224{i+=2;}
+            else if c<240{i+=3;}
+            else{i+=4;count+=1;}
+        }
+        count
+    }
+    fn present(bytes:&[u8])->bool{!bytes.is_empty()&&bytes!=NULL&&bytes!=EMPTY&&bytes!=FALSE&&bytes!=ZERO}
+    fn number(bytes:&[u8])->u32{std::str::from_utf8(bytes).ok().and_then(|v|v.parse::<u32>().ok()).unwrap_or(0)}
+    fn quoted(text:&str)->Vec<u8>{let mut v=Vec::with_capacity(text.len()+2);v.push(b'"');v.extend_from_slice(text.as_bytes());v.push(b'"');v}
+    // Patch wire: repeated field index, byte length, JSON scalar bytes.
+    // Parse the entire frame before any state mutation.
+    fn patch(input:&[u8])->Option<Vec<(usize,Option<Vec<u8>>)>>{
+        let mut at=0;let mut out=Vec::new();
+        while at<input.len(){
+            let idx=u32::from_le_bytes(input.get(at..at+4)?.try_into().ok()?) as usize;
+            let len=u32::from_le_bytes(input.get(at+4..at+8)?.try_into().ok()?) as usize;
+            at+=8;let end=at.checked_add(len)?;
+            if idx==QUEUE||idx>super::DURABLE_FIELDS.len(){return None;}
+            let value=input.get(at..end)?;
+            out.push((idx,if len==0{None}else{Some(value.to_vec())}));at=end;
+        }
+        Some(out)
+    }
     impl Job {
+        fn get(&self,name:&str)->&[u8]{self.fields[field(name)].as_deref().unwrap_or(NULL)}
+        fn set(&mut self,name:&str,value:&[u8]){self.fields[field(name)]=Some(value.to_vec());}
+        fn num(&self,name:&str)->u32{number(self.get(name))}
+        fn truth(&self,name:&str)->bool{present(self.get(name))}
+        fn confirmed(&self)->bool{self.truth("submittedUserTurnId")||[b"\"confirmed-submission\"".as_slice(),b"\"active-response\"",b"\"terminal-awaiting-bookkeeping\""].contains(&self.get("deliveryState"))}
+        fn remaining(&self)->u32{(self.queue.len() as u32).saturating_add(self.truth("currentMessage") as u32)}
+        fn total(&self)->u32{super::cpo_queue_total(self.num("totalMessages"),self.num("completedCount"),self.remaining())}
+        fn reset(&mut self,mask:u32){
+            if mask&1!=0{
+                for n in ["retryAttemptCount","nextRetryDelayMs","nextRetryAt"]{self.set(n,ZERO);}
+                for n in ["lastRetryableReason","retryClass","retryMode"]{self.set(n,EMPTY);}
+                self.set("retryExhausted",FALSE);
+            }
+            if mask&2!=0{
+                for n in ["waitStartedAt","lastResearchProgressAt"]{self.set(n,ZERO);}
+                for n in ["sawDeepResearch","sawGenerating"]{self.set(n,FALSE);}
+            }
+            if mask&4!=0{
+                for n in ["deliveryState","commandId","commandFingerprint","submissionAckSource","terminalAckSource","lastResponsePhase"]{self.set(n,EMPTY);}
+                for n in ["submittedUserTurnId","assistantTurnId"]{self.set(n,NULL);}
+            }
+        }
+        fn requeue(&mut self){
+            if self.truth("currentMessage"){
+                let current=self.fields[field("currentMessage")].take().unwrap();
+                self.queue.push_front(current);
+            }
+            self.set("currentMessage",NULL);self.set("currentCommandNumber",ZERO);
+        }
+        fn snapshot(&self)->Vec<u8>{
+            let mut out=vec![b'{'];
+            fn emit(out:&mut Vec<u8>,key:&str,val:&[u8]){
+                if out.len()>1{out.push(b',');}
+                out.extend(quoted(key));out.push(b':');out.extend_from_slice(val);
+            }
+            // No current/pending prompt contents cross the snapshot boundary.
+            for n in ["tabId","provider","conversationId","conversationType","targetKey","isRunning","isPaused","isStopped","pausedReason","lastError","runId","completedCount","currentCommandNumber","currentPhase","waitForIdleBeforeSend","deliveryTimeoutAttempts","retryAttemptCount","lastRetryableReason","retryClass","retryMode","nextRetryDelayMs","nextRetryAt","retryExhausted","waitStartedAt","lastResearchProgressAt","sawDeepResearch","sawGenerating","deliveryState","commandId","commandFingerprint","submittedUserTurnId","assistantTurnId","submissionAckSource","terminalAckSource","lastResponsePhase","rolloverInProgress","rolloverStage","rolloverReason","rolloverFromConversationId","rolloverToConversationId","rolloverNavigationStarted","rolloverRebindApplied","handoffSubmitted","handoffEstablished","handoffFingerprint","conversationGeneration","startedAt","updatedAt"]{
+                let raw=self.get(n);
+                let fallback=match n{
+                    "provider"=>b"\"chatgpt\"".as_slice(),
+                    "conversationType"=>if self.truth("conversationId"){b"\"existing\""}else{b"\"unknown\""},
+                    "conversationId"|"submittedUserTurnId"|"assistantTurnId"|"rolloverFromConversationId"|"rolloverToConversationId"=>NULL,
+                    "isRunning"|"isPaused"|"isStopped"|"waitForIdleBeforeSend"|"retryExhausted"|"sawDeepResearch"|"sawGenerating"|"rolloverInProgress"|"rolloverNavigationStarted"|"rolloverRebindApplied"|"handoffSubmitted"|"handoffEstablished"=>FALSE,
+                    "tabId"|"completedCount"|"currentCommandNumber"|"deliveryTimeoutAttempts"|"retryAttemptCount"|"nextRetryDelayMs"|"nextRetryAt"|"waitStartedAt"|"lastResearchProgressAt"|"conversationGeneration"|"startedAt"|"updatedAt"=>ZERO,
+                    _=>EMPTY
+                };
+                emit(&mut out,n,if present(raw){raw}else{fallback});
+            }
+            let status=if self.truth("isPaused"){"paused"}else if self.truth("isRunning"){"running"}else if self.truth("isStopped"){"stopped"}else{"idle"};
+            emit(&mut out,"status",&quoted(status));
+            for (name,value) in [("remaining",self.remaining() as usize),("pending",self.queue.len()),("totalMessages",self.total() as usize),("currentMessageLength",json_len(self.get("currentMessage"))),("nextMessageLength",self.queue.front().map_or(0,|v|json_len(v)))]{
+                emit(&mut out,name,value.to_string().as_bytes());
+            }
+            emit(&mut out,"hasCurrentMessage",if self.truth("currentMessage"){TRUE}else{FALSE});
+            out.push(b'}');out
+        }
         fn new() -> Self {
             Self { fields: vec![None; super::DURABLE_FIELDS.len()+1], queue: VecDeque::new(), revision: 0, metadata: None }
         }
@@ -980,10 +1075,105 @@ mod live_state {
             if changed { self.changed(id); }
             true
         }
+
+        // A complete transition validates its frame and preconditions before
+        // changing the deque or fields, then advances the revision once.
+        fn transaction(&mut self,id:u32,op:u32,arg:u32,now:f64)->bool{
+            let input=std::mem::take(&mut self.input);
+            let Some(job)=self.jobs.get_mut(&id) else{return false;};
+            if !now.is_finite()||now<0.0{return false;}
+            let time=now.to_string();
+            let Some(fields)=patch(&input) else{return false;};
+            let value=|name:&str|fields.iter().find(|(i,_)|*i==field(name)).and_then(|(_,v)|v.as_deref());
+            match op{
+                0=>{}, // generic atomic field patch
+                1=>{if arg&!7!=0{return false;}job.reset(arg);},
+                2=>{ // insert prompt, keeping paused next-insertion semantics
+                    let Some(prompt)=value("currentMessage") else{return false;};
+                    if !present(prompt)||prompt.first()!=Some(&b'"'){return false;}
+                    let paused=job.truth("isPaused");
+                    if !paused&&!job.truth("isRunning"){return false;}
+                    if arg&1!=0||paused&&job.queue.is_empty(){job.queue.push_back(prompt.to_vec());}
+                    else if paused{job.queue.insert(1,prompt.to_vec());}
+                    else{job.queue.push_front(prompt.to_vec());}
+                    // total is measured before insertion to avoid double counting.
+                    let total=job.num("totalMessages").max(job.num("completedCount").saturating_add(job.remaining().saturating_sub(1))).saturating_add(1);
+                    job.set("totalMessages",total.to_string().as_bytes());
+                },
+                3=>{ // completion bookkeeping
+                    if !job.truth("currentMessage"){return false;}
+                    let completed=job.num("completedCount").saturating_add(1);
+                    job.set("completedCount",completed.to_string().as_bytes());
+                    job.set("currentMessage",NULL);job.set("currentCommandNumber",ZERO);
+                    job.set("currentPhase",b"\"queued\"");job.set("deliveryTimeoutAttempts",ZERO);job.reset(7);
+                },
+                4=>{ // pause: never requeue acknowledged submissions
+                    let reason=value("pausedReason").unwrap_or(b"\"Queue paused because ChatGPT failed.\"");
+                    if !job.confirmed(){if job.truth("currentMessage"){job.requeue();job.reset(4);}job.set("currentCommandNumber",ZERO);}
+                    job.set("isRunning",FALSE);job.set("isPaused",TRUE);job.set("isStopped",FALSE);
+                    job.set("pausedReason",reason);job.set("lastError",reason);job.set("currentPhase",b"\"paused\"");job.reset(2);
+                },
+                5=>{ // resume paused queue
+                    if !job.truth("isPaused")||job.remaining()==0{return false;}
+                    let confirmed=job.confirmed()&&job.truth("currentMessage");
+                    job.set("isPaused",FALSE);job.set("isRunning",TRUE);job.set("isStopped",FALSE);
+                    job.set("pausedReason",EMPTY);job.set("lastError",EMPTY);
+                    job.set("currentPhase",if confirmed{b"\"awaiting-response\""}else{b"\"queued\""});job.reset(3);
+                },
+                6=>{ // retry settlement after delay, preserving confirmed sends
+                    if !job.truth("isRunning")||job.truth("isPaused")||job.truth("isStopped"){return false;}
+                    if job.truth("currentMessage")&&job.confirmed(){
+                        job.set("currentPhase",b"\"awaiting-response\"");job.set("deliveryState",b"\"confirmed-submission\"");job.reset(2);
+                    }else{job.requeue();job.set("currentPhase",b"\"queued\"");job.reset(4);}
+                    job.set("nextRetryAt",ZERO);
+                },
+                7=>{ // claim next command; fingerprint supplied for exact peek
+                    if !job.truth("isRunning")||job.truth("isPaused")||job.truth("isStopped")||job.truth("currentMessage"){return false;}
+                    let Some(expected)=value("currentMessage") else{return false;};
+                    if job.queue.front().map(Vec::as_slice)!=Some(expected)||value("commandFingerprint").is_none(){return false;}
+                    let prompt=job.queue.pop_front().unwrap();
+                    job.fields[field("currentMessage")]=Some(prompt);
+                    let n=job.num("completedCount").saturating_add(1);
+                    job.set("currentCommandNumber",n.to_string().as_bytes());
+                    job.set("lastError",EMPTY);job.set("currentPhase",b"\"sending\"");job.reset(6);
+                    job.set("deliveryState",b"\"pre-click\"");
+                    if let Some(fp)=value("commandFingerprint"){job.set("commandFingerprint",fp);}
+                    // run ID and number are generated by the host only for JSON
+                    // string escaping; command numbering is owned here.
+                    if let Some(cid)=value("commandId"){job.set("commandId",cid);}
+                },
+                8=>{ // arm retry atomically after asynchronous settings lookup
+                    if !job.truth("isRunning")||job.truth("isPaused")||job.truth("isStopped")||!job.truth("currentMessage"){return false;}
+                    let delay=arg.max(1);
+                    let n=job.num("retryAttemptCount").saturating_add(1);
+                    job.set("retryAttemptCount",n.to_string().as_bytes());job.set("retryExhausted",FALSE);
+                    job.set("nextRetryDelayMs",delay.to_string().as_bytes());
+                    job.set("nextRetryAt",(now+f64::from(delay)).to_string().as_bytes());job.set("currentPhase",b"\"retry-wait\"");job.reset(2);
+                    for name in ["retryMode","lastError","retryClass","lastRetryableReason"]{if let Some(v)=value(name){job.set(name,v);}}
+                },
+                9=>{ // authorized rollover rebind, generation advances once
+                    if !job.truth("rolloverInProgress"){return false;}
+                    for name in ["provider","conversationId","conversationType","targetKey"]{if value(name).is_none(){return false;}}
+                    for name in ["provider","conversationId","conversationType","targetKey"]{job.set(name,value(name).unwrap());}
+                    let id=job.get("conversationId").to_vec();job.set("rolloverToConversationId",&id);
+                    if !job.truth("rolloverRebindApplied"){let n=job.num("conversationGeneration").saturating_add(1);job.set("conversationGeneration",n.to_string().as_bytes());job.set("rolloverRebindApplied",TRUE);}
+                    job.set("rolloverStage",b"\"identity-confirmed\"");
+                },
+                10=>{ // recovered unconfirmed command
+                    if job.confirmed()||!job.truth("currentMessage"){return false;}
+                    job.requeue();job.set("currentPhase",b"\"queued\"");
+                },
+                _=>return false
+            }
+            if op==0{for (i,v) in fields{job.fields[i]=v;}}
+            if op!=1{job.set("updatedAt",time.as_bytes());}
+            self.changed(id);true
+        }
         fn read(&mut self, id: u32, field: u32, index: u32) -> u32 {
             self.output.clear();
             let Some(job) = self.jobs.get(&id) else { return 0; };
-            if field == METADATA {
+            if field == u32::MAX-1 { self.output=job.snapshot(); }
+            else if field == METADATA {
                 let Some((revision, bytes)) = &job.metadata else { return 0; };
                 if *revision != job.revision { return 0; }
                 self.output.extend_from_slice(bytes);
@@ -1035,6 +1225,10 @@ mod live_state {
     #[no_mangle]
     pub extern "C" fn cpo_live_write(id: u32, field: u32, op: u32, index: u32) -> u32 {
         STORE.with(|s| s.borrow_mut().mutate(id,field,op,index) as u32)
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_live_transaction(id:u32,op:u32,arg:u32,now:f64)->u32{
+        STORE.with(|s|s.borrow_mut().transaction(id,op,arg,now) as u32)
     }
     #[no_mangle]
     pub extern "C" fn cpo_live_read(id: u32, field: u32, index: u32) -> u32 {
@@ -1483,6 +1677,48 @@ mod presentation_batch {
         // input parser's accepted four-digit range.
         Some(format!("{}-{:02}-{:02}T{:02}:{:02}",v[0],v[1],v[2],v[3],v[4]))
     }
+
+    fn failure_class(f:&[&[u16]])->Option<Vec<Vec<u16>>>{
+        if f.len()!=4{return None;}
+        let flags=number(f[3]) as u32;let text=lower_ascii(f[1]);
+        let contains=|s:&str|{let needle=ascii(s);text.windows(needle.len()).any(|v|v==needle.as_slice())};
+        let mut class=if !f[2].is_empty(){f[2].to_vec()}else{ascii(
+            if flags&1!=0||contains("conversation-max-length")||contains("maximum length for this conversation"){"conversation-max-length"}
+            else if flags&2!=0||contains("queue was stopped"){"user-stop"}
+            else if flags&4!=0||contains("compatibility failure"){"compatibility"}
+            else if flags&8!=0||contains("stalled deep research"){"stalled-research"}
+            else if flags&16!=0{"retry-visible"}
+            else if flags&32!=0||contains("delivery time"){"timeout"}
+            else if flags&64!=0||contains("waiting for the user"){"waiting-for-user"}
+            else if flags&128!=0||contains("response was interrupted"){"interrupted"}
+            else if contains("not acknowledged as a new user turn"){"submission-unconfirmed"}
+            else if flags&256!=0||contains("chatgpt showed an error")||contains("error or retry state"){"generation-error"}
+            else if contains("timed out waiting"){"timeout"}
+            else if contains("could not read")||contains("could not inspect")||contains("could not send"){"transient"}
+            else if contains("queue was paused"){"non-retryable"}
+            else if eq(f[0],"send")||eq(f[0],"wait"){"transient"}else{"non-retryable"})};
+        if flags&16!=0&&(eq(&class,"generation-error")||eq(&class,"retry-visible")){class=ascii("retry-visible");}
+        let retry=["transient","generation-error","retry-visible","timeout","stalled-research","submission-unconfirmed"].iter().any(|v|eq(&class,v));
+        Some(vec![class,ascii(if retry{"1"}else{"0"})])
+    }
+    // Native state transition returns only the authorized field mutation.
+    // Browser storage keeps the record and lock; no prompt text is transferred.
+    fn scheduled_patch(f:&[&[u16]])->Option<Vec<Vec<u16>>>{
+        if f.len()!=6{return None;}
+        let op=number(f[0]) as u32;let state=number(f[1]) as u32;
+        let due=number(f[2]);let now=number(f[3]);let next=number(f[4]);
+        if !now.is_finite()||now<=0.0{return None;}
+        let (status,reason)=match op{
+            1 if super::cpo_schedule_action(1,state,due,now)==1=>("cancelled",Vec::new()),
+            3 if super::cpo_schedule_action(3,state,due,now)==1&&super::cpo_timestamp_valid(next)==1=>("pending",Vec::new()),
+            4 if super::cpo_schedule_action(4,state,due,now)==1=>("firing",Vec::new()),
+            5 if state==2=>("failed",ascii("Delivery interrupted by background restart. Retry only if the message is not already queued.")),
+            6 if state==2=>("failed",if f[5].is_empty(){ascii("Scheduled delivery failed.")}else{f[5].to_vec()}),
+            7 if state==2=>("completed",Vec::new()),
+            _=>return None
+        };
+        Some(vec![ascii(status),reason,f[3].to_vec(),if op==3{f[4].to_vec()}else{Vec::new()},if op==4||op==7{f[3].to_vec()}else{Vec::new()}])
+    }
     fn execute(op:u32,f:&[&[u16]])->Option<Vec<Vec<u16>>>{
         let single=|v:Vec<u16>|Some(vec![v]);
         match op{
@@ -1526,6 +1762,8 @@ mod presentation_batch {
             17=>parse_local_date(*f.first()?),
             18=>format_local_date(f).map(|s|vec![ascii(&s)]),
             19=>single(if valid_sequence_name(*f.first()?){ascii("1")}else{ascii("0")}),
+            20=>failure_class(f),
+            21=>scheduled_patch(f),
             _=>None
         }
     }
@@ -1624,3 +1862,16 @@ mod final_native_policy_tests{
         assert_eq!(cpo_timestamp_valid(f64::NAN),0);
     }
 }
+
+ // Binding decisions: 0 allow, 1 provider mismatch, 2 unsupported,
+ // 3 bind new to existing, 4 new mismatch, 5 existing mismatch,
+ // 6 existing to new, 7 existing to other, 8 bind previously unknown.
+ #[no_mangle]
+ pub extern "C" fn cpo_job_binding(stored:u32,current:u32,flags:u32)->u32{
+    if flags&1!=0{return 1;}
+    if current==3{return 2;}
+    if stored==2{return if current==1&&flags&4!=0{3}else if current==2{0}else{4};}
+    if stored==1&&flags&2!=0{return if current==1{if flags&8!=0{0}else{5}}else if current==2{6}else{7};}
+    if (stored==0||flags&2==0)&&(current==1||current==2){return 8;}
+    0
+ }

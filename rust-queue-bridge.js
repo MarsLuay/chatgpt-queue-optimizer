@@ -24,9 +24,9 @@
             'cpo_durable_number','cpo_durable_boolean','cpo_durable_retry_mode','cpo_durable_trim',
             'cpo_setting_number','cpo_setting_bool','cpo_popup_status','cpo_popup_remaining','cpo_popup_schedule_actions',
             'cpo_log_duplicate','cpo_log_keep_start','cpo_log_limit','cpo_log_sensitive',
-            'cpo_event_code','cpo_content_event_kind','cpo_api_mode','cpo_api_path','cpo_injection_route','cpo_async_transition','cpo_live_new','cpo_live_delete','cpo_live_epoch','cpo_live_len','cpo_live_input','cpo_live_write','cpo_live_read','cpo_live_output','cpo_live_wipe','cpo_catalog_len','cpo_catalog_items','cpo_catalog_word','cpo_enter_eligible','cpo_enter_action','cpo_provider_predicate','cpo_log_plan','cpo_diag_pick','cpo_diag_reset','cpo_diag_update','cpo_diag_finish','cpo_log_walk_begin','cpo_log_walk_plan','cpo_log_walk_next','cpo_log_walk_close','cpo_batch_input','cpo_batch_run','cpo_batch_output','cpo_batch_wipe','cpo_keyboard_event','cpo_local_date_match','cpo_timestamp_valid','cpo_timestamp_math'];
+            'cpo_event_code','cpo_content_event_kind','cpo_api_mode','cpo_api_path','cpo_injection_route','cpo_async_transition','cpo_live_new','cpo_live_delete','cpo_live_epoch','cpo_live_len','cpo_live_input','cpo_live_write','cpo_live_read','cpo_live_output','cpo_live_wipe','cpo_catalog_len','cpo_catalog_items','cpo_catalog_word','cpo_enter_eligible','cpo_enter_action','cpo_provider_predicate','cpo_log_plan','cpo_diag_pick','cpo_diag_reset','cpo_diag_update','cpo_diag_finish','cpo_log_walk_begin','cpo_log_walk_plan','cpo_log_walk_next','cpo_log_walk_close','cpo_batch_input','cpo_batch_run','cpo_batch_output','cpo_batch_wipe','cpo_keyboard_event','cpo_local_date_match','cpo_timestamp_valid','cpo_timestamp_math','cpo_live_transaction','cpo_job_binding'];
         if (!names.every(name => typeof exports[name] === 'function') ||
-            exports.cpo_queue_abi() !== 12 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
+            exports.cpo_queue_abi() !== 13 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
         core = exports;
         durableSchema = null;
         catalogCache.clear();
@@ -255,6 +255,23 @@
                 } finally { e.cpo_live_wipe(); }
             });
         }
+        function transaction(job,op,arg=0,patch={},now=Date.now()){
+            const id=ids.get(job);
+            if(!id||!Array.from(handles.values()).includes(job))throw new Error('Retired native job transaction');
+            return native(e=>{
+                const entries=Object.entries(patch).map(([key,value])=>{
+                    const field=fields.get(key);if(field===undefined||field===queueField)throw new Error('Invalid job patch field: '+key);
+                    return [field,value===undefined?new Uint8Array(0):encoder.encode(JSON.stringify(value))];
+                });
+                const length=entries.reduce((sum,[,bytes])=>sum+8+bytes.length,0);
+                const ptr=e.cpo_live_input(length)>>>0;if(!ptr)throw new Error('Native transaction too large');
+                const view=new DataView(e.memory.buffer,ptr,length);
+                const out=new Uint8Array(e.memory.buffer,ptr,length);let offset=0;
+                for(const [field,bytes] of entries){view.setUint32(offset,field,true);view.setUint32(offset+4,bytes.length,true);out.set(bytes,offset+8);offset+=8+bytes.length;}
+                if(e.cpo_live_transaction(id,op,arg,now)!==1)throw new Error('Native job transaction rejected');
+                return true;
+            });
+        }
         function makeJob(tabId, id, initial) {
             let handle;
             const active=()=>handles.get(tabId)===handle;
@@ -346,6 +363,8 @@
             clear(){for(const key of handles.keys())store.delete(key);},
             canPersist(){return !broken&&!!core&&(!engine||engine===core);},
             revision(){return native(e=>e.cpo_live_epoch());},
+            transaction,
+            runningSnapshot(){const out={};for(const [tabId,job] of handles)out[tabId]=read(ids.get(job),NONE-1);return out;},
             checkpoint(job){
                 const id=ids.get(job);
                 if(!id)throw new Error('Unowned live job');
@@ -649,6 +668,32 @@
         if(!core)return null;
         try{return core.cpo_timestamp_math(op,Number(a),Number(b),Number(c));}catch(error){fail(error);return null;}
     }
+    function classifyFailure(phase,reason,details={}){
+        const state=details.state||{};
+        const flags=[details.conversationCapacityReached===true||details.requiresNewConversation===true||state.conversationCapacityReached===true||state.requiresNewConversation===true||details.responseState?.source==='conversation-max-length',
+            details.stopped===true,details.compatibilityFailure,details.stalledResearch===true,state.hasTryAgainButton,state.hasDeliveryTimedOut,state.phase==='waiting-for-user',state.phase==='interrupted',state.hasError]
+            .reduce((n,v,i)=>n|(Number(!!v)<<i),0);
+        const message=String(reason||details.error||'');
+        const result=batch(20,[phase,message,String(details.failureClass||''),flags]);
+        return result?.length===2?{class:result[0],retryable:result[1]==='1',reason:message||'Queue command failed.'}:null;
+    }
+    function bindingDecision(job,identity){
+        const type=v=>Math.max(0,['unknown','existing','new','unsupported'].indexOf(v));
+        const flags=Number(!!identity.provider&&!!job.provider&&identity.provider!=='unknown'&&identity.provider!==job.provider) |
+            (Number(!!job.conversationId)<<1)|(Number(!!identity.conversationId)<<2)|(Number(job.conversationId===identity.conversationId)<<3);
+        return call('cpo_job_binding',[type(job.conversationType),type(identity.type),flags]);
+    }
+    function scheduledMutation(op,item,now=Date.now(),next=0,reason=''){
+        const state=Math.max(0,['','pending','firing','completed','failed','cancelled'].indexOf(item.status));
+        const fields=batch(21,[op,state,Number(item.dueTs||0),now,next,reason]);
+        if(fields?.length!==5)return false;
+        const [status,failureReason,updatedAt,due,eventTime]=fields;
+        const patch={status,failureReason,updatedAt:Number(updatedAt)};
+        if(due)patch.dueTs=Number(due);
+        if(op===4)patch.fireAttemptedAt=Number(eventTime);
+        if(op===7)patch.completedAt=Number(eventTime);
+        Object.assign(item,patch);return true;
+    }
     function providerCatalog(id){
         if(!core)return null;
         if(catalogCache.has(id))return catalogCache.get(id);
@@ -811,7 +856,7 @@
             (Number(!!job.waitForIdleBeforeSend) << 6);
         return call('cpo_queue_next', [flags, phase, job.queue.length]);
     }
-    const api = { sequenceName, validSequenceName, sequenceVariables, keyboardEvent, localDateParts, localDateMatches, localDateInput, timestampValid, timestampMath, batch, textBatch, scheduledSort, scheduledLookup, scheduledWithout, scheduledDue, identityKey, continuationHandoff, supportedTabs, popupStatus, popupRunningLabel, popupScheduledLabel, popupStats, providerCatalog, diagnosticText, diagnosticPick, sanitizeDiagnostic, createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
+    const api = { classifyFailure, bindingDecision, scheduledMutation, sequenceName, validSequenceName, sequenceVariables, keyboardEvent, localDateParts, localDateMatches, localDateInput, timestampValid, timestampMath, batch, textBatch, scheduledSort, scheduledLookup, scheduledWithout, scheduledDue, identityKey, continuationHandoff, supportedTabs, popupStatus, popupRunningLabel, popupScheduledLabel, popupStats, providerCatalog, diagnosticText, diagnosticPick, sanitizeDiagnostic, createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
     globalThis.CpoQueueEngine = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();

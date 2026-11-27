@@ -468,3 +468,5 @@ test('native sequence names, ordered variable collection, keyboard and date poli
     assert.equal(engine.timestampMath(3,1800000000001,300000),1800000360000);
     assert.equal(engine.timestampMath(4,0,1800000000000,60000),1800000060000);
 });
+
+// Native queue transaction regression coverage is exercised by the Rust test module and the WASM integration suite.

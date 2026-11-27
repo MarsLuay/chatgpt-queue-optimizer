@@ -31,14 +31,6 @@ const QUEUE_WAIT_POLICY = {
     interCommandDelayMs: 2000
 };
 const WAITING_COMMAND_PHASES = new Set(['waiting', 'awaiting-response', 'active-response']);
-const RETRYABLE_FAILURE_CLASSES = new Set([
-    'transient',
-    'generation-error',
-    'retry-visible',
-    'timeout',
-    'stalled-research',
-    'submission-unconfirmed'
-]);
 const QUEUE_WAKE_ALARM_NAME = 'queue-wake';
 const QUEUE_WAKE_ALARM_PERIOD_MINUTES = 0.5;
 const QUEUE_STATE_COALESCE_DELAY_MS = 50;
@@ -233,6 +225,7 @@ async function resolveTabConversationIdentity(tabId) {
 
 async function validateJobTargetConversation(tabId, job) {
     const currentIdentity = await resolveTabConversationIdentity(tabId);
+    if(jobs.get(tabId)!==job)return {ok:false,reason:'Queue owner changed during conversation validation.',currentIdentity};
 
     if (!job.provider) {
         job.provider = currentIdentity.provider || 'chatgpt';
@@ -263,75 +256,21 @@ async function validateJobTargetConversation(tabId, job) {
         };
     }
 
-    if (currentIdentity.provider && job.provider && currentIdentity.provider !== 'unknown' && currentIdentity.provider !== job.provider) {
-        return {
-            ok: false,
-            reason: `Provider mismatch: queue is bound to ${job.provider}, but tab is on ${currentIdentity.provider}.`,
-            currentIdentity
-        };
+    const decision=requiredQueueDecision(globalThis.CpoQueueEngine?.bindingDecision?.(job,currentIdentity));
+    if(decision===3||decision===8){
+        jobs.transaction(job,0,0,{provider:currentIdentity.provider||job.provider||'chatgpt',conversationId:currentIdentity.conversationId||null,conversationType:currentIdentity.type,targetKey:currentIdentity.key});
+        await updateRunningJobsStorage({force:true});
+        return {ok:true,currentIdentity,...(decision===3?{updatedBinding:true}:{boundFromUnknown:true})};
     }
-
-    if (currentIdentity.type === 'unsupported') {
-        return {
-            ok: false,
-            reason: `Tab navigated away from conversation to unsupported page (${currentIdentity.key || 'unsupported'}). Queue paused to prevent sending into the wrong page.`,
-            currentIdentity
-        };
-    }
-
-    if (job.conversationType === 'new') {
-        if (currentIdentity.type === 'existing' && currentIdentity.conversationId) {
-            job.conversationId = currentIdentity.conversationId;
-            job.conversationType = 'existing';
-            job.targetKey = currentIdentity.key;
-            await updateRunningJobsStorage({ force: true });
-            return { ok: true, currentIdentity, updatedBinding: true };
-        }
-        if (currentIdentity.type === 'new') {
-            return { ok: true, currentIdentity };
-        }
-        return {
-            ok: false,
-            reason: `Conversation mismatch: expected new conversation, but tab is now on ${currentIdentity.type} (${currentIdentity.key}).`,
-            currentIdentity
-        };
-    }
-
-    if (job.conversationType === 'existing' && job.conversationId) {
-        if (currentIdentity.type === 'existing') {
-            if (currentIdentity.conversationId === job.conversationId) {
-                return { ok: true, currentIdentity };
-            }
-            return {
-                ok: false,
-                reason: `Conversation mismatch: tab was navigated from conversation "${job.conversationId}" to "${currentIdentity.conversationId}". Queue paused to prevent delivering prompts into the wrong conversation.`,
-                currentIdentity
-            };
-        }
-        if (currentIdentity.type === 'new') {
-            return {
-                ok: false,
-                reason: `Conversation mismatch: tab was navigated from conversation "${job.conversationId}" to a new conversation. Queue paused to prevent delivering prompts into the wrong conversation.`,
-                currentIdentity
-            };
-        }
-        return {
-            ok: false,
-            reason: `Conversation mismatch: tab was navigated away from conversation "${job.conversationId}".`,
-            currentIdentity
-        };
-    }
-
-    if (job.conversationType === 'unknown' || !job.conversationId) {
-        if (currentIdentity.type === 'existing' || currentIdentity.type === 'new') {
-            job.provider = currentIdentity.provider || 'chatgpt';
-            job.conversationId = currentIdentity.conversationId || null;
-            job.conversationType = currentIdentity.type;
-            job.targetKey = currentIdentity.key;
-            await updateRunningJobsStorage({ force: true });
-            return { ok: true, currentIdentity, boundFromUnknown: true };
-        }
-    }
+    const reasons={
+        1:()=>`Provider mismatch: queue is bound to ${job.provider}, but tab is on ${currentIdentity.provider}.`,
+        2:()=>`Tab navigated away from conversation to unsupported page (${currentIdentity.key||'unsupported'}). Queue paused to prevent sending into the wrong page.`,
+        4:()=>`Conversation mismatch: expected new conversation, but tab is now on ${currentIdentity.type} (${currentIdentity.key}).`,
+        5:()=>`Conversation mismatch: tab was navigated from conversation "${job.conversationId}" to "${currentIdentity.conversationId}". Queue paused to prevent delivering prompts into the wrong conversation.`,
+        6:()=>`Conversation mismatch: tab was navigated from conversation "${job.conversationId}" to a new conversation. Queue paused to prevent delivering prompts into the wrong conversation.`,
+        7:()=>`Conversation mismatch: tab was navigated away from conversation "${job.conversationId}".`
+    };
+    if(decision!==0)return {ok:false,reason:reasons[decision]?.()||'Native conversation binding refused.',currentIdentity};
 
     return { ok: true, currentIdentity };
 }
@@ -383,18 +322,10 @@ function isConversationCapacityFailure(result) {
 
 function applyAuthorizedConversationRebind(job, identity) {
     if (!job || !identity) return job;
-    job.provider = identity.provider || job.provider || 'chatgpt';
-    job.conversationId = identity.conversationId || null;
-    job.conversationType = identity.type || (identity.conversationId ? 'existing' : 'new');
-    job.targetKey = normalizedIdentityKey(job.provider,job.conversationType,job.conversationId,identity.key);
-    job.rolloverToConversationId = job.conversationId;
-    if (!job.rolloverRebindApplied) {
-        const generation = Number(job.conversationGeneration || 0);
-        job.conversationGeneration = requiredQueueDecision(globalThis.CpoQueueEngine?.call('cpo_rollover_generation',[generation,0]));
-        job.rolloverRebindApplied = true;
-    }
-    job.rolloverStage = 'identity-confirmed';
-    job.updatedAt = Date.now();
+    const provider=identity.provider||job.provider||'chatgpt';
+    const conversationId=identity.conversationId||null;
+    const conversationType=identity.type||(conversationId?'existing':'new');
+    jobs.transaction(job,9,0,{provider,conversationId,conversationType,targetKey:normalizedIdentityKey(provider,conversationType,conversationId,identity.key)});
     return job;
 }
 
@@ -1299,16 +1230,7 @@ function respondWithEnqueueResult(sendResponse, result) {
 }
 
 function enqueueToPausedJobResult(tabId, existingJob, message, addToEnd, source) {
-    if (addToEnd) {
-        existingJob.queue.push(message);
-    } else if (existingJob.queue.length > 0) {
-        existingJob.queue.splice(1, 0, message);
-    } else {
-        existingJob.queue.push(message);
-    }
-
-    existingJob.totalMessages = getTotalMessages(existingJob) + 1;
-    existingJob.updatedAt = Date.now();
+    jobs.transaction(existingJob,2,Number(addToEnd),{currentMessage:message});
     logQueueEvent(tabId, 'info', 'Added command to paused queue.', {
         source,
         totalMessages: getTotalMessages(existingJob),
@@ -1327,14 +1249,7 @@ function enqueueToPausedJobResult(tabId, existingJob, message, addToEnd, source)
 }
 
 function enqueueToRunningJobResult(tabId, existingJob, message, addToEnd, source) {
-    if (addToEnd) {
-        existingJob.queue.push(message);
-    } else {
-        existingJob.queue.unshift(message);
-    }
-
-    existingJob.totalMessages = getTotalMessages(existingJob) + 1;
-    existingJob.updatedAt = Date.now();
+    jobs.transaction(existingJob,2,Number(addToEnd),{currentMessage:message});
 
     logQueueEvent(tabId, 'info', 'Added command to run next in active queue.', {
         source,
@@ -1552,16 +1467,7 @@ function handleRetryPausedJob(request, sendResponse) {
         return;
     }
 
-    const resumeConfirmed = isSubmissionConfirmed(job) && !!job.currentMessage;
-    job.isPaused = false;
-    job.isRunning = true;
-    job.isStopped = false;
-    job.pausedReason = '';
-    job.lastError = '';
-    job.currentPhase = resumeConfirmed ? 'awaiting-response' : 'queued';
-    job.updatedAt = Date.now();
-    resetCommandRetryState(job);
-    resetWaitTracking(job);
+    jobs.transaction(job,5);
 
     logQueueEvent(tabId, 'info', 'Retrying paused queue.', {
         completedCount: job.completedCount || 0,
@@ -1849,11 +1755,7 @@ function handleProcessRecovered(tabId, job) {
         messagePreview: previewText(job.currentMessage || '', 160)
     });
 
-    job.queue.unshift(job.currentMessage);
-    job.currentMessage = null;
-    job.currentCommandNumber = 0;
-    job.currentPhase = 'queued';
-    job.updatedAt = Date.now();
+    jobs.transaction(job,10);
     updateRunningJobsStorage({ force: true });
     return { action: 'continue' };
 }
@@ -1867,26 +1769,7 @@ async function handleProcessRetryWait(tabId, job) {
         return { action: 'return' };
     }
 
-    if (requiredQueueDecision(globalThis.CpoQueueEngine?.call('cpo_queue_retry_action', [Number(!!job.currentMessage), Number(isSubmissionConfirmed(job))])) === 1) {
-        job.currentPhase = 'awaiting-response';
-        job.deliveryState = 'confirmed-submission';
-        job.nextRetryAt = 0;
-        job.updatedAt = Date.now();
-        resetWaitTracking(job);
-        updateRunningJobsStorage({ force: true });
-        return { action: 'continue' };
-    }
-
-    if (job.currentMessage) {
-        job.queue.unshift(job.currentMessage);
-        job.currentMessage = null;
-    }
-
-    job.currentCommandNumber = 0;
-    job.currentPhase = 'queued';
-    job.nextRetryAt = 0;
-    job.updatedAt = Date.now();
-    resetCommandDeliveryState(job);
+    jobs.transaction(job,6);
     updateRunningJobsStorage({ force: true });
     return { action: 'continue' };
 }
@@ -1941,16 +1824,9 @@ async function handleProcessWaitForIdle(tabId, job) {
 }
 
 async function handleProcessSending(tabId, job) {
-    job.currentMessage = job.queue.shift();
-    job.currentCommandNumber = Number(job.completedCount || 0) + 1;
-    job.lastError = '';
-    job.currentPhase = 'sending';
-    job.updatedAt = Date.now();
-    resetWaitTracking(job);
-    resetCommandDeliveryState(job);
-    job.deliveryState = 'pre-click';
-    job.commandId = `${job.runId || 'run'}:${job.currentCommandNumber}`;
-    job.commandFingerprint = fingerprintCommandTextForJob(job.currentMessage);
+    const prompt=job.queue[0];
+    const number=Number(job.completedCount||0)+1;
+    jobs.transaction(job,7,0,{currentMessage:prompt,commandId:`${job.runId||'run'}:${number}`,commandFingerprint:fingerprintCommandTextForJob(prompt)});
     const totalMessages = getTotalMessages(job);
     const queueSettings = await getQueueSettings();
 
@@ -2075,12 +1951,12 @@ async function handleProcessSending(tabId, job) {
 }
 
 function completeCurrentCommand(tabId, job, totalMessages, diagnostics = {}) {
-    job.completedCount = Number(job.completedCount || 0) + 1;
+    const completed=Number(job.completedCount||0)+1;
     const terminalAckSource = diagnostics.terminalAckSource || job.terminalAckSource ||
         (diagnostics.recoveredViaBackendCompletion ? 'backend-completion' : '');
 
-    logQueueEvent(tabId, 'success', `Completed command ${job.completedCount}/${totalMessages}.`, {
-        commandNumber: job.completedCount,
+    logQueueEvent(tabId, 'success', `Completed command ${completed}/${totalMessages}.`, {
+        commandNumber: completed,
         totalMessages,
         remaining: Math.max(0, job.queue.length),
         ...getQueueFailureDiagnostics(job, 'terminal', diagnostics, 'terminal-success'),
@@ -2090,14 +1966,7 @@ function completeCurrentCommand(tabId, job, totalMessages, diagnostics = {}) {
         })
     });
 
-    job.currentMessage = null;
-    job.currentCommandNumber = 0;
-    job.currentPhase = 'queued';
-    job.deliveryTimeoutAttempts = 0;
-    job.updatedAt = Date.now();
-    resetCommandRetryState(job);
-    resetWaitTracking(job);
-    resetCommandDeliveryState(job);
+    jobs.transaction(job,3);
     updateRunningJobsStorage({ force: true });
 }
 
@@ -2106,23 +1975,7 @@ function pauseJob(tabId, reason, details = {}) {
     if (!job) return;
 
     const failedMessage = job.currentMessage || '';
-    const confirmed = isSubmissionConfirmed(job);
-
-    if (!confirmed && job.currentMessage) {
-        job.queue.unshift(job.currentMessage);
-        job.currentMessage = null;
-        job.currentCommandNumber = 0;
-        resetCommandDeliveryState(job);
-    }
-
-    job.isRunning = false;
-    job.isPaused = true;
-    job.isStopped = false;
-    job.pausedReason = reason || 'Queue paused because ChatGPT failed.';
-    job.lastError = job.pausedReason;
-    job.currentPhase = 'paused';
-    job.updatedAt = Date.now();
-    resetWaitTracking(job);
+    jobs.transaction(job,4,0,{pausedReason:reason||'Queue paused because ChatGPT failed.'});
 
     logQueueEvent(tabId, 'error', 'Queue paused.', {
         reason: job.pausedReason,
@@ -2136,10 +1989,6 @@ function pauseJob(tabId, reason, details = {}) {
         ...details
     });
 
-    if (!confirmed) {
-        job.currentCommandNumber = 0;
-    }
-
     updateRunningJobsStorage({ force: true });
 
     notifyRuntime({
@@ -2149,24 +1998,9 @@ function pauseJob(tabId, reason, details = {}) {
     });
 }
 
-function resetCommandRetryState(job) {
-    if (!job) return;
-    job.retryAttemptCount = 0;
-    job.lastRetryableReason = '';
-    job.retryClass = '';
-    job.retryMode = '';
-    job.nextRetryDelayMs = 0;
-    job.nextRetryAt = 0;
-    job.retryExhausted = false;
-}
+function resetCommandRetryState(job) {if(job)jobs.transaction(job,1,1);}
 
-function resetWaitTracking(job) {
-    if (!job) return;
-    job.waitStartedAt = 0;
-    job.lastResearchProgressAt = 0;
-    job.sawDeepResearch = false;
-    job.sawGenerating = false;
-}
+function resetWaitTracking(job) {if(job)jobs.transaction(job,1,2);}
 
 function emptyDeliveryFields() {
     return {
@@ -2190,18 +2024,7 @@ function isSubmissionConfirmed(job) {
     return requiredQueueDecision(globalThis.CpoQueueEngine?.confirmed(job))===1;
 }
 
-function resetCommandDeliveryState(job) {
-    if (!job) return;
-    const cleared = emptyDeliveryFields();
-    job.deliveryState = cleared.deliveryState;
-    job.commandId = cleared.commandId;
-    job.commandFingerprint = cleared.commandFingerprint;
-    job.submittedUserTurnId = cleared.submittedUserTurnId;
-    job.assistantTurnId = cleared.assistantTurnId;
-    job.submissionAckSource = cleared.submissionAckSource;
-    job.terminalAckSource = cleared.terminalAckSource;
-    job.lastResponsePhase = cleared.lastResponsePhase;
-}
+function resetCommandDeliveryState(job) {if(job)jobs.transaction(job,1,4);}
 
 function getCommandBinding(job, context = {}) {
     if (context.commandBinding && typeof context.commandBinding === 'object') {
@@ -2307,8 +2130,7 @@ function getQueueFailureDiagnostics(job, phase, diagnostics = {}, retryDecision 
 
 function persistCommandDelivery(tabId, job, patch = {}) {
     if (!job || jobs.get(tabId) !== job) return;
-    Object.assign(job, patch);
-    job.updatedAt = Date.now();
+    jobs.transaction(job,0,0,patch);
     return updateRunningJobsStorage({ force: true });
 }
 
@@ -2331,56 +2153,7 @@ function getRetryBackoffDelayMs(attemptCount, unlimited = false) {
  * @returns {{ class: QueueFailureClass, retryable: boolean, reason: string }}
  */
 function classifyQueueFailure(phase, reason, diagnostics = {}) {
-    const details = diagnostics && typeof diagnostics === 'object' ? diagnostics : {};
-    const state = details.state && typeof details.state === 'object' ? details.state : {};
-    const message = String(reason || details.error || '');
-    const forcedClass = String(details.failureClass || '');
-
-    let failureClass = forcedClass;
-    if (!failureClass) {
-        if (details.conversationCapacityReached === true || details.requiresNewConversation === true || state.conversationCapacityReached === true || state.requiresNewConversation === true || details.responseState?.source === 'conversation-max-length' || /conversation-max-length|maximum length for this conversation/i.test(message)) {
-            failureClass = 'conversation-max-length';
-        } else if (details.stopped === true || /queue was stopped/i.test(message)) {
-            failureClass = 'user-stop';
-        } else if (details.compatibilityFailure || /compatibility failure/i.test(message)) {
-            failureClass = 'compatibility';
-        } else if (details.stalledResearch === true || /stalled deep research/i.test(message)) {
-            failureClass = 'stalled-research';
-        } else if (state.hasTryAgainButton) {
-            failureClass = 'retry-visible';
-        } else if (state.hasDeliveryTimedOut || /delivery time/i.test(message)) {
-            failureClass = 'timeout';
-        } else if (/waiting for the user/i.test(message) || state.phase === 'waiting-for-user') {
-            failureClass = 'waiting-for-user';
-        } else if (/response was interrupted/i.test(message) || state.phase === 'interrupted') {
-            failureClass = 'interrupted';
-        } else if (/not acknowledged as a new user turn/i.test(message)) {
-            failureClass = 'submission-unconfirmed';
-        } else if (state.hasError || /chatgpt showed an error|error or retry state/i.test(message)) {
-            failureClass = 'generation-error';
-        } else if (/timed out waiting/i.test(message)) {
-            failureClass = 'timeout';
-        } else if (/could not read|could not inspect|could not send/i.test(message)) {
-            failureClass = 'transient';
-        } else if (/queue was paused/i.test(message)) {
-            failureClass = 'non-retryable';
-        } else if (phase === 'send' || phase === 'wait') {
-            failureClass = 'transient';
-        } else {
-            failureClass = 'non-retryable';
-        }
-    }
-
-    if ((failureClass === 'generation-error' || failureClass === 'retry-visible') && state.hasTryAgainButton) {
-        failureClass = 'retry-visible';
-    }
-
-    const retryable = RETRYABLE_FAILURE_CLASSES.has(failureClass);
-    return {
-        class: failureClass,
-        retryable,
-        reason: message || 'Queue command failed.'
-    };
+    return requiredQueueDecision(globalThis.CpoQueueEngine?.classifyFailure?.(phase,reason,diagnostics||{}));
 }
 
 function getRetryExhaustionReason(job, lastReason) {
@@ -2415,8 +2188,7 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
     }
 
     const classification = classifyQueueFailure(phase, reason, diagnostics);
-    job.retryClass = classification.class;
-    job.lastRetryableReason = classification.reason;
+    jobs.transaction(job,0,0,{retryClass:classification.class,lastRetryableReason:classification.reason});
 
     if (!classification.retryable) {
         job.lastError = classification.reason;
@@ -2425,6 +2197,7 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
     }
 
     const queueSettings = await getQueueSettings();
+    if(jobs.get(tabId)!==job||job.isPaused||job.isStopped||!job.isRunning)return false;
     const unlimited = queueSettings.queueUnlimitedRetryWait === true;
     const maxAttempts = unlimited ? Number.POSITIVE_INFINITY : Number(QUEUE_RETRY_POLICY.maxAutomaticAttempts);
     const attemptCount = Number(job.retryAttemptCount || 0);
@@ -2451,16 +2224,7 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
     }
 
     const delayMs = getRetryBackoffDelayMs(attemptCount, unlimited);
-    job.retryAttemptCount = attemptCount + 1;
-    job.retryMode = unlimited ? 'unlimited' : 'finite';
-    job.retryExhausted = false;
-    job.nextRetryDelayMs = delayMs;
-    const retryNow=Date.now();
-    job.nextRetryAt=requiredQueueDecision(globalThis.CpoQueueEngine?.timestampMath?.(0,retryNow,delayMs));
-    job.lastError = classification.reason;
-    job.currentPhase = 'retry-wait';
-    job.updatedAt = Date.now();
-    resetWaitTracking(job);
+    jobs.transaction(job,8,delayMs,{retryMode:unlimited?'unlimited':'finite',lastError:classification.reason,retryClass:classification.class,lastRetryableReason:classification.reason});
     updateRunningJobsStorage({ force: true });
 
     logQueueEvent(tabId, 'warn', `${unlimited ? 'Unlimited' : 'Automatic'} retry ${job.retryAttemptCount}${unlimited ? '' : `/${maxAttempts}`} will retry command ${job.currentCommandNumber || '?'}/${getTotalMessages(job)}.`, {
@@ -2483,23 +2247,8 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
         return false;
     }
 
-    if (requiredQueueDecision(globalThis.CpoQueueEngine?.call('cpo_queue_retry_action', [Number(!!job.currentMessage), Number(isSubmissionConfirmed(job))])) === 1) {
-        job.currentPhase = 'awaiting-response';
-        job.deliveryState = 'confirmed-submission';
-        job.nextRetryAt = 0;
-        job.updatedAt = Date.now();
-        resetWaitTracking(job);
-        updateRunningJobsStorage({ force: true });
-        return true;
-    }
-
-    job.queue.unshift(job.currentMessage);
-    job.currentMessage = null;
-    job.currentCommandNumber = 0;
-    job.currentPhase = 'queued';
-    job.nextRetryAt = 0;
-    job.updatedAt = Date.now();
-    resetCommandDeliveryState(job);
+    if(jobs.get(tabId)!==job)return false;
+    jobs.transaction(job,6);
     updateRunningJobsStorage({ force: true });
 
     return true;
@@ -3622,65 +3371,7 @@ function getWaitContextLabel(context = {}) {
  * @returns {Record<string, RunningJobSnapshot>}
  */
 function getRunningJobsSnapshot() {
-    /** @type {Record<string, RunningJobSnapshot>} */
-    const snapshot = {};
-
-    for (const [tabId, job] of jobs.entries()) {
-        const provider = job.provider || 'chatgpt';
-        const conversationId = job.conversationId || null;
-        const conversationType = job.conversationType || (conversationId ? 'existing' : 'unknown');
-        const targetKey = normalizedIdentityKey(provider,conversationType,conversationId,job.targetKey);
-
-        snapshot[tabId] = {
-            tabId: job.tabId,
-            provider,
-            conversationId,
-            conversationType,
-            targetKey,
-            remaining: getRemainingCount(job),
-            pending: Array.isArray(job.queue) ? job.queue.length : 0,
-            isRunning: job.isRunning,
-            isPaused: job.isPaused,
-            isStopped: job.isStopped,
-            status: getJobStatus(job),
-            pausedReason: job.pausedReason || '',
-            lastError: job.lastError || '',
-            hasCurrentMessage: !!job.currentMessage,
-            currentMessageLength: String(job.currentMessage || '').length,
-            nextMessageLength: String((Array.isArray(job.queue) ? job.queue[0] : '') || '').length,
-            runId: job.runId || '',
-            totalMessages: getTotalMessages(job),
-            completedCount: job.completedCount || 0,
-            currentCommandNumber: job.currentCommandNumber || 0,
-            currentPhase: job.currentPhase || '',
-            waitForIdleBeforeSend: job.waitForIdleBeforeSend === true,
-            deliveryTimeoutAttempts: Number(job.deliveryTimeoutAttempts || 0),
-            retryAttemptCount: Number(job.retryAttemptCount || 0),
-            lastRetryableReason: job.lastRetryableReason || '',
-            retryClass: job.retryClass || '',
-            retryMode: job.retryMode || '',
-            nextRetryDelayMs: Number(job.nextRetryDelayMs || 0),
-            nextRetryAt: Number(job.nextRetryAt || 0),
-            retryExhausted: job.retryExhausted === true,
-            waitStartedAt: Number(job.waitStartedAt || 0),
-            lastResearchProgressAt: Number(job.lastResearchProgressAt || 0),
-            sawDeepResearch: job.sawDeepResearch === true,
-            sawGenerating: job.sawGenerating === true,
-            deliveryState: job.deliveryState || '',
-            commandId: job.commandId || '',
-            commandFingerprint: job.commandFingerprint || '',
-            submittedUserTurnId: job.submittedUserTurnId || null,
-            assistantTurnId: job.assistantTurnId || null,
-            submissionAckSource: job.submissionAckSource || '',
-            terminalAckSource: job.terminalAckSource || '',
-            lastResponsePhase: job.lastResponsePhase || '',
-            ...copyRolloverFields(job),
-            startedAt: job.startedAt,
-            updatedAt: job.updatedAt
-        };
-    }
-
-    return snapshot;
+    return jobs.runningSnapshot();
 }
 
 function getRemainingCount(job) {
@@ -4245,9 +3936,7 @@ async function cancelScheduledMessage(id) {
             return { ok: false, error: 'Scheduled message delivery is already in progress.' };
         }
 
-        item.status = 'cancelled';
-        item.updatedAt = Date.now();
-        item.failureReason = '';
+        if(!globalThis.CpoQueueEngine.scheduledMutation(1,item))throw new Error('Native cancellation rejected.');
         clearScheduledAlarm(item.id);
         await writeScheduledMessages(items);
         notifyRuntime({ action: 'scheduledMessagesUpdated', item });
@@ -4303,10 +3992,7 @@ async function retryScheduledMessage(id, dueTs = null) {
             return { ok: false, error: 'A valid due date/time is required to retry.' };
         }
 
-        item.status = 'pending';
-        item.dueTs = nextDueTs;
-        item.failureReason = '';
-        item.updatedAt = Date.now();
+        if(!globalThis.CpoQueueEngine.scheduledMutation(3,item,Date.now(),nextDueTs))throw new Error('Native retry rejected.');
         await writeScheduledMessages(items);
         createScheduledAlarm(item);
         notifyRuntime({ action: 'scheduledMessagesUpdated', item });
@@ -4321,9 +4007,7 @@ async function retryScheduledMessage(id, dueTs = null) {
 }
 
 async function markScheduledFailed(item, reason) {
-    item.status = 'failed';
-    item.failureReason = String(reason || 'Scheduled delivery failed.');
-    item.updatedAt = Date.now();
+    if(!globalThis.CpoQueueEngine.scheduledMutation(6,item,Date.now(),0,String(reason||'Scheduled delivery failed.')))throw new Error('Native scheduled failure rejected.');
     clearScheduledAlarm(item.id);
     await persistScheduledItem(item);
     logQueueEvent(item.tabId, 'error', item.failureReason, {
@@ -4335,10 +4019,7 @@ async function markScheduledFailed(item, reason) {
 }
 
 async function markScheduledCompleted(item, enqueueResult = {}) {
-    item.status = 'completed';
-    item.failureReason = '';
-    item.updatedAt = Date.now();
-    item.completedAt = item.updatedAt;
+    if(!globalThis.CpoQueueEngine.scheduledMutation(7,item))throw new Error('Native scheduled completion rejected.');
     item.enqueueResult = {
         queued: enqueueResult.queued === true,
         started: enqueueResult.started === true,
@@ -4367,9 +4048,7 @@ async function claimScheduledMessageForFire(id, now = Date.now()) {
 
         if (scheduledAction(4, item, now) !== 1) return null;
 
-        item.status = 'firing';
-        item.updatedAt = now;
-        item.fireAttemptedAt = now;
+        if(!globalThis.CpoQueueEngine.scheduledMutation(4,item,now))return null;
         await writeScheduledMessages(items);
         return { ...item };
     });
@@ -4487,9 +4166,7 @@ async function recoverScheduledMessages(source = 'startup') {
 
         for (const item of items) {
             if (scheduledAction(5, item) === 5) {
-            item.status = 'failed';
-            item.failureReason = 'Delivery interrupted by background restart. Retry only if the message is not already queued.';
-            item.updatedAt = Date.now();
+            if(!globalThis.CpoQueueEngine.scheduledMutation(5,item))throw new Error('Native scheduled recovery rejected.');
             clearScheduledAlarm(item.id);
                 changed = true;
             }
