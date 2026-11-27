@@ -56,6 +56,7 @@
       /** @type {Record<string, (...args: number[]) => number> | null} */
       this.nativeCore = null;
       this.nativeCoreState = 'not loaded';
+      this.browserEngine = null;
       this.nativeMemoryBytes = 0;
       /** @type {ReturnType<ChatGPTOptimizer['sampleResources']> | null} */
       this.resourceSample = null;
@@ -198,6 +199,7 @@
               selector: this._loggedSelector || 'none',
               compatibility: this.getCompatibilityDiagnostics(),
               enterDiagnostics: this.state.enterDiagnostics || [],
+              browserEngine: this.browserEngine?.status || 'not loaded',
               optimizerEngine: this.nativeCoreState === 'Rust/WASM' ? 'Rust/WASM' : 'JavaScript fallback (' + (this.nativeCoreState || 'not loaded') + ')',
               resources: this.getResourceDiagnostics(messages),
               performance: { ...this.state.perf }
@@ -575,6 +577,8 @@
     // A bounded, on-demand scan of recent turns. Counts only, no retained DOM
     // references or copied message strings. Never call during token mutations.
     sampleResources(messages) {
+      const nativeSample = this.browserEngine?.sample(messages);
+      if (nativeSample) return nativeSample;
       const sample = {
         time: Date.now(), totalTurns: messages.length, sampledTurns: 0,
         nodes: 0, textChars: 0, images: 0, media: 0, surfaces: 0,
@@ -630,7 +634,7 @@
       return {
         ...sample,
         usedJsHeapBytes: typeof used === 'number' && Number.isFinite(used) ? used : null,
-        wasmLinearBytes: this.nativeMemoryBytes || 0,
+        wasmLinearBytes: (this.nativeMemoryBytes || 0) + (this.browserEngine?.memoryBytes || 0),
         cachedMessageRefs: this._cachedMessages?.length || 0,
         mediaEviction: { ...this.mediaStats },
         adaptiveEnabled: this.config.adaptiveBudget === true,
@@ -669,6 +673,19 @@
       } catch { return false; }
     }
 
+    loadRustBrowserEngine() {
+      if (this.browserEngine || typeof globalThis.CpoRustBrowserBridge !== 'function') return;
+      const engine = new globalThis.CpoRustBrowserBridge(this);
+      this.browserEngine = engine;
+      engine.load().then(ready => {
+        if (!ready) return;
+        this.provider?.setNativeMessageDiscovery?.((adapter, doc, root) =>
+          engine.discover(adapter, doc, root));
+        this.clearMessageCache();
+        this.resourceSample = null;
+      }).catch(error => engine.fail(error));
+    }
+
     bindOptimizer() {
       if (!this.provider?.supportsOptimizer) return;
       const surface = this.getCurrentSurface();
@@ -678,6 +695,7 @@
       }
 
       this.loadRustCore();
+      this.loadRustBrowserEngine();
       this.setupContainer();
       this.markConversationRoot();
       this.provider?.setTurnScanCacheEnabled?.(true);
@@ -1536,6 +1554,7 @@
     }
 
     preventImageLoading(element) {
+      if (this.browserEngine?.media(element, 0) != null) return;
       for (const img of element.querySelectorAll('img')) {
         const width = this.policyCount(img.naturalWidth);
         const height = this.policyCount(img.naturalHeight);
@@ -1559,6 +1578,7 @@
     }
 
     restoreImages(element) {
+      if (this.browserEngine?.media(element, 1) != null) return;
       for (const img of element.querySelectorAll('img')) {
         const picture = img.closest?.('picture');
         const sources = picture && element.contains(picture) ? Array.from(picture.querySelectorAll('source')) : [];
@@ -1593,6 +1613,7 @@
     }
 
     evictPlayback(element) {
+      if (this.browserEngine?.media(element, 2) != null) return;
       for (const media of element.querySelectorAll('video, audio')) {
         if (!this.canEvictPlayback(media)) continue;
         let changed = false;
@@ -1610,6 +1631,7 @@
     }
 
     restorePlayback(element) {
+      if (this.browserEngine?.media(element, 3) != null) return;
       for (const media of element.querySelectorAll('video, audio')) {
         let changed = false;
         for (const source of media.querySelectorAll('source')) {
