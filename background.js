@@ -4585,13 +4585,30 @@ function scheduledAlarmName(id) {
 
 function sortScheduledMessages(items) {
     return [...(Array.isArray(items) ? items : [])].sort((a, b) => {
+        const native = globalThis.CpoQueueEngine?.numeric('cpo_schedule_compare', [Number(a?.dueTs || 0), Number(b?.dueTs || 0), Number(a?.createdAt || 0), Number(b?.createdAt || 0)]);
+        if (native != null) return native - 1;
         const dueDiff = Number(a?.dueTs || 0) - Number(b?.dueTs || 0);
         if (dueDiff !== 0) return dueDiff;
         return Number(a?.createdAt || 0) - Number(b?.createdAt || 0);
     });
 }
 
+function scheduledAction(action, item, now = Date.now()) {
+    if (!item) return 0;
+    const native = globalThis.CpoQueueEngine?.schedule(action, item, now);
+    if (native != null) return native;
+    if ((action === 1 || action === 3) && item.status === 'completed') return 2;
+    if (action >= 1 && action <= 3) return item.status === 'firing' ? 3 : 1;
+    if (action === 4) {
+        const due = Number(item.dueTs);
+        return item.status !== 'pending' || !Number.isFinite(due) || due <= 0 ? 0 : due <= now + SCHEDULED_DUE_SKEW_MS ? 1 : 4;
+    }
+    if (action === 5) return item.status === 'firing' ? 5 : item.status === 'pending' ? 4 : 0;
+    return 0;
+}
+
 async function readScheduledMessages() {
+    await globalThis.CpoQueueEngine?.load();
     const data = await readLocalStorage([SCHEDULED_MESSAGES_KEY]);
     const items = data[SCHEDULED_MESSAGES_KEY];
     return sortScheduledMessages(Array.isArray(items) ? items : []);
@@ -4657,6 +4674,8 @@ function buildScheduledConversationIdentity(item) {
 
 function identitiesMatchForSchedule(stored, current) {
     if (!stored || !current) return false;
+    const native = globalThis.CpoQueueEngine?.scheduleIdentity(stored, current);
+    if (native != null) return native === 1;
 
     const storedType = stored.conversationType || stored.type || 'unknown';
     const currentType = current.conversationType || current.type || 'unknown';
@@ -4783,11 +4802,12 @@ async function cancelScheduledMessage(id) {
             return { ok: false, error: 'Scheduled message not found.' };
         }
 
-        if (item.status === 'completed') {
+        const action = scheduledAction(1, item);
+        if (action === 2) {
             return { ok: false, error: 'Completed scheduled messages cannot be cancelled.' };
         }
 
-        if (item.status === 'firing') {
+        if (action === 3) {
             return { ok: false, error: 'Scheduled message delivery is already in progress.' };
         }
 
@@ -4812,7 +4832,7 @@ async function deleteScheduledMessage(id) {
             return { ok: false, error: 'Scheduled message not found.' };
         }
 
-        if (item.status === 'firing') {
+        if (scheduledAction(2, item) === 3) {
             return { ok: false, error: 'Scheduled message delivery is already in progress.' };
         }
 
@@ -4835,11 +4855,12 @@ async function retryScheduledMessage(id, dueTs = null) {
             return { ok: false, error: 'Scheduled message not found.' };
         }
 
-        if (item.status === 'completed') {
+        const action = scheduledAction(3, item);
+        if (action === 2) {
             return { ok: false, error: 'Completed scheduled messages cannot be retried.' };
         }
 
-        if (item.status === 'firing') {
+        if (action === 3) {
             return { ok: false, error: 'Scheduled message delivery is already in progress.' };
         }
 
@@ -4858,7 +4879,7 @@ async function retryScheduledMessage(id, dueTs = null) {
         return { ok: true, item };
     });
 
-    if (result.ok && result.item.dueTs <= Date.now() + SCHEDULED_DUE_SKEW_MS) {
+    if (result.ok && scheduledAction(4, result.item) === 1) {
         await processDueScheduledMessages('retry', result.item.id);
     }
 
@@ -4910,13 +4931,7 @@ async function claimScheduledMessageForFire(id, now = Date.now()) {
             return null;
         }
 
-        if (item.status !== 'pending') {
-            return null;
-        }
-
-        if (Number(item.dueTs) > now + SCHEDULED_DUE_SKEW_MS) {
-            return null;
-        }
+        if (scheduledAction(4, item, now) !== 1) return null;
 
         item.status = 'firing';
         item.updatedAt = now;
@@ -4994,8 +5009,7 @@ async function processDueScheduledMessages(source = 'manual', onlyId = null, now
 
     if (
         selectedItem &&
-        selectedItem.status === 'pending' &&
-        Number(selectedItem.dueTs) > now + SCHEDULED_DUE_SKEW_MS
+        scheduledAction(4, selectedItem, now) === 4
     ) {
         // A one-shot alarm can be delivered early by a test/browser shim. Keep the
         // item pending and replace the consumed alarm instead of sending early.
@@ -5005,8 +5019,7 @@ async function processDueScheduledMessages(source = 'manual', onlyId = null, now
 
     const dueItems = items.filter((item) => {
         if (onlyId && item.id !== onlyId) return false;
-        if (item.status !== 'pending') return false;
-        return Number(item.dueTs) <= now + SCHEDULED_DUE_SKEW_MS;
+        return scheduledAction(4, item, now) === 1;
     });
 
     const fired = [];
@@ -5037,27 +5050,25 @@ async function processDueScheduledMessages(source = 'manual', onlyId = null, now
 }
 
 async function recoverScheduledMessages(source = 'startup') {
-    const items = await readScheduledMessages();
-    let changed = false;
+    const items = await withScheduledStorageLock(async () => {
+        const items = await readScheduledMessages();
+        let changed = false;
 
-    for (const item of items) {
-        if (item.status === 'firing') {
+        for (const item of items) {
+            if (scheduledAction(5, item) === 5) {
             item.status = 'failed';
             item.failureReason = 'Delivery interrupted by background restart. Retry only if the message is not already queued.';
             item.updatedAt = Date.now();
             clearScheduledAlarm(item.id);
-            changed = true;
+                changed = true;
+            }
         }
-    }
-
-    if (changed) {
-        await writeScheduledMessages(items);
-    }
+        if (changed) await writeScheduledMessages(items);
+        return items;
+    });
 
     for (const item of items) {
-        if (item.status === 'pending') {
-            createScheduledAlarm(item);
-        }
+        if (scheduledAction(5, item) === 4) createScheduledAlarm(item);
     }
 
     return processDueScheduledMessages(source);
@@ -5160,6 +5171,7 @@ if (typeof module !== 'undefined' && module.exports) {
         fireScheduledMessage,
         identitiesMatchForSchedule,
         sortScheduledMessages,
+        scheduledAction,
         isIdleDiscardCandidate,
         discardInactiveChatGPTTabs
     };
