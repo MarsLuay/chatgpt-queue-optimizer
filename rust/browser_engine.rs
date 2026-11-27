@@ -33,6 +33,9 @@ const HAS_INPUT_OR_FORM: u32 = 32;
 const THREAD_BOTTOM: u32 = 64;
 const FALLBACK_CONTENT: u32 = 128;
 
+fn playback_eligible(flags: u32) -> bool { flags & 3 == 3 && flags & 12 == 0 }
+fn playback_reload_safe(flags: u32) -> bool { flags & 3 == 3 && flags & 4 == 0 }
+
 fn primary_valid(flags: u32, text: u32) -> bool {
     flags & IN_ROOT != 0 && flags & (EXCLUDED | FORBIDDEN_TAG) == 0 &&
     flags & HAS_MARKER != 0 && text >= if flags & HAS_FORM != 0 { 80 } else { 1 }
@@ -188,7 +191,7 @@ pub extern "C" fn cpo_execute_media(mode: u32) -> u32 {
             for member in 0..count {
                 if h(32, member, mode, 0) != 0 { protected = true; break; }
             }
-            if protected || (playback && h(37, 0, 0, 0) == 0) { continue; }
+            if protected || (playback && !playback_eligible(h(37, 0, 0, 0))) { continue; }
             let width = if playback { 0 } else { h(38, 0, 0, 0) };
             let height = if playback { 0 } else { h(38, 1, 0, 0) };
             let mut changed = false;
@@ -212,7 +215,7 @@ pub extern "C" fn cpo_execute_media(mode: u32) -> u32 {
                 for member in 1..count { changed |= h(34, member, 0, 0) != 0; }
                 changed |= h(34, 0, 0, 0) != 0;
                 if changed {
-                    if playback && h(37, 0, 0, 0) != 0 { h(39, 0, 0, 0); }
+                    if playback && playback_reload_safe(h(37, 0, 0, 0)) { h(39, 0, 0, 0); }
                     changed_groups = changed_groups.saturating_add(1);
                 }
             }
@@ -234,6 +237,15 @@ mod tests {
         assert!(!primary_valid(IN_ROOT | HAS_MARKER | EXCLUDED, 100));
         assert!(fallback_valid(IN_ROOT | FALLBACK_CONTENT, 15));
         assert!(!fallback_valid(IN_ROOT | FALLBACK_CONTENT | HAS_INPUT_OR_FORM, 15));
+    }
+    #[test]
+    fn playback_safety_flags() {
+        assert!(playback_eligible(3));
+        assert!(!playback_eligible(1));
+        assert!(!playback_eligible(7));
+        assert!(!playback_eligible(11));
+        assert!(playback_reload_safe(11));
+        assert!(!playback_reload_safe(7));
     }
     #[test]
     fn resource_accumulation() {
