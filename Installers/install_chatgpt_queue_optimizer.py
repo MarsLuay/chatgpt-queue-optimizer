@@ -14,6 +14,11 @@ import zipfile
 from struct import unpack_from
 from pathlib import Path
 
+try:
+    from .build_optimizer import build_optimizer
+except ImportError:
+    from build_optimizer import build_optimizer
+
 
 ADDON_ID = "chatgpt-queue-optimizer@marsluay.local"
 CHROME_ID_FILE = "chrome-extension-id.txt"
@@ -82,6 +87,7 @@ def ensure_repo(repo_dir, repo_url, update_repo=False):
 
 
 def copy_source(repo_dir, target_dir):
+    wasm = build_optimizer(Path(repo_dir).resolve())
     if target_dir.exists():
         shutil.rmtree(target_dir)
     target_dir.mkdir(parents=True)
@@ -89,6 +95,7 @@ def copy_source(repo_dir, target_dir):
     for name in REPO_FILES:
         shutil.copy2(repo_dir / name, target_dir / name)
 
+    shutil.copy2(wasm, target_dir / wasm.name)
     icons = repo_dir / "icons"
     if icons.exists():
         shutil.copytree(icons, target_dir / "icons")
@@ -117,7 +124,9 @@ def build_firefox_source(repo_dir, target_dir):
         "content_scripts": base.get("content_scripts", []),
         "permissions": sorted(set(base.get("permissions", []) + base.get("host_permissions", []))),
         "icons": base.get("icons", {}),
+        "content_security_policy": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",
         "web_accessible_resources": [
+            "optimizer_core.wasm",
             "icon_16.png",
             "icon_48.png",
             "icon_128.png",
