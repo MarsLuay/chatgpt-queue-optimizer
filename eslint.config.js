@@ -128,7 +128,7 @@ module.exports = [
         rules: correctnessRules
     },
     {
-        files: ['content.js', 'popup.js', 'provider-adapter.js'],
+        files: ['content.js', 'popup.js', 'provider-adapter.js', 'history-viewer.js'],
         languageOptions: {
             ecmaVersion: 'latest',
             sourceType: 'script',
