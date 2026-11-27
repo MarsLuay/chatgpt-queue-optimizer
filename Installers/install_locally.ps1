@@ -1,11 +1,19 @@
 # Route local installs independently so one browser failure does not prevent the other.
 param(
-    [ValidateSet('All','Firefox','Chromium','Chrome')][string]$Browser='All',
+    [ValidateSet('All','Firefox','Chromium','Chrome')][string]$Browser,
     [string]$FirefoxPath,
     [string]$ChromiumPath,
     [string]$ChromePath
 )
 $ErrorActionPreference='Stop'
+if (-not $Browser) {
+    Write-Host '1. Firefox'
+    Write-Host '2. Chromium'
+    do {
+        $selection=Read-Host 'Choose a browser [1-2]'
+    } until ($selection -in @('1','2'))
+    $Browser=if ($selection -eq '1') { 'Firefox' } else { 'Chromium' }
+}
 $targets=if ($Browser -eq 'All') { @('Firefox','Chromium') } else { @($Browser) }
 $failed=$false
 $installed=0
