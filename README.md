@@ -103,7 +103,9 @@ The **Optimizer Tool** limits how much conversation UI stays loaded at once in l
 
 The window policy is now implemented in dependency-free Rust (`rust/optimizer_core.rs`), compiled into local WebAssembly and lazily loaded on supported ChatGPT routes. The popup statistics identify Rust/WASM or the compatible JavaScript fallback. Only integer counts cross the boundary; the module does not retain conversation text or DOM objects. Actual browser DOM and React allocations remain browser-owned, so this initial migration does not establish a reduction in page RAM. The queue and browser integration still use JavaScript.
 
-Packaging automatically compiles the module using `rustc`; install Rust through rustup if needed. The build installs the `wasm32-unknown-unknown` target when missing.
+The production browser execution backend is also Rust (`rust/browser_engine.rs`). It controls bounded resource traversal and aggregation, normalized message discovery, candidate validation, ancestor deduplication, DOM-order indexing, and reversible media eviction/restoration. `rust-browser-bridge.js` implements browser DOM imports using short-lived integer handles and weakly held media attributes. The original JS execution paths remain available only as compatibility fallbacks. The popup reports the policy and browser execution backends separately. Native discovery checks bounded text prefixes without copying full message strings. Browser-owned DOM and React heap allocations still require browser-native reclamation; this migration is not itself proof of RAM savings.
+
+Packaging automatically compiles both modules using `rustc`; install Rust through rustup if needed. The build installs the `wasm32-unknown-unknown` target when missing.
 
 Settings auto-save:
 
