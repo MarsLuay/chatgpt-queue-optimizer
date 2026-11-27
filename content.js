@@ -1946,17 +1946,11 @@
   }
 
   function storageSyncGet(defaults) {
-    return extensionApiPromise(
-      (done) => chrome.storage.sync.get(defaults, done),
-      () => chrome.storage.sync.get(defaults)
-    );
+    return globalThis.CpoBrowserApi.invoke('syncGet',defaults);
   }
 
   function storageSyncSet(items) {
-    return extensionApiPromise(
-      (done) => chrome.storage.sync.set(items, done),
-      () => chrome.storage.sync.set(items)
-    );
+    return globalThis.CpoBrowserApi.invoke('syncSet',items);
   }
 
   if (typeof module !== 'undefined' && module.exports) {
