@@ -44,6 +44,11 @@
       this._isRefreshing = false;
       this._lastNoMessageLog = 0;
       this.refreshTimeout = null;
+      /** @type {Record<string, (...args: number[]) => number> | null} */
+      this.nativeCore = null;
+      this.nativeCoreState = 'not loaded';
+      /** @type {Promise<void> | null} */
+      this.nativeCoreLoading = null;
 
       this.provider = this.resolveProvider();
 
@@ -164,6 +169,7 @@
               selector: this._loggedSelector || 'none',
               compatibility: this.getCompatibilityDiagnostics(),
               enterDiagnostics: this.state.enterDiagnostics || [],
+              optimizerEngine: this.nativeCoreState === 'Rust/WASM' ? 'Rust/WASM' : 'JavaScript fallback (' + (this.nativeCoreState || 'not loaded') + ')',
               performance: { ...this.state.perf }
             }
           });
@@ -409,6 +415,75 @@
       }
     }
 
+    // Only scalar counts cross the WASM boundary. Never pass DOM nodes or
+    // conversation text into linear memory, and never run WASM for queue-only sites.
+    loadRustCore() {
+      if (this.nativeCore || this.nativeCoreLoading || this.nativeCoreState === 'unavailable') return;
+      if (typeof WebAssembly === 'undefined' || typeof chrome === 'undefined' ||
+          typeof chrome.runtime?.getURL !== 'function' || typeof fetch !== 'function') {
+        this.nativeCoreState = 'unavailable';
+        return;
+      }
+      this.nativeCoreState = 'loading';
+      this.nativeCoreLoading = (async () => {
+        try {
+          const response = await fetch(chrome.runtime.getURL('optimizer_core.wasm'));
+          if (!response.ok) throw new Error('WASM resource unavailable: ' + response.status);
+          const result = await WebAssembly.instantiate(await response.arrayBuffer(), {});
+          const core = /** @type {Record<string, (...args: number[]) => number>} */ (
+            /** @type {unknown} */ (result.instance.exports)
+          );
+          const required = ['cpo_abi_version', 'cpo_visible_count', 'cpo_expand_count',
+            'cpo_hidden_count', 'cpo_offscreen_end', 'cpo_batch_count'];
+          if (!required.every(name => typeof core[name] === 'function') ||
+              core.cpo_abi_version() !== 1) {
+            throw new Error('Rust optimizer ABI mismatch');
+          }
+          this.nativeCore = core;
+          this.nativeCoreState = 'Rust/WASM';
+        } catch (error) {
+          this.nativeCoreState = 'unavailable';
+          console.warn('CPO: Rust optimizer unavailable; using compatible JS policy.', error);
+        } finally {
+          this.nativeCoreLoading = null;
+        }
+      })();
+    }
+
+    policyCount(value, fallback = 0) {
+      const number = Number(value);
+      return Number.isFinite(number) && number > 0
+        ? Math.min(0xffffffff, Math.floor(number))
+        : fallback;
+    }
+
+    policyCall(name, args, fallback) {
+      if (this.nativeCore) {
+        try {
+          return this.nativeCore[name](...args) >>> 0;
+        } catch (error) {
+          this.nativeCore = null;
+          this.nativeCoreState = 'unavailable';
+          console.warn('CPO: Rust optimizer failed; reverting to JS policy.', error);
+        }
+      }
+      return fallback();
+    }
+
+    policyVisible(total, expanded = 0) {
+      const count = this.policyCount(total);
+      const configured = this.policyCount(this.config.windowSize, 50);
+      const requested = this.policyCount(expanded);
+      return this.policyCall('cpo_visible_count', [count, configured, requested],
+        () => Math.min(count, Math.max(configured, requested, 8)));
+    }
+
+    policyBatch(hidden) {
+      const count = this.policyCount(hidden);
+      const batch = this.policyCount(this.config.batchSize, 25);
+      return this.policyCall('cpo_batch_count', [count, batch], () => Math.min(count, batch));
+    }
+
     bindOptimizer() {
       if (!this.provider?.supportsOptimizer) return;
       const surface = this.getCurrentSurface();
@@ -417,6 +492,7 @@
         return;
       }
 
+      this.loadRustCore();
       this.setupContainer();
       this.markConversationRoot();
       this.provider?.setTurnScanCacheEnabled?.(true);
@@ -1117,7 +1193,7 @@
       const text = this.state.moreBanner.querySelector('.cpo-banner-text');
 
       if (this.state.hiddenCount > 0) {
-        const toShow = Math.min(this.config.batchSize, this.state.hiddenCount);
+        const toShow = this.policyBatch(this.state.hiddenCount);
         button.textContent = `Load ${toShow} More`;
         text.textContent = `${this.state.hiddenCount} older messages hidden`;
         this.state.moreBanner.style.display = 'block';
@@ -1134,9 +1210,13 @@
       }
 
       const currentVisible = this.state.visibleCount;
-      const toShow = Math.min(this.config.batchSize, this.state.hiddenCount);
+      const toShow = this.policyBatch(this.state.hiddenCount);
 
-      this.state.visibleCount = Math.min(messages.length, currentVisible + toShow);
+      const total = this.policyCount(messages.length);
+      const current = this.policyCount(currentVisible);
+      this.state.visibleCount = toShow === 0 ? Math.min(total, current) :
+        this.policyCall('cpo_expand_count', [total, current, toShow],
+          () => Math.min(total, current + toShow));
       this.applyWindowing(messages);
     }
 
@@ -1151,15 +1231,11 @@
 
       const totalMessages = messages.length;
 
-      const minimumRecentVisible = 8;
-      const desiredVisible = Math.max(
-        Number(this.config.windowSize || 50),
-        Number(this.state.visibleCount || 0),
-        minimumRecentVisible
-      );
-
-      const targetVisible = Math.min(totalMessages, desiredVisible);
-      const startIndex = Math.max(0, totalMessages - targetVisible);
+      const targetVisible = this.policyVisible(totalMessages, this.state.visibleCount);
+      const startIndex = this.policyCall('cpo_hidden_count', [totalMessages, targetVisible],
+        () => Math.max(0, totalMessages - targetVisible));
+      const offscreenEnd = this.policyCall('cpo_offscreen_end', [totalMessages],
+        () => Math.max(0, totalMessages - 8));
 
       this.state.hiddenCount = startIndex;
       this.state.visibleCount = targetVisible;
@@ -1170,7 +1246,7 @@
         } else {
           this.showMessage(message);
         }
-        if (this.config.offscreenRendering && index >= startIndex && index < totalMessages - 8) {
+        if (this.config.offscreenRendering && index >= startIndex && index < offscreenEnd) {
           message.classList.add('cpo-offscreen');
         } else {
           message.classList.remove('cpo-offscreen');
@@ -1334,10 +1410,7 @@
 
         if (messages.length === 0) return;
 
-        const desired = Math.min(
-          messages.length,
-          Math.max(Number(this.config.windowSize || 50), 8)
-        );
+        const desired = this.policyVisible(messages.length);
 
         if (!this.state.visibleCount || this.state.visibleCount < desired) {
           this.state.visibleCount = desired;
