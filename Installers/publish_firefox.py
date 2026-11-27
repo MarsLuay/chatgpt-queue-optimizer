@@ -117,23 +117,10 @@ def managed_publish(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-dir", type=Path, default=Path(__file__).resolve().parents[1])
-    args = parser.parse_args(argv)
-    try:
-        root = args.repo_dir.resolve()
-        log_path = root / "build" / "logs" / "upload.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_text("", encoding="utf-8")
-    except (OSError, ValueError) as error:
-        print(f"[ERROR] Could not initialize the release directory or upload log: {error}", file=sys.stderr)
-        print("Check the repository path and upload.bat quoting, then retry.", file=sys.stderr)
-        return 1
-    upload_extension.LOG_PATH = log_path
-    try:
-        managed_publish(root)
-        return 0
-    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
-        upload_extension.log(f"Release stopped: {error}")
-        return 1
+    root = parser.parse_args(argv).repo_dir.resolve()
+    return subprocess.call(["cargo", "run", "--release", "--manifest-path",
+                            str(root / "Installers" / "native" / "Cargo.toml"),
+                            "--", "managed-publish", "--repo-dir", str(root)])
 
 
 if __name__ == "__main__":
