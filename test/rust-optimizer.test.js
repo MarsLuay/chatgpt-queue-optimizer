@@ -28,7 +28,11 @@ test('compiled Rust WASM implements the same window and batch policy', {
 }, async () => {
     const { instance } = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const core = instance.exports;
-    assert.equal(core.cpo_abi_version(), 2);
+    assert.equal(core.cpo_abi_version(), 3);
+    assert.equal(core.cpo_image_surface_bytes(1920, 1080), 8294400);
+    assert.equal(core.cpo_can_evict_playback(1, 1, 0, 0), 1);
+    assert.equal(core.cpo_can_evict_playback(0, 1, 0, 0), 0);
+    assert.equal(core.cpo_can_evict_playback(1, 0, 0, 0), 0);
     assert.equal(core.cpo_resource_units(100, 129, 2, 1, 1, 0), 422);
     assert.equal(core.cpo_adaptive_window(500, 50, 20, 4000, 4000), 20);
     assert.equal(core.cpo_adaptive_window(500, 50, 20, 4000, 1), 8);
@@ -152,4 +156,84 @@ test('adaptive window honors manual expansion and defers unsafe shrink', () => {
     instance.canShrinkAdaptiveWindow = () => true;
     instance.applyWindowing(turns);
     assert.equal(instance.state.visibleCount, 8);
+});
+
+function mockMedia(attributes = {}, props = {}) {
+    const attrs = new Map(Object.entries(attributes));
+    return {
+        hasAttribute: name => attrs.has(name),
+        getAttribute: name => attrs.get(name) ?? null,
+        setAttribute: (name, value) => attrs.set(name, value),
+        removeAttribute: name => attrs.delete(name),
+        querySelectorAll: () => [],
+        ...props
+    };
+}
+
+function mediaOptimizer() {
+    const instance = optimizer();
+    instance.mediaOriginals = new WeakMap();
+    instance.mediaStats = { imagesEvicted: 0, playbackEvicted: 0, restored: 0, estimatedImageBytes: 0 };
+    return instance;
+}
+
+test('responsive image eviction preserves exact sources and estimates surfaces', () => {
+    const instance = mediaOptimizer();
+    const source = mockMedia({ srcset: 'a.jpg 1x, b.jpg 2x' });
+    const picture = { querySelectorAll: () => [source] };
+    const image = mockMedia({ src: 'small.jpg', srcset: 'large.jpg 2x' }, {
+        naturalWidth: 100, naturalHeight: 50, closest: () => picture
+    });
+    const root = { querySelectorAll: () => [image], contains: () => true };
+    instance.preventImageLoading(root);
+    assert.equal(source.hasAttribute('srcset'), false);
+    assert.equal(image.hasAttribute('src'), false);
+    assert.equal(image.hasAttribute('srcset'), false);
+    assert.equal(instance.mediaStats.estimatedImageBytes, 20000);
+    instance.restoreImages(root);
+    assert.equal(image.getAttribute('src'), 'small.jpg');
+    assert.equal(image.getAttribute('srcset'), 'large.jpg 2x');
+    assert.equal(source.getAttribute('srcset'), 'a.jpg 1x, b.jpg 2x');
+});
+
+test('media eviction avoids protected sources and newer application values', () => {
+    const instance = mediaOptimizer();
+    const image = mockMedia({ src: 'old.jpg' });
+    assert.equal(instance.stashSources(image, ['src']), true);
+    image.setAttribute('src', 'new.jpg');
+    assert.equal(instance.restoreSources(image), false);
+    assert.equal(image.getAttribute('src'), 'new.jpg');
+    const protectedImage = mockMedia({ srcset: 'normal.jpg 1x, blob:protected 2x' });
+    assert.equal(instance.stashSources(protectedImage, ['srcset']), false);
+    assert.equal(protectedImage.hasAttribute('srcset'), true);
+});
+
+test('paused playback eviction is reversible and leaves active and seeked media alone', () => {
+    const instance = mediaOptimizer();
+    let loads = 0;
+    const paused = mockMedia({ src: 'clip.mp4' }, { paused: true, currentTime: 0, load() { loads++; } });
+    const active = mockMedia({ src: 'active.mp4' }, { paused: false, currentTime: 0 });
+    const seeked = mockMedia({ src: 'seeked.mp4' }, { paused: true, currentTime: 4 });
+    const stream = mockMedia({ src: 'stream.mp4' }, { paused: true, currentTime: 0, srcObject: {} });
+    const root = { querySelectorAll: () => [paused, active, seeked, stream] };
+    instance.evictPlayback(root);
+    assert.equal(paused.hasAttribute('src'), false);
+    assert.equal(active.hasAttribute('src'), true);
+    assert.equal(seeked.hasAttribute('src'), true);
+    assert.equal(stream.hasAttribute('src'), true);
+    assert.equal(instance.mediaStats.playbackEvicted, 1);
+    instance.restorePlayback(root);
+    assert.equal(paused.getAttribute('src'), 'clip.mp4');
+    assert.equal(loads, 2);
+});
+
+test('explicit cache cleanup drops retained DOM references and timers', () => {
+    const instance = optimizer();
+    instance._cachedMessages = [{}];
+    instance._cacheTimestamp = Date.now();
+    instance._messageCacheTimer = setTimeout(() => {}, 10000);
+    instance.clearMessageCache();
+    assert.equal(instance._cachedMessages, null);
+    assert.equal(instance._cacheTimestamp, null);
+    assert.equal(instance._messageCacheTimer, null);
 });
