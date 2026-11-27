@@ -10,9 +10,12 @@
         const names = ['cpo_queue_abi','cpo_fingerprint_buffer','cpo_fingerprint_capacity',
             'cpo_fingerprint_reset','cpo_fingerprint_update','cpo_fingerprint_hash','cpo_fingerprint_len',
             'cpo_queue_next','cpo_queue_retry_action','cpo_queue_confirmed','cpo_queue_remaining',
-            'cpo_queue_total','cpo_queue_can_retry','cpo_queue_backoff'];
+            'cpo_queue_total','cpo_queue_can_retry','cpo_queue_backoff',
+            'cpo_submission_ack','cpo_submission_poll','cpo_submission_stage','cpo_delivery_recovery',
+            'cpo_restore_action','cpo_restore_eligible','cpo_restore_command_number','cpo_persist_action',
+            'cpo_schedule_action','cpo_schedule_compare','cpo_schedule_identity'];
         if (!names.every(name => typeof exports[name] === 'function') ||
-            exports.cpo_queue_abi() !== 1 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
+            exports.cpo_queue_abi() !== 2 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
         core = exports;
         status = 'Rust/WASM';
     }
@@ -45,6 +48,39 @@
         if (!core || args.some(value => count(value) === null)) return null;
         try { return core[name](...args) >>> 0; }
         catch (error) { fail(error); return null; }
+    }
+    // Timestamp-bearing exports accept f64 to preserve epoch milliseconds.
+    function numeric(name, args) {
+        if (!core || args.some(value => typeof value !== 'number' || !Number.isFinite(value))) return null;
+        try { return core[name](...args) >>> 0; }
+        catch (error) { fail(error); return null; }
+    }
+    function schedule(action, item, now = Date.now()) {
+        const state = Math.max(0, ['', 'pending', 'firing', 'completed', 'failed', 'cancelled'].indexOf(item?.status));
+        const due = Number(item?.dueTs || 0);
+        return numeric('cpo_schedule_action', [action, state, Number.isFinite(due) ? due : 0, now]);
+    }
+    function scheduleIdentity(stored, current) {
+        const type = value => {
+            const index = ['unknown','existing','new','unsupported'].indexOf(value.conversationType || value.type || 'unknown');
+            return index < 0 ? 4 : index;
+        };
+        const a = stored.targetKey || stored.key || '';
+        const b = current.targetKey || current.key || '';
+        const flags = Number(!!(stored.provider && current.provider && current.provider !== 'unknown' && stored.provider !== current.provider)) |
+            (Number(!!stored.conversationId) << 1) |
+            (Number(stored.conversationId === current.conversationId) << 2) |
+            (Number(!!(a && b && a === b)) << 3);
+        return call('cpo_schedule_identity', [type(stored), type(current), flags]);
+    }
+    function restoreAction(job, confirmed) {
+        const phase = job.currentPhase === 'waiting' ? 1 :
+            ['sending','awaiting-submission-ack'].includes(job.currentPhase) ? 2 :
+            job.currentPhase === 'terminal' ? 3 : 0;
+        const flags = Number(!!confirmed) | (Number(job.deliveryState === 'terminal-awaiting-bookkeeping') << 1) |
+            (Number(['pre-click','unknown-acceptance'].includes(job.deliveryState)) << 2) |
+            (Number(!!job.currentMessage) << 3);
+        return call('cpo_restore_action', [phase, flags]);
     }
     function fingerprint(text) {
         if (!core) return null;
@@ -82,7 +118,7 @@
             (Number(!!job.waitForIdleBeforeSend) << 6);
         return call('cpo_queue_next', [flags, phase, job.queue.length]);
     }
-    const api = { load, fingerprint, confirmed, next, call, install, get status() { return status; } };
+    const api = { load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, install, get status() { return status; } };
     globalThis.CpoQueueEngine = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();
