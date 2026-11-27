@@ -10,7 +10,9 @@
         windowSize: 50,
         batchSize: 25,
         autoScroll: true,
-        offscreenRendering: false
+        offscreenRendering: false,
+        adaptiveBudget: false,
+        resourceBudget: 8000
       };
 
       this.state = {
@@ -18,6 +20,8 @@
         moreBanner: null,
         hiddenCount: 0,
         visibleCount: 0,
+        manualVisibleCount: 0,
+        adaptiveTarget: 0,
         observer: null,
         mutationObserver: null,
         isInitialized: false,
@@ -47,6 +51,9 @@
       /** @type {Record<string, (...args: number[]) => number> | null} */
       this.nativeCore = null;
       this.nativeCoreState = 'not loaded';
+      this.nativeMemoryBytes = 0;
+      /** @type {ReturnType<ChatGPTOptimizer['sampleResources']> | null} */
+      this.resourceSample = null;
       /** @type {Promise<void> | null} */
       this.nativeCoreLoading = null;
 
@@ -136,9 +143,12 @@
           break;
 
         case 'UPDATE_CONFIG':
-          if (Object.prototype.hasOwnProperty.call(message.config || {}, 'windowSize') &&
-              Number(message.config.windowSize) !== Number(this.config.windowSize)) {
+          if (['windowSize', 'adaptiveBudget', 'resourceBudget'].some(key =>
+              Object.prototype.hasOwnProperty.call(message.config || {}, key) &&
+              message.config[key] !== this.config[key])) {
             this.state.visibleCount = 0;
+            this.state.manualVisibleCount = 0;
+            this.resourceSample = null;
           }
           this.config = { ...this.config, ...message.config };
           this.saveConfig();
@@ -170,6 +180,7 @@
               compatibility: this.getCompatibilityDiagnostics(),
               enterDiagnostics: this.state.enterDiagnostics || [],
               optimizerEngine: this.nativeCoreState === 'Rust/WASM' ? 'Rust/WASM' : 'JavaScript fallback (' + (this.nativeCoreState || 'not loaded') + ')',
+              resources: this.getResourceDiagnostics(messages),
               performance: { ...this.state.perf }
             }
           });
@@ -434,11 +445,14 @@
             /** @type {unknown} */ (result.instance.exports)
           );
           const required = ['cpo_abi_version', 'cpo_visible_count', 'cpo_expand_count',
-            'cpo_hidden_count', 'cpo_offscreen_end', 'cpo_batch_count'];
+            'cpo_hidden_count', 'cpo_offscreen_end', 'cpo_batch_count',
+            'cpo_resource_units', 'cpo_adaptive_window'];
           if (!required.every(name => typeof core[name] === 'function') ||
-              core.cpo_abi_version() !== 1) {
+              core.cpo_abi_version() !== 2) {
             throw new Error('Rust optimizer ABI mismatch');
           }
+          const memory = result.instance.exports.memory;
+          this.nativeMemoryBytes = memory instanceof WebAssembly.Memory ? memory.buffer.byteLength : 0;
           this.nativeCore = core;
           this.nativeCoreState = 'Rust/WASM';
         } catch (error) {
@@ -463,6 +477,7 @@
           return this.nativeCore[name](...args) >>> 0;
         } catch (error) {
           this.nativeCore = null;
+          this.nativeMemoryBytes = 0;
           this.nativeCoreState = 'unavailable';
           console.warn('CPO: Rust optimizer failed; reverting to JS policy.', error);
         }
@@ -482,6 +497,102 @@
       const count = this.policyCount(hidden);
       const batch = this.policyCount(this.config.batchSize, 25);
       return this.policyCall('cpo_batch_count', [count, batch], () => Math.min(count, batch));
+    }
+
+    // A bounded, on-demand scan of recent turns. Counts only, no retained DOM
+    // references or copied message strings. Never call during token mutations.
+    sampleResources(messages) {
+      const sample = {
+        time: Date.now(), totalTurns: messages.length, sampledTurns: 0,
+        nodes: 0, textChars: 0, images: 0, media: 0, surfaces: 0,
+        truncatedTurns: 0, units: 0, available: false
+      };
+      if (typeof document === 'undefined' || typeof document.createTreeWalker !== 'function') return sample;
+      sample.available = true;
+      const start = Math.max(0, messages.length - 32);
+      for (let i = messages.length - 1; i >= start; i--) {
+        const root = messages[i];
+        if (!root || root.isConnected === false) continue;
+        // SHOW_ALL includes text nodes; reading Text.length does not copy text.
+        const walker = document.createTreeWalker(root, 0xffffffff);
+        let node = /** @type {Node | null} */ (root);
+        let visited = 0;
+        while (node && visited < 512) {
+          visited++;
+          sample.nodes++;
+          if (node.nodeType === 3) {
+            sample.textChars = Math.min(0xffffffff, sample.textChars + (/** @type {Text} */ (node)).length);
+          } else if (node.nodeType === 1) {
+            const tag = (/** @type {Element} */ (node)).localName;
+            if (tag === 'img') sample.images++;
+            else if (tag === 'video' || tag === 'audio') sample.media++;
+            else if (tag === 'canvas' || tag === 'iframe') sample.surfaces++;
+          }
+          node = walker.nextNode();
+        }
+        if (node) sample.truncatedTurns++;
+        sample.sampledTurns++;
+      }
+      const args = [sample.nodes, sample.textChars, sample.images, sample.media,
+        sample.surfaces, sample.truncatedTurns];
+      sample.units = this.policyCall('cpo_resource_units', args, () =>
+        Math.min(0xffffffff, sample.nodes + Math.ceil(sample.textChars / 128) +
+          sample.images * 32 + sample.media * 128 + sample.surfaces * 128 + sample.truncatedTurns * 512));
+      return sample;
+    }
+
+    getResourceSample(messages) {
+      const current = this.resourceSample;
+      if (current && current.totalTurns === messages.length && Date.now() - current.time < 8000) return current;
+      this.resourceSample = this.sampleResources(messages);
+      return this.resourceSample;
+    }
+
+    getResourceDiagnostics(messages) {
+      const sample = this.getResourceSample(messages);
+      // Chromium-only, implementation-specific heap metric; not tab RSS.
+      const memory = typeof performance !== 'undefined' ?
+        (/** @type {Performance & {memory?: {usedJSHeapSize?: number}}} */ (performance)).memory : null;
+      const used = memory?.usedJSHeapSize;
+      return {
+        ...sample,
+        usedJsHeapBytes: typeof used === 'number' && Number.isFinite(used) ? used : null,
+        wasmLinearBytes: this.nativeMemoryBytes || 0,
+        cachedMessageRefs: this._cachedMessages?.length || 0,
+        adaptiveEnabled: this.config.adaptiveBudget === true,
+        budget: this.policyCount(this.config.resourceBudget, 8000),
+        adaptiveTarget: this.state.adaptiveTarget || 0,
+        manuallyExpanded: (this.state.manualVisibleCount || 0) > 0
+      };
+    }
+
+    policyAdaptiveTarget(messages) {
+      const total = messages.length;
+      const configured = this.policyCount(this.config.windowSize, 50);
+      const sample = this.getResourceSample(messages);
+      const budget = this.policyCount(this.config.resourceBudget, 8000);
+      const cap = this.policyVisible(total);
+      const args = [total, configured, sample.sampledTurns, sample.units, budget];
+      return this.policyCall('cpo_adaptive_window', args, () =>
+        !sample.sampledTurns || !sample.units ? cap :
+          Math.min(cap, Math.max(8, Math.floor(budget * sample.sampledTurns / sample.units))));
+    }
+
+    // Do not shrink an already displayed history window over an edit,
+    // selection, or active response. Unknown activity state is conservative.
+    canShrinkAdaptiveWindow(messages) {
+      if (typeof document === 'undefined') return false;
+      try {
+        const focus = document.activeElement;
+        const selection = document.getSelection?.();
+        const selected = selection && !selection.isCollapsed;
+        if (messages.some(message =>
+          (focus && message.contains?.(focus)) ||
+          (selected && (message.contains?.(selection.anchorNode) || message.contains?.(selection.focusNode))))) return false;
+        const state = this.provider?.getGenerationState?.(document);
+        return !!state && !state.generating && !state.deepResearchActive &&
+          !state.hasActiveStopButton && !state.hasResultStreaming && !state.hasActiveToolOrResearch;
+      } catch { return false; }
     }
 
     bindOptimizer() {
@@ -1176,7 +1287,17 @@
       bannerButton.textContent = 'Load More';
 
       bannerContent.appendChild(bannerText);
+      const resetButton = document.createElement('button');
+      resetButton.className = 'cpo-banner-button cpo-reset-budget';
+      resetButton.type = 'button';
+      resetButton.textContent = 'Return to budget';
+      resetButton.style.display = 'none';
+      resetButton.addEventListener('click', () => {
+        this.state.manualVisibleCount = 0;
+        this.applyWindowing();
+      });
       bannerContent.appendChild(bannerButton);
+      bannerContent.appendChild(resetButton);
       banner.appendChild(bannerContent);
 
       bannerButton.addEventListener('click', () => {
@@ -1192,7 +1313,12 @@
       const button = this.state.moreBanner.querySelector('.cpo-banner-button');
       const text = this.state.moreBanner.querySelector('.cpo-banner-text');
 
-      if (this.state.hiddenCount > 0) {
+      const reset = this.state.moreBanner.querySelector('.cpo-reset-budget');
+      const expanded = this.config.adaptiveBudget === true &&
+        (this.state.manualVisibleCount || 0) > (this.state.adaptiveTarget || 0);
+      if (reset) reset.style.display = expanded ? '' : 'none';
+      if (button) button.style.display = this.state.hiddenCount > 0 ? '' : 'none';
+      if (this.state.hiddenCount > 0 || expanded) {
         const toShow = this.policyBatch(this.state.hiddenCount);
         button.textContent = `Load ${toShow} More`;
         text.textContent = `${this.state.hiddenCount} older messages hidden`;
@@ -1217,6 +1343,7 @@
       this.state.visibleCount = toShow === 0 ? Math.min(total, current) :
         this.policyCall('cpo_expand_count', [total, current, toShow],
           () => Math.min(total, current + toShow));
+      if (this.config.adaptiveBudget) this.state.manualVisibleCount = this.state.visibleCount;
       this.applyWindowing(messages);
     }
 
@@ -1231,7 +1358,17 @@
 
       const totalMessages = messages.length;
 
-      const targetVisible = this.policyVisible(totalMessages, this.state.visibleCount);
+      let targetVisible;
+      if (this.config.adaptiveBudget === true) {
+        this.state.adaptiveTarget = this.policyAdaptiveTarget(messages);
+        targetVisible = Math.min(totalMessages, Math.max(this.state.adaptiveTarget, this.state.manualVisibleCount || 0));
+        if (targetVisible < this.state.visibleCount && !this.canShrinkAdaptiveWindow(messages)) {
+          targetVisible = Math.min(totalMessages, this.state.visibleCount);
+        }
+      } else {
+        this.state.adaptiveTarget = 0;
+        targetVisible = this.policyVisible(totalMessages, this.state.visibleCount);
+      }
       const startIndex = this.policyCall('cpo_hidden_count', [totalMessages, targetVisible],
         () => Math.max(0, totalMessages - targetVisible));
       const offscreenEnd = this.policyCall('cpo_offscreen_end', [totalMessages],
@@ -1342,7 +1479,11 @@
     }
 
     setupAutoScroll() {
-      if (!this.config.autoScroll || !this.state.moreBanner) return;
+      if (!this.config.autoScroll || this.config.adaptiveBudget || !this.state.moreBanner) {
+        if (this.state.observer) this.state.observer.disconnect();
+        this.state.observer = null;
+        return;
+      }
 
       if (this.state.observer) {
         this.state.observer.disconnect();
@@ -1412,7 +1553,7 @@
 
         const desired = this.policyVisible(messages.length);
 
-        if (!this.state.visibleCount || this.state.visibleCount < desired) {
+        if (!this.config.adaptiveBudget && (!this.state.visibleCount || this.state.visibleCount < desired)) {
           this.state.visibleCount = desired;
         }
 
@@ -1475,6 +1616,9 @@
 
       this.state.hiddenCount = 0;
       this.state.visibleCount = 0;
+      this.state.manualVisibleCount = 0;
+      this.state.adaptiveTarget = 0;
+      this.resourceSample = null;
       this._cachedMessages = null;
       this._cacheTimestamp = null;
     }
