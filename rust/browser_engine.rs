@@ -20,7 +20,7 @@ fn h(op: u32, a: u32, b: u32, c: u32) -> u32 {
 }
 
 #[no_mangle]
-pub extern "C" fn cpo_browser_abi() -> u32 { 4 }
+pub extern "C" fn cpo_browser_abi() -> u32 { 5 }
 
 const MAX_TURNS: u32 = 32;
 const MAX_NODES: u32 = 512;
@@ -488,6 +488,142 @@ pub extern "C" fn cpo_dom_incomplete_tool(count: u32) -> u32 {
         if h(104,node,0,0) != 0 { return 1; }
     }
     h(105,tool,0,0)
+}
+
+// UI rendering primitives. Rust defines the tree, classes, order, controls
+// and render bounds; host supplies dynamic text and executes DOM operations.
+// All UI nodes belong to a call-local detached fragment until publication.
+#[cfg(target_arch = "wasm32")]
+mod ui {
+    use super::h;
+    fn node(tag:u32)->u32 {h(110,tag,0,0)}
+    fn literal(op:u32,n:u32,s:&str){h(op,n,s.as_ptr() as u32,s.len() as u32);}
+    fn class(n:u32,s:&str){literal(111,n,s)}
+    fn text(n:u32,s:&str){literal(112,n,s)}
+    fn style(n:u32,s:&str){literal(113,n,s)}
+    fn dynamic(n:u32,row:u32,field:u32){h(114,n,row,field);}
+    fn append(parent:u32,child:u32){h(115,parent,child,0);}
+    fn flags(row:u32)->u32{h(116,row,0,0)}
+    fn button(parent:u32,row:u32,action:u32,label:&str,css:&str,styles:&str){
+        let n=node(4);class(n,css);text(n,label);style(n,styles);
+        h(117,n,row,action);append(parent,n);
+    }
+    fn item(parent:u32,tag:u32,css:&str,value:&str)->u32{
+        let n=node(tag);class(n,css);text(n,value);append(parent,n);n
+    }
+    fn dynamic_item(parent:u32,tag:u32,css:&str,row:u32,field:u32)->u32{
+        let n=node(tag);class(n,css);dynamic(n,row,field);append(parent,n);n
+    }
+    // Kinds 0 messages, 1 sequences, 2 scheduled, 3 running jobs,
+    // 4 logs, 5 optimizer statistics, 6 history rows, 7 popup status.
+    #[no_mangle]
+    pub extern "C" fn cpo_ui_render(kind:u32,count:u32,limit:u32)->u32 {
+        match kind {
+            0=>{
+                let shown=count.min(limit);
+                for i in 0..shown {
+                    let row=node(0);class(row,"message-item");
+                    style(row,"display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:6px");
+                    let label=dynamic_item(row,1,"",i,0);
+                    style(label,"flex:1;overflow-wrap:anywhere");
+                    let controls=node(0);style(controls,"display:flex;gap:4px");append(row,controls);
+                    button(controls,i,1,"Edit","","width:auto;padding:4px 6px;font-size:10px");
+                    button(controls,i,2,"×","","width:auto;padding:4px 7px;font-size:12px;background:var(--danger);color:#fff");
+                    append(0,row);
+                }
+                if shown<count{
+                    let n=node(4);class(n,"message-list-load-more");dynamic(n,shown,1);
+                    h(117,n,shown,3);append(0,n);
+                }
+            }
+            1=>{
+                if count==0{
+                    let n=item(0,5,"","Save a sequence first");h(119,n,3,0);
+                }else{
+                    for i in 0..count{
+                        let n=dynamic_item(0,5,"",i,0);h(118,n,i,0);
+                    }
+                    let sep=item(0,5,"","────────────");h(119,sep,1,0);
+                    let edit=item(0,5,"","Edit selected sequence...");literal(120,edit,"__edit_selected_sequence__");
+                }
+            }
+            2=>{
+                if count==0{item(0,0,"instance-empty","No scheduled messages");}
+                for i in 0..count{
+                    let row=node(0);class(row,"scheduled-row");
+                    let main=node(0);class(main,"scheduled-row-main");append(row,main);
+                    let info=dynamic_item(main,0,"scheduled-info",i,0);
+                    append(info,node(6));
+                    let badge=dynamic_item(info,1,"scheduled-status-badge",i,1);
+                    h(121,badge,i,2);
+                    let actions=node(0);class(actions,"scheduled-actions");append(main,actions);
+                    let mask=flags(i);
+                    if mask&1!=0{button(actions,i,4,"Cancel","","");}
+                    if mask&2!=0{button(actions,i,5,"Retry","","");}
+                    if mask&4!=0{button(actions,i,6,"Delete","scheduled-delete-btn","");}
+                    append(0,row);
+                }
+            }
+            3=>{
+                if count==0{item(0,0,"instance-empty","No running instances");}
+                for i in 0..count{
+                    let row=node(0);class(row,"instance-row");
+                    dynamic_item(row,0,"instance-info",i,0);
+                    let controls=node(0);style(controls,"display:flex;gap:4px;align-items:center");append(row,controls);
+                    if flags(i)&1!=0{button(controls,i,7,"Retry","instance-stop-btn","background:var(--accent-2);color:var(--accent-2-text)");}
+                    button(controls,i,8,"Stop","instance-stop-btn","");
+                    append(0,row);
+                }
+            }
+            4=>{
+                if count==0{item(0,0,"queue-log-empty","No automation logs yet");}
+                for i in (count.saturating_sub(30)..count).rev(){
+                    let entry=node(0);class(entry,"queue-log-entry");h(121,entry,i,3);
+                    dynamic_item(entry,0,"queue-log-meta",i,0);
+                    dynamic_item(entry,0,"queue-log-message",i,1);
+                    if flags(i)&1!=0{dynamic_item(entry,0,"queue-log-details",i,2);}
+                    append(0,entry);
+                }
+            }
+            5=>{
+                item(0,7,"","Stats:");
+                for i in 0..count{append(0,node(6));dynamic_item(0,1,"",i,0);}
+            }
+            6=>{
+                if count>16{return 0;}
+                for i in 0..count{
+                    let row=node(2);class(row,"turn");
+                    dynamic_item(row,3,"",i,0);
+                    dynamic_item(row,8,"",i,1);
+                    if flags(i)&1!=0{item(row,8,"notice","This turn was truncated by the snapshot limit.");}
+                    append(0,row);
+                }
+            }
+            7=>{
+                if count!=1{return 0;}
+                dynamic_item(0,1,"popup-status-message",0,0);
+                if flags(0)&1!=0{button(0,0,9,"Dismiss","popup-status-dismiss","");}
+            }
+            _=>return 0,
+        }
+        h(122,0,0,0)
+    }
+    // Sequence edit effects: add=0, replace=1, remove=2, clear=3.
+    // A missing or empty input is rejected before any mutation.
+    #[no_mangle]
+    pub extern "C" fn cpo_ui_sequence_edit(action:u32,index:u32,len:u32,flags:u32)->u32{
+        let valid=match action{0=>flags&1!=0,1=>index<len&&flags&1!=0,2=>index<len,3=>true,_=>false};
+        if !valid{return 0;}
+        h(123,action,index,0)
+    }
+}
+#[no_mangle]
+pub extern "C" fn cpo_ui_next_limit(total:u32,shown:u32)->u32 { total.min(shown.saturating_add(100)) }
+// Save/load/delete selection: explicit valid name wins, then selected,
+// then first available. 0 none, 1 explicit, 2 selected, 3 first.
+#[no_mangle]
+pub extern "C" fn cpo_ui_sequence_select(flags:u32,count:u32)->u32{
+    if count==0{0}else if flags&1!=0{1}else if flags&2!=0{3}else if flags&4!=0{2}else{3}
 }
 
 #[cfg(test)]
