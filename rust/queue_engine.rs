@@ -1,7 +1,7 @@
 //! Queue execution decisions and streaming legacy-compatible UTF-16 fingerprints.
 
 #[no_mangle]
-pub extern "C" fn cpo_queue_abi() -> u32 { 9 }
+pub extern "C" fn cpo_queue_abi() -> u32 { 10 }
 
 const OFFSET: u32 = 2166136261;
 const PRIME: u32 = 16777619;
@@ -1077,5 +1077,146 @@ mod live_state {
             s.read(id,QUEUE as u32,u32::MAX);
             assert_eq!(s.output,b"[\"next\",\"b\"]");
         }
+    }
+}
+
+// Canonical ordered provider selector and compatibility catalogs.
+const CATALOG_1: &[(&str, &[&str])] = &[
+    ("composer", &["#prompt-textarea", "[data-testid=\"prompt-textarea\"]", "textarea", "[contenteditable=\"true\"][role=\"textbox\"]", "div[contenteditable=\"true\"]", "[contenteditable=\"true\"]"]),
+    ("sendButton", &["button[data-testid=\"send-button\"]", "button[data-testid=\"fruitjuice-send-button\"]", "button[aria-label=\"Send prompt\"]", "button[aria-label=\"Send message\"]", "button[type=\"submit\"]"]),
+    ("stopButton", &["button[data-testid=\"stop-button\"]", "button[data-testid*=\"stop\"]", "button[aria-label*=\"stop\"]", "button[aria-label*=\"Stop\"]"]),
+    ("streaming", &[".result-streaming", "[data-testid*=\"conversation-turn\"] .result-streaming", "[data-message-streaming=\"true\"]", "[data-is-streaming=\"true\"]", "[data-testid*=\"streaming\"]"]),
+    ("status", &["[role=\"status\"]", "[aria-live]", "[data-testid*=\"status\"]", "[data-testid*=\"progress\"]", "[data-testid*=\"research\"]", "[data-testid*=\"thinking\"]", "[data-testid*=\"reasoning\"]", "[data-testid*=\"thought\"]", "[data-testid*=\"tool-progress\"]", ".result-thinking"]),
+    ("spinner", &["svg.animate-spin", "[class*=\"animate-spin\"]", "[data-testid*=\"loading-spinner\"]"]),
+    ("errorAlerts", &["[role=\"alert\"]", "[data-testid*=\"error\"]", ".text-red-500", ".border-red-500", ".text-token-text-error", "[class*=\"error-message\"]"]),
+    ("messages", &["[data-testid^=\"conversation-turn\"]", "[data-testid*=\"conversation-turn\"]", "article", "[data-message-author-role]", "[data-message-id]", "[data-testid=\"conversation-turn\"]"]),
+    ("fallbackMessages", &["main article", "main [data-message-author-role]", "main [data-message-id]", "main div[class*=\"group\"]", "[role=\"main\"] article", "[role=\"main\"] [data-message-author-role]", "[role=\"main\"] div[class*=\"group\"]"]),
+    ("mainRoot", &["main", "[role=\"main\"]", "#__next", "body"]),
+];
+const CATALOG_2: &[(&str, &[&str])] = &[
+    ("composer", &[".ql-editor[contenteditable=\"true\"]", "rich-textarea .ql-editor", ".ql-editor", "[contenteditable=\"true\"][role=\"textbox\"]", "div[contenteditable=\"true\"]"]),
+    ("sendButton", &["button.send-button[aria-label=\"Send message\"]", "button.send-button", "button[aria-label=\"Send message\"]", "button[aria-label*=\"Send\"]"]),
+    ("stopButton", &["button[aria-label=\"Stop response\"]", "button[aria-label*=\"Stop\"]", "button.stop-button", "button[data-test-id*=\"stop\"]"]),
+    ("streaming", &["[class*=\"response-streaming\"]", "[data-is-streaming=\"true\"]", ".model-response-text[aria-busy=\"true\"]"]),
+    ("status", &["[role=\"status\"]", "[aria-live]", "[class*=\"thinking\"]", "[class*=\"loading\"]", "[data-test-id*=\"loading\"]", "[data-test-id*=\"progress\"]"]),
+    ("spinner", &["[class*=\"loading\"]", "[class*=\"spinner\"]", "mat-progress-spinner", "circular-progress"]),
+    ("errorAlerts", &["[role=\"alert\"]", "[matsnackbarlabel]", ".mat-mdc-snack-bar-label", ".mdc-snackbar__label", "[class*=\"error\"]"]),
+    ("messages", &[]),
+    ("fallbackMessages", &[]),
+    ("mainRoot", &["main", "[role=\"main\"]", "chat-window", "body"]),
+];
+const CATALOG_3: &[(&str, &[&str])] = &[
+    ("composer", &["[data-testid=\"chat-input\"]", "div.ProseMirror[contenteditable=\"true\"]", "div.ProseMirror", "[contenteditable=\"true\"][role=\"textbox\"]", "div[contenteditable=\"true\"]", "fieldset textarea", "textarea"]),
+    ("sendButton", &["button[aria-label=\"Send Message\"]", "button[aria-label=\"Send message\"]", "button[data-testid=\"send-button\"]", "button[aria-label*=\"Send\"]", "button[type=\"submit\"]"]),
+    ("stopButton", &["button[aria-label=\"Stop generating\"]", "button[aria-label*=\"Stop\"]", "button[aria-label*=\"stop\"]", "button[data-testid*=\"stop\"]"]),
+    ("streaming", &["[data-is-streaming=\"true\"]", "[data-is-streaming]", ".font-claude-response[data-is-streaming]"]),
+    ("status", &["[role=\"status\"]", "[aria-live]", "[class*=\"thinking\"]", "[class*=\"loading\"]", "[data-testid*=\"thinking\"]", "[data-testid*=\"progress\"]", "[data-testid*=\"status\"]"]),
+    ("spinner", &["[class*=\"loading\"]", "[class*=\"spinner\"]", "[class*=\"animate-spin\"]", "svg.animate-spin"]),
+    ("errorAlerts", &["[role=\"alert\"]", "[data-testid*=\"error\"]", "[class*=\"error\"]"]),
+    ("messages", &[]),
+    ("fallbackMessages", &[]),
+    ("mainRoot", &["main", "[role=\"main\"]", "body"]),
+];
+const CATALOG_4: &[(&str, &[&str])] = &[
+    ("composerContext", &["[data-testid*=\"composer\"]", "[data-testid*=\"prompt\"]", "[id*=\"prompt\"]", "form"]),
+    ("messageContext", &["[data-testid^=\"conversation-turn\"]", "[data-testid*=\"conversation-turn\"]", "article", "[data-message-author-role]", "[data-message-id]"]),
+    ("turnContext", &["[data-testid^=\"conversation-turn\"]", "[data-testid*=\"conversation-turn\"]", "article"]),
+    ("assistantContentSelectors", &[".markdown", "[data-testid*=\"copy\"]", "[aria-label*=\"Copy\"]"]),
+    ("weakComposerSelectors", &["textarea", "[contenteditable=\"true\"][role=\"textbox\"]", "div[contenteditable=\"true\"]", "[contenteditable=\"true\"]"]),
+    ("weakSendButtonSelectors", &["button[type=\"submit\"]"]),
+    ("stopLabels", &["stop generating", "stop streaming", "stop response", "interrupt", "stop"]),
+    ("retryLabels", &["retry", "try again", "regenerate", "regenerate response"]),
+    ("researchMarkers", &["deep research", "researching", "searching the web", "searching sources", "reading sources", "analyzing sources", "gathering sources", "checking sources", "synthesizing", "creating report", "writing report", "thinking", "working"]),
+    ("deliveryTimeoutMarkers", &["message delivery timed out", "delivery timed out", "message delivery timeout", "delivery timeout", "timed out. please try again"]),
+    ("errorMarkers", &["something went wrong", "there was an error", "error generating a response", "network error", "failed to generate", "try again later"]),
+    ("waitingForUserMarkers", &["waiting for you", "waiting for your response", "waiting for your reply", "need more information from you", "reply when you are ready"]),
+    ("interruptedMarkers", &["stopped generating", "response interrupted", "generation stopped", "you stopped this response"]),
+    ("conversationCapacityMarkers", &["you've reached the maximum length for this conversation", "maximum length for this conversation", "keep talking by starting a new chat"]),
+];
+
+fn catalog(id:u32)-> &'static [(&'static str, &'static [&'static str])] {
+    match id {1=>CATALOG_1,2=>CATALOG_2,3=>CATALOG_3,4=>CATALOG_4,_=>&[]}
+}
+#[no_mangle]
+pub extern "C" fn cpo_catalog_len(id:u32)->u32 {catalog(id).len() as u32}
+#[no_mangle]
+pub extern "C" fn cpo_catalog_items(id:u32,group:u32)->u32 {
+    catalog(id).get(group as usize).map_or(0,|(_,items)|items.len() as u32)
+}
+#[no_mangle]
+pub extern "C" fn cpo_catalog_word(id:u32,group:u32,item:u32,offset:u32)->u32 {
+    let Some((name,items))=catalog(id).get(group as usize) else{return 0;};
+    let text=if item==u32::MAX {*name} else {match items.get(item as usize){Some(s)=>*s,None=>return 0}};
+    text.as_bytes().iter().skip(offset as usize).take(4).enumerate().fold(0,|n,(i,b)|n|(u32::from(*b)<<(i*8)))
+}
+// Enter=1; shift/alt/ctrl/meta/composing/IME=2..64.
+#[no_mangle]
+pub extern "C" fn cpo_enter_eligible(flags:u32)->u32 {(flags&127==1) as u32}
+#[no_mangle]
+pub extern "C" fn cpo_enter_action(flags:u32,elapsed:f64)->u32 {
+    if flags&1==0 {0} else if flags&2!=0 {1}
+    else if flags&4!=0 && elapsed<1200.0 {2} else {3}
+}
+// Raw facts: textarea=1, contenteditable=2, clickable=4, editor
+// class=8, Claude chat-input=16, excluded message ancestor=32.
+#[no_mangle]
+pub extern "C" fn cpo_provider_predicate(provider:u32,mode:u32,flags:u32)->u32 {
+    if !(1..=3).contains(&provider){return 0;}
+    match mode {
+        0=>(flags&3!=0) as u32, 1=>(flags&4!=0) as u32,
+        2=>((flags&32==0) && match provider{2=>flags&11!=0,3=>flags&27!=0,_=>flags&3!=0}) as u32,
+        _=>0
+    }
+}
+// Native recursive traversal policy. Action in low byte, bound above it.
+// Host never visits children of redacted or truncated nodes.
+#[no_mangle]
+pub extern "C" fn cpo_log_plan(kind:u32,depth:u32,len:u32,flags:u32)->u32 {
+    let length=len.min(0x00ff_ffff);
+    if kind==0{return 0;}
+    if flags&1!=0{return if flags&2!=0 {8} else if kind==1||kind==3 {6|(length<<8)} else {7};}
+    match kind {
+        1=>1|(cpo_log_limit(0,depth,length)<<8), 2=>0,
+        3=>if depth>=2 {4} else {2|(length.min(12)<<8)},
+        4=>if depth>=3 {5} else {3|(length.min(30)<<8)},
+        5=>9, _=>10
+    }
+}
+#[no_mangle]
+pub extern "C" fn cpo_diag_pick(mask:u32)->u32 {if mask==0 {0} else {mask.trailing_zeros()+1}}
+#[cfg(target_arch="wasm32")]
+mod diagnostic_text {
+    use std::cell::RefCell;
+    struct State { units:Vec<u16>, pending:bool, limit:usize, overflow:bool }
+    thread_local! {static STATE:RefCell<State>=RefCell::new(State{units:Vec::new(),pending:false,limit:0,overflow:false});}
+    #[no_mangle]
+    pub extern "C" fn cpo_diag_reset(limit:u32)->u32 {
+        STATE.with(|s|{let mut s=s.borrow_mut();s.units.fill(0);s.units.clear();s.pending=false;s.overflow=false;s.limit=limit.min(1024) as usize;});
+        1
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_diag_update(len:u32)->u32 {
+        if len as usize>super::CHUNK{return 2;}
+        let input=unsafe{core::slice::from_raw_parts(super::cpo_fingerprint_buffer() as *const u16,len as usize)};
+        STATE.with(|s|{
+            let mut s=s.borrow_mut();
+            for &ch in input{
+                if super::whitespace(ch){if !s.units.is_empty(){s.pending=true;}continue;}
+                if s.pending {s.pending=false;if s.units.len()<s.limit{s.units.push(32);}else{s.overflow=true;break;}}
+                if s.units.len()<s.limit{s.units.push(ch);}else{s.overflow=true;break;}
+            }
+            s.overflow as u32
+        })
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_diag_finish()->u32{
+        STATE.with(|s|{
+            let mut s=s.borrow_mut();
+            if s.overflow&&s.limit>0 {let keep=s.limit.saturating_sub(1).max(1);s.units.truncate(keep);s.units.push(0x2026);}
+            let count=s.units.len().min(super::CHUNK);
+            unsafe{core::ptr::copy_nonoverlapping(s.units.as_ptr(),super::cpo_fingerprint_buffer() as *mut u16,count);}
+            s.units.fill(0);s.units.clear();s.pending=false;s.overflow=false;
+            count as u32
+        })
     }
 }

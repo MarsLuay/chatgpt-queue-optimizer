@@ -23,7 +23,7 @@ async function engine(optimizer = owner()) {
         cpo: { host: (op, a, b, c) => bridge.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
     });
     bridge.exports = result.instance.exports;
-    assert.equal(bridge.exports.cpo_browser_abi(), 8);
+    assert.equal(bridge.exports.cpo_browser_abi(), 9);
     return bridge;
 }
 

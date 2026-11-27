@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 9);
+    assert.equal(e.cpo_queue_abi(), 10);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -399,4 +399,25 @@ test('native live jobs preserve queue order, revision and durable recovery schem
     assert.notEqual(jobs.get(17),job);
     jobs.clear();
     assert.equal(jobs.size,0);
+});
+
+test('native provider catalogs, keyboard and diagnostic policies',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    assert.equal(engine.providerCatalog(1).composer[0],'#prompt-textarea');
+    assert.equal(engine.providerCatalog(2).composer[0],'.ql-editor[contenteditable="true"]');
+    assert.equal(engine.providerCatalog(3).composer[0],'[data-testid="chat-input"]');
+    assert.equal(engine.providerCatalog(4).turnContext.length,3);
+    assert.equal(engine.call('cpo_provider_predicate',[2,2,8]),1);
+    assert.equal(engine.call('cpo_provider_predicate',[2,2,40]),0);
+    assert.equal(engine.call('cpo_provider_predicate',[3,2,16]),1);
+    for(let flags=0;flags<128;flags++)assert.equal(engine.call('cpo_enter_eligible',[flags]),Number(flags===1));
+    assert.equal(engine.numeric('cpo_enter_action',[5,1199]),2);
+    assert.equal(engine.numeric('cpo_enter_action',[5,1200]),3);
+    assert.equal(engine.numeric('cpo_enter_action',[3,0]),1);
+    assert.equal(engine.diagnosticText('  a\t b  ',10),'a b');
+    assert.equal(engine.diagnosticText('  abcdef ',4),'abc…');
+    const result=engine.sanitizeDiagnostic({prompt:'secret',nested:{token:{redacted:true,secret:'leak'},ok:true}},0,'',
+        key=>['prompt','token'].includes(key),error=>({message:error.message}));
+    assert.deepEqual(result,{ok:true,value:{prompt:{redacted:true,length:6},nested:{token:{redacted:true},ok:true}}});
 });

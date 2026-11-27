@@ -21,11 +21,11 @@
                     cpo: { host: (op, a, b, c) => this.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
                 });
                 const core = result.instance.exports;
-                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 8 ||
+                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 9 ||
                     !['cpo_collect_resources', 'cpo_discover_messages', 'cpo_execute_media',
                         'cpo_apply_window', 'cpo_window_visible', 'cpo_capture_history', 'cpo_process_mutations',
                         'cpo_cache_ttl', 'cpo_cache_valid', 'cpo_cache_nodes_valid', 'cpo_mutation_delay', 'cpo_provider_selectors', 'cpo_dom_composer_write', 'cpo_dom_composer_read',
-                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool', 'cpo_ui_render', 'cpo_ui_sequence_edit', 'cpo_ui_next_limit', 'cpo_ui_sequence_select', 'cpo_ui_variables', 'cpo_ui_saved_sequence', 'cpo_sequence_import', 'cpo_sequence_substitute', 'cpo_event_ready','cpo_restore_window','cpo_restore_journal','cpo_intersection_transition'].every(name => typeof core[name] === 'function')) {
+                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool', 'cpo_ui_render', 'cpo_ui_sequence_edit', 'cpo_ui_next_limit', 'cpo_ui_sequence_select', 'cpo_ui_variables', 'cpo_ui_saved_sequence', 'cpo_sequence_import', 'cpo_sequence_substitute', 'cpo_event_ready','cpo_restore_window','cpo_restore_journal','cpo_intersection_transition','cpo_message_predicate','cpo_first_matching_selector'].every(name => typeof core[name] === 'function')) {
                     throw new Error('Browser WASM ABI mismatch');
                 }
                 this.exports = core;
@@ -71,7 +71,10 @@
 
         discover(adapter, doc, root) {
             const selectors = adapter.compatibilitySignals.turnContext || [];
-            const context = { adapter, doc, root, selectors, handles: [null],
+            const markers=adapter.compatibilitySignals.messageContext||[];
+            const composer=adapter.selectors.composer.join(',');
+            const context = { adapter, doc, root, selectors, markers, markerQuery:markers.join(','),
+                composerForm:composer+', form', composerInput:composer+', input, form', handles: [null],
                 ids: new Map(), flags: new Map(), accepted: [], acceptedSet: new Set(),
                 redundant: new Set(), order: new Map(), selector: null, fallback: false };
             return this.invoke(context, (core, ctx) => {
@@ -251,19 +254,32 @@
             if (ctx.root.contains(node)) flags |= 1;
             if (node.closest('#cpo-root') || node.classList?.contains('cpo-more-banner')) flags |= 2;
             if (['script','style','nav','aside','header','footer'].includes((node.tagName || '').toLowerCase())) flags |= 4;
-            const markers = adapter.compatibilitySignals.messageContext || [];
-            const marker = markers.some(selector => node.matches?.(selector)) ||
-                !!(markers.length && node.querySelector(markers.join(',')));
+            const marker = ctx.markers.some(selector => node.matches?.(selector)) ||
+                !!(ctx.markers.length && node.querySelector(ctx.markerQuery));
             if (marker) flags |= 8;
-            const composer = adapter.selectors.composer.join(',');
-            if (node.querySelector(composer + ', form')) flags |= 16;
-            if (node.querySelector(composer + ', input, form')) flags |= 32;
+            if (node.querySelector(ctx.composerForm)) flags |= 16;
+            if (node.querySelector(ctx.composerInput)) flags |= 32;
             if (node.id?.includes('thread-bottom')) flags |= 64;
             if (marker || node.querySelector('p, pre, code, ul, ol, h1, h2, h3, h4, h5, h6, [data-message-author-role]')) flags |= 128;
             ctx.flags.set(id, flags);
             return flags;
         }
 
+        firstMatchingSelector(node,selectors) {
+            if(this.context)return null;
+            return this.invoke({node,selectors},core=>selectors[(core.cpo_first_matching_selector(selectors.length)>>>0)-1]||'');
+        }
+        messagePredicate(mode,node,root,adapter) {
+            const markers=adapter.compatibilitySignals.messageContext||[];
+            const composer=adapter.selectors.composer.join(',');
+            return this.invoke({handles:[null,node],flags:new Map(),adapter,root,markers,markerQuery:markers.join(','),
+                composerForm:composer+', form',composerInput:composer+', input, form'},core=>{
+                const flags=this.nodeFlags(1);
+                if(!core.cpo_message_predicate(mode,flags,mode===1?15:80))return false;
+                const text=(node.textContent||'').trim().length;
+                return core.cpo_message_predicate(mode,flags,Math.min(0xffffffff,text))===1;
+            });
+        }
         intersection(flags) {
             return this.invoke({},core=>core.cpo_intersection_transition(flags)>>>0);
         }
@@ -453,6 +469,8 @@
                     return 1;
                 }
                 case 74: return Number(!!ctx.nodes[a] && ctx.nodes[a].isConnected !== false);
+                case 160:
+                    try{return Number(!!ctx.node.matches?.(ctx.selectors[a]));}catch{return 0;}
                 case 80: {
                     const selector = ctx.selectors[a];
                     try {

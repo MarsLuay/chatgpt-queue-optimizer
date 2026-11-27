@@ -2240,6 +2240,8 @@ function getCommandBinding(job, context = {}) {
 }
 
 function boundedDiagnosticValue(value, maxLength = 160) {
+    const native=globalThis.CpoQueueEngine?.diagnosticText(value,maxLength);
+    if(native!=null)return native;
     const normalized = String(value ?? '').replace(/\s+/g, ' ').trim();
     if (!normalized) {
         return '';
@@ -2267,21 +2269,22 @@ function getDiagnosticTurnIdentity(job, details = {}) {
 }
 
 function collectDeliveryDiagnostics(job, extra = {}) {
+    const pick=(...values)=>globalThis.CpoQueueEngine?.diagnosticPick(...values)??values.find(Boolean)??'';
     const turnIdentity = getDiagnosticTurnIdentity(job, extra);
     return {
         ...extra,
-        runId: boundedDiagnosticValue(job?.runId || extra.runId || ''),
-        commandId: boundedDiagnosticValue(job?.commandId || extra.commandId || ''),
+        runId: boundedDiagnosticValue(pick(job?.runId,extra.runId)),
+        commandId: boundedDiagnosticValue(pick(job?.commandId,extra.commandId)),
         commandNumber: job?.currentCommandNumber || extra.commandNumber || 0,
-        deliveryState: boundedDiagnosticValue(job?.deliveryState || extra.deliveryState || ''),
-        submissionAckSource: boundedDiagnosticValue(job?.submissionAckSource || extra.submissionAckSource || ''),
-        terminalAckSource: boundedDiagnosticValue(job?.terminalAckSource || extra.terminalAckSource || ''),
+        deliveryState: boundedDiagnosticValue(pick(job?.deliveryState,extra.deliveryState)),
+        submissionAckSource: boundedDiagnosticValue(pick(job?.submissionAckSource,extra.submissionAckSource)),
+        terminalAckSource: boundedDiagnosticValue(pick(job?.terminalAckSource,extra.terminalAckSource)),
         userTurnId: turnIdentity.userTurnId,
         assistantTurnId: turnIdentity.assistantTurnId,
         lastResponsePhase: boundedDiagnosticValue(
-            job?.lastResponsePhase || extra.phase || extra.responseState?.phase || ''
+            pick(job?.lastResponsePhase,extra.phase,extra.responseState?.phase)
         ),
-        commandFingerprint: boundedDiagnosticValue(job?.commandFingerprint || extra.commandFingerprint || ''),
+        commandFingerprint: boundedDiagnosticValue(pick(job?.commandFingerprint,extra.commandFingerprint)),
         turnIdentity
     };
 }
@@ -4120,19 +4123,28 @@ function describeLoggedMessage(text) {
 }
 
 function sanitizeLogValue(value, depth = 0, key = '') {
+    const native=globalThis.CpoQueueEngine?.sanitizeDiagnostic(value,depth,key,isSensitiveLogKey,serializeError);
+    if(native?.ok)return native.value;
+    return emergencySanitizeLogValue(value,depth,key);
+}
+
+// Native engine failure must never bypass redaction.
+function emergencySanitizeLogValue(value, depth = 0, key = '') {
     if (value === null || value === undefined) {
         return value;
     }
 
     if (key && isSensitiveLogKey(key)) {
         if (value && typeof value === 'object' && value.redacted === true) {
-            return value;
+            const clean={redacted:true};
+            for(const field of ['length','messageLength'])if(Number.isSafeInteger(value[field])&&value[field]>=0)clean[field]=value[field];
+            return clean;
         }
         return redactSensitiveLogValue(value);
     }
 
     if (value instanceof Error) {
-        return sanitizeLogValue(serializeError(value), depth, key);
+        return emergencySanitizeLogValue(serializeError(value), depth, key);
     }
 
     if (typeof value === 'string') {
@@ -4149,7 +4161,7 @@ function sanitizeLogValue(value, depth = 0, key = '') {
             return `[${value.length} items]`;
         }
 
-        return value.slice(0, globalThis.CpoQueueEngine?.call('cpo_log_limit',[1,depth,value.length])??12).map(item => sanitizeLogValue(item, depth + 1));
+        return value.slice(0, globalThis.CpoQueueEngine?.call('cpo_log_limit',[1,depth,value.length])??12).map(item => emergencySanitizeLogValue(item, depth + 1));
     }
 
     if (typeof value === 'object') {
@@ -4163,7 +4175,7 @@ function sanitizeLogValue(value, depth = 0, key = '') {
 
         for (const [entryKey, item] of entries) {
             if (typeof item === 'function' || item === undefined) continue;
-            clean[entryKey] = sanitizeLogValue(item, depth + 1, entryKey);
+            Object.defineProperty(clean,entryKey,{value:emergencySanitizeLogValue(item,depth+1,entryKey),enumerable:true,configurable:true,writable:true});
         }
 
         return clean;
@@ -4189,6 +4201,8 @@ function createRunId() {
 }
 
 function previewText(text, maxLength = 70) {
+    const native=globalThis.CpoQueueEngine?.diagnosticText(text||'',maxLength);
+    if(native!=null)return native;
     const clean = String(text || '').replace(/\s+/g, ' ').trim();
 
     if (clean.length <= maxLength) {

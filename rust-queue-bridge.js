@@ -4,6 +4,7 @@
     let loading = null;
     let status = 'not loaded';
     let durableSchema = null;
+    const catalogCache=new Map();
     const phases = ['','terminal','waiting','retry-wait','rollover-in-progress'];
     const delivery = ['','confirmed-submission','active-response','terminal-awaiting-bookkeeping'];
     const count = value => Number.isSafeInteger(value) && value >= 0 && value <= 0xffffffff ? value : null;
@@ -23,11 +24,12 @@
             'cpo_durable_number','cpo_durable_boolean','cpo_durable_retry_mode','cpo_durable_trim',
             'cpo_setting_number','cpo_setting_bool','cpo_popup_status','cpo_popup_remaining','cpo_popup_schedule_actions',
             'cpo_log_duplicate','cpo_log_keep_start','cpo_log_limit','cpo_log_sensitive',
-            'cpo_event_code','cpo_content_event_kind','cpo_api_mode','cpo_api_path','cpo_injection_route','cpo_async_transition','cpo_live_new','cpo_live_delete','cpo_live_epoch','cpo_live_len','cpo_live_input','cpo_live_write','cpo_live_read','cpo_live_output','cpo_live_wipe'];
+            'cpo_event_code','cpo_content_event_kind','cpo_api_mode','cpo_api_path','cpo_injection_route','cpo_async_transition','cpo_live_new','cpo_live_delete','cpo_live_epoch','cpo_live_len','cpo_live_input','cpo_live_write','cpo_live_read','cpo_live_output','cpo_live_wipe','cpo_catalog_len','cpo_catalog_items','cpo_catalog_word','cpo_enter_eligible','cpo_enter_action','cpo_provider_predicate','cpo_log_plan','cpo_diag_pick','cpo_diag_reset','cpo_diag_update','cpo_diag_finish'];
         if (!names.every(name => typeof exports[name] === 'function') ||
-            exports.cpo_queue_abi() !== 9 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
+            exports.cpo_queue_abi() !== 10 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
         core = exports;
         durableSchema = null;
+        catalogCache.clear();
         status = 'Rust/WASM';
     }
     function fail(error) {
@@ -542,6 +544,95 @@
             return total;
         }catch(error){fail(error);return null;}
     }
+
+    function providerCatalog(id){
+        if(!core)return null;
+        if(catalogCache.has(id))return catalogCache.get(id);
+        try{
+            const e=core, result={};
+            function read(group,item){
+                let text='';
+                for(let offset=0;offset<4096;offset+=4){
+                    const word=e.cpo_catalog_word(id,group,item,offset)>>>0;
+                    for(let n=0;n<4;n++){const byte=(word>>>(n*8))&255;if(!byte)return text;text+=String.fromCharCode(byte);}
+                }
+                throw new Error('Invalid native selector length');
+            }
+            const count=e.cpo_catalog_len(id)>>>0;
+            if(!count||count>64)return null;
+            for(let group=0;group<count;group++){
+                const key=read(group,0xffffffff), size=e.cpo_catalog_items(id,group)>>>0;
+                if(!key||size>128||Object.hasOwn(result,key))throw new Error('Invalid selector catalog');
+                const values=[];
+                for(let item=0;item<size;item++)values.push(read(group,item));
+                result[key]=Object.freeze(values);
+            }
+            Object.freeze(result);catalogCache.set(id,result);return result;
+        }catch(error){fail(error);return null;}
+    }
+    function diagnosticText(value,limit=160){
+        if(!core||!Number.isInteger(limit)||limit<2||limit>1024)return null;
+        const e=core,text=String(value??'');
+        try{
+            e.cpo_diag_reset(limit);
+            for(let start=0;start<text.length;start+=1024){
+                const overflow=withUnits(text.slice(start,start+1024),(engine,n)=>engine.cpo_diag_update(n));
+                if(overflow==null)return null;
+                if(overflow)break;
+            }
+            const len=e.cpo_diag_finish()>>>0;
+            const units=new Uint16Array(e.memory.buffer,e.cpo_fingerprint_buffer()>>>0,len);
+            try{return String.fromCharCode(...units);}finally{units.fill(0);}
+        }catch(error){fail(error);return null;}
+    }
+    function diagnosticPick(...values){
+        let flags=0;
+        for(let i=0;i<values.length;i++)if(values[i])flags|=1<<i;
+        const choice=call('cpo_diag_pick',[flags]);
+        return choice==null?values.find(Boolean):choice?values[choice-1]:undefined;
+    }
+    // Rust selects traversal and redaction actions. JS only observes host
+    // objects and builds the bounded structured-clone output.
+    function sanitizeDiagnostic(value,depth,key,isSensitive,serializeError){
+        if(!core)return {ok:false};
+        const visit=(v,d,k)=>{
+            const type=v==null?0:typeof v==='string'?1:typeof v==='number'||typeof v==='boolean'?2:Array.isArray(v)?3:v instanceof Error?5:typeof v==='object'?4:6;
+            const length=type===1||type===3?v.length:type===4?30:0;
+            const sensitive=!!k&&isSensitive(k);
+            const marker=sensitive&&v&&typeof v==='object'&&v.redacted===true;
+            const plan=call('cpo_log_plan',[type,d,length,Number(sensitive)|(Number(!!marker)<<1)]);
+            if(plan==null)throw new Error('Native diagnostic policy unavailable');
+            const action=plan&255,bound=plan>>>8;
+            switch(action){
+                case 0:return v;
+                case 1:return v.length>bound?v.slice(0,bound)+'...':v;
+                case 2:{const out=[];for(let i=0;i<bound;i++)out.push(visit(v[i],d+1,''));return out;}
+                case 3:{
+                    const out={};let seen=0;
+                    for(const name in v){
+                        if(!Object.hasOwn(v,name))continue;
+                        if(seen++>=bound)break;
+                        const item=v[name];if(typeof item==='function'||item===undefined)continue;
+                        Object.defineProperty(out,name,{value:visit(item,d+1,name),enumerable:true,configurable:true,writable:true});
+                    }
+                    return out;
+                }
+                case 4:return '['+v.length+' items]';
+                case 5:return '[object]';
+                case 6:return {redacted:true,length:v.length};
+                case 7:return {redacted:true};
+                case 8:{
+                    const out={redacted:true};
+                    for(const field of ['length','messageLength'])if(Number.isSafeInteger(v[field])&&v[field]>=0)out[field]=v[field];
+                    return out;
+                }
+                case 9:return visit(serializeError(v),d,k);
+                default:return String(v);
+            }
+        };
+        try{return {ok:true,value:visit(value,depth,key)};}catch(error){return {ok:false};}
+    }
+
     function sensitiveKey(normalized) {
         return withUnits(normalized,(e,n)=>e.cpo_log_sensitive(n));
     }
@@ -609,7 +700,7 @@
             (Number(!!job.waitForIdleBeforeSend) << 6);
         return call('cpo_queue_next', [flags, phase, job.queue.length]);
     }
-    const api = { createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
+    const api = { providerCatalog, diagnosticText, diagnosticPick, sanitizeDiagnostic, createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
     globalThis.CpoQueueEngine = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();

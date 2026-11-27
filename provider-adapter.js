@@ -27,6 +27,21 @@
         return globalThis.CpoQueueEngine?.call('cpo_response_class', [flags]) ?? null;
     }
 
+    function catalogView(id, fallbackFactory) {
+        let fallback;
+        const current=()=>globalThis.CpoQueueEngine?.providerCatalog(id) || (fallback ||= fallbackFactory());
+        return new Proxy({},{
+            get(_target,key){return current()[key];},
+            ownKeys(){return Reflect.ownKeys(current());},
+            getOwnPropertyDescriptor(_target,key){
+                if(Object.hasOwn(current(),key))return {configurable:true,enumerable:true,value:current()[key]};
+            },
+            has(_target,key){return key in current();}
+        });
+    }
+    function providerPredicate(provider,mode,flags) {
+        return globalThis.CpoQueueEngine?.call('cpo_provider_predicate',[PROVIDER_CODES[provider],mode,flags]);
+    }
     const CHATGPT_MESSAGE_CONTEXT_SELECTORS = [
         '[data-testid^="conversation-turn"]',
         '[data-testid*="conversation-turn"]',
@@ -35,7 +50,7 @@
         '[data-message-id]'
     ];
 
-    const CHATGPT_COMPATIBILITY_SIGNALS = {
+    const CHATGPT_COMPATIBILITY_SIGNALS = catalogView(4, () => ({
         composerContext: [
             '[data-testid*="composer"]',
             '[data-testid*="prompt"]',
@@ -119,9 +134,9 @@
             'maximum length for this conversation',
             'keep talking by starting a new chat'
         ]
-    };
+    }));
 
-    const CHATGPT_SELECTORS = {
+    const CHATGPT_SELECTORS = catalogView(1, () => ({
         composer: [
             '#prompt-textarea',
             '[data-testid="prompt-textarea"]',
@@ -194,7 +209,7 @@
             '#__next',
             'body'
         ]
-    };
+    }));
 
     function cloneCompatibilityValue(value) {
         if (Array.isArray(value)) {
@@ -495,7 +510,9 @@
 
         isComposerElement(element, _details = {}) {
             const tagName = (element?.tagName || '').toLowerCase();
-            return tagName === 'textarea' || element?.getAttribute?.('contenteditable') === 'true';
+            const flags=Number(tagName==='textarea') | (Number(element?.getAttribute?.('contenteditable')==='true')<<1);
+            const native=providerPredicate(this.id,0,flags);
+            return native==null?!!flags:native===1;
         }
 
         getComposerMatch(doc = (typeof document !== 'undefined' ? document : null)) {
@@ -507,7 +524,9 @@
 
         isSendActionElement(element, _details = {}) {
             const tagName = (element?.tagName || '').toLowerCase();
-            return tagName === 'button' || typeof element?.click === 'function';
+            const action=tagName==='button'||typeof element?.click==='function';
+            const native=providerPredicate(this.id,1,Number(action)<<2);
+            return native==null?action:native===1;
         }
 
         getSendActionMatch(doc = (typeof document !== 'undefined' ? document : null)) {
@@ -1243,6 +1262,8 @@
 
         findMatchingSelector(node, selectorKey) {
             const selectors = this.selectors?.[selectorKey] || [];
+            const native=this._nativeSelectorEngine?.firstMatchingSelector(node,selectors);
+            if(native!=null)return native||null;
             return selectors.find((selector) => {
                 try {
                     return node.matches?.(selector);
@@ -1867,6 +1888,8 @@
 
         isValidMessageNode(node, mainRoot) {
             if (!node || !mainRoot.contains(node)) return false;
+            const native=this._nativeSelectorEngine?.messagePredicate(0,node,mainRoot,this);
+            if(native!=null)return native;
             if (node.closest('#cpo-root')) return false;
             if (node.classList && node.classList.contains('cpo-more-banner')) return false;
 
@@ -1923,6 +1946,8 @@
 
         isValidFallbackNode(node, mainRoot) {
             if (!node || !mainRoot.contains(node)) return false;
+            const native=this._nativeSelectorEngine?.messagePredicate(1,node,mainRoot,this);
+            if(native!=null)return native;
             if (node.closest('#cpo-root')) return false;
             if (node.classList && node.classList.contains('cpo-more-banner')) return false;
 
@@ -1981,7 +2006,7 @@
         }
     }
 
-    const GEMINI_SELECTORS = {
+    const GEMINI_SELECTORS = catalogView(2, () => ({
         composer: [
             '.ql-editor[contenteditable="true"]',
             'rich-textarea .ql-editor',
@@ -2035,7 +2060,7 @@
             'chat-window',
             'body'
         ]
-    };
+    }));
 
     class GeminiAdapter extends ProviderAdapter {
         constructor() {
@@ -2137,17 +2162,13 @@
 
             if (!composer) return null;
 
-            const tagName = (composer.tagName || '').toLowerCase();
-            const isTextArea = tagName === 'textarea';
-            const isEditable = composer.getAttribute('contenteditable') === 'true' ||
-                composer.classList?.contains?.('ql-editor');
-
-            if (!isTextArea && !isEditable) return null;
-
-            // Avoid treating response message editors as the composer
-            if (composer.closest('model-response, .model-response, .response-container, message-content')) {
-                return null;
-            }
+            const flags=Number((composer.tagName||'').toLowerCase()==='textarea') |
+                (Number(composer.getAttribute('contenteditable')==='true')<<1) |
+                (Number(!!composer.classList?.contains?.('ql-editor'))<<3) |
+                (Number(false)<<4) |
+                (Number(!!composer.closest('model-response, .model-response, .response-container, message-content'))<<5);
+            const native=providerPredicate(this.id,2,flags);
+            if(native==null?(!(flags&11)||!!(flags&32)):native!==1)return null;
 
             return composer;
         }
@@ -2349,7 +2370,7 @@
         }
     }
 
-    const CLAUDE_SELECTORS = {
+    const CLAUDE_SELECTORS = catalogView(3, () => ({
         composer: [
             '[data-testid="chat-input"]',
             'div.ProseMirror[contenteditable="true"]',
@@ -2404,7 +2425,7 @@
             '[role="main"]',
             'body'
         ]
-    };
+    }));
 
     class ClaudeAdapter extends ProviderAdapter {
         constructor() {
@@ -2509,18 +2530,13 @@
 
             if (!composer) return null;
 
-            const tagName = (composer.tagName || '').toLowerCase();
-            const isTextArea = tagName === 'textarea';
-            const isEditable = composer.getAttribute('contenteditable') === 'true' ||
-                composer.classList?.contains?.('ProseMirror') ||
-                composer.getAttribute('data-testid') === 'chat-input';
-
-            if (!isTextArea && !isEditable) return null;
-
-            // Avoid treating response/message bodies as the composer
-            if (composer.closest('[data-testid="user-message"], .font-claude-response, .font-user-message')) {
-                return null;
-            }
+            const flags=Number((composer.tagName||'').toLowerCase()==='textarea') |
+                (Number(composer.getAttribute('contenteditable')==='true')<<1) |
+                (Number(!!composer.classList?.contains?.('ProseMirror'))<<3) |
+                (Number(composer.getAttribute('data-testid') === 'chat-input')<<4) |
+                (Number(!!composer.closest('[data-testid="user-message"], .font-claude-response, .font-user-message'))<<5);
+            const native=providerPredicate(this.id,2,flags);
+            if(native==null?(!(flags&27)||!!(flags&32)):native!==1)return null;
 
             return composer;
         }

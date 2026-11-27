@@ -873,22 +873,15 @@
     }
 
     handleComposerKeydown(event) {
-      if (event.key !== 'Enter') {
-        return;
-      }
+      const engine=globalThis.CpoQueueEngine;
+      const flags=Number(event.key==='Enter') | (Number(!!event.shiftKey)<<1) |
+        (Number(!!event.altKey)<<2) | (Number(!!event.ctrlKey)<<3) |
+        (Number(!!event.metaKey)<<4) | (Number(!!event.isComposing)<<5) |
+        (Number(event.keyCode===229)<<6);
+      // Never intercept native browser events before the policy is ready.
+      if(engine?.call('cpo_enter_eligible',[flags])!==1)return;
 
-      if (
-        event.shiftKey ||
-        event.altKey ||
-        event.ctrlKey ||
-        event.metaKey ||
-        event.isComposing ||
-        event.keyCode === 229
-      ) {
-        return;
-      }
-
-      const composerMatch = this.provider && typeof this.provider.getComposerMatchFromEventTarget === 'function'
+      const composerMatch = this.provider?.id === 'chatgpt' && typeof this.provider.getComposerMatchFromEventTarget === 'function'
         ? this.provider.getComposerMatchFromEventTarget(event.target, '#cpo-root')
         : null;
       const composer = composerMatch?.element || this.getComposerFromEventTarget(event.target);
@@ -941,7 +934,12 @@
         nativeSubmissionObserved: false
       };
 
-      if (!isGenerating) {
+      const now=Date.now();
+      const decision=engine.numeric('cpo_enter_action',[Number(isGenerating) |
+        (Number(!!this.state.inlineQueueInFlight)<<1) |
+        (Number(this.state.lastQueuedText===text)<<2),now-(this.state.lastQueuedAt||0)]);
+      if(decision==null)return;
+      if (decision===0) {
         this.recordEnterDiagnostic(diagnostic);
         return;
       }
@@ -955,15 +953,13 @@
 
       diagnostic.interception = true;
 
-      const now = Date.now();
-
-      if (this.state.inlineQueueInFlight) {
+      if (decision===1) {
         diagnostic.enqueueResult = 'suppressed-inflight';
         this.recordEnterDiagnostic(diagnostic);
         return;
       }
 
-      if (this.state.lastQueuedText === text && (now - this.state.lastQueuedAt < 1200)) {
+      if (decision===2) {
         diagnostic.enqueueResult = 'suppressed-duplicate';
         this.recordEnterDiagnostic(diagnostic);
         return;

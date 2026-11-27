@@ -20,7 +20,7 @@ fn h(op: u32, a: u32, b: u32, c: u32) -> u32 {
 }
 
 #[no_mangle]
-pub extern "C" fn cpo_browser_abi() -> u32 { 8 }
+pub extern "C" fn cpo_browser_abi() -> u32 { 9 }
 
 #[cfg(target_arch = "wasm32")]
 mod sequence;
@@ -194,6 +194,7 @@ fn discover_pass(fallback: bool, selectors: u32) -> u32 {
         let node = normalized(raw, selectors);
         let flags = h(13, node, 0, 0);
         let threshold = if fallback { 15 } else if flags & HAS_FORM != 0 { 80 } else { 1 };
+        if !(if fallback { fallback_valid(flags,threshold) } else { primary_valid(flags,threshold) }) { continue; }
         let text = trimmed_dom_length(node,threshold);
         if if fallback { fallback_valid(flags, text) } else { primary_valid(flags, text) } {
             h(15, node, raw, 0);
@@ -825,4 +826,15 @@ mod tests {
         assert_eq!(sample.text, u32::MAX);
         assert_eq!(MAX_TURNS * MAX_NODES, 16384);
     }
+}
+
+#[no_mangle]
+pub extern "C" fn cpo_message_predicate(mode:u32,flags:u32,text:u32)->u32{
+    match mode{0=>primary_valid(flags,text) as u32,1=>fallback_valid(flags,text) as u32,_=>0}
+}
+#[cfg(target_arch="wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_first_matching_selector(count:u32)->u32{
+    for i in 0..count{if h(160,i,0,0)!=0{return i+1;}}
+    0
 }
