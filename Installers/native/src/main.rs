@@ -195,6 +195,69 @@ fn publish(repo:&Path,local_only:bool)->Result<()>{
     if !result.status.success(){return Err(err("AMO submission failed; see redacted upload.log"));}
     println!("AMO accepted the submission request; approval may remain pending.");Ok(())
 }
+fn git_output(repo:&Path,args:&[&str])->Result<String>{
+    let result=Command::new("git").current_dir(repo).args(args).output()?;
+    if !result.status.success(){return Err(err(format!("Git {} failed",args.first().unwrap_or(&"command"))));}
+    Ok(String::from_utf8(result.stdout)?.trim_end().to_owned())
+}
+fn credentials()->Result<(String,String)>{
+    use std::io::IsTerminal;
+    let mut key=env::var("WEB_EXT_API_KEY").unwrap_or_default();
+    let mut secret=env::var("WEB_EXT_API_SECRET").unwrap_or_default();
+    if key.trim().is_empty()||secret.trim().is_empty(){
+        if !io::stdin().is_terminal(){return Err(err("AMO credentials must be configured in the environment for noninteractive publishing"));}
+        println!("Create AMO credentials at https://addons.mozilla.org/developers/addon/api/key/");
+        if key.trim().is_empty(){key=rpassword::prompt_password("AMO API key (hidden): ")?;}
+        if secret.trim().is_empty(){secret=rpassword::prompt_password("AMO API secret (hidden): ")?;}
+    }
+    if key.trim().is_empty()||secret.trim().is_empty(){return Err(err("Both AMO credentials are required"));}
+    Ok((key.trim().to_owned(),secret.trim().to_owned()))
+}
+fn managed_publish(repo:&Path)->Result<()>{
+    let top=PathBuf::from(git_output(repo,&["rev-parse","--show-toplevel"])?).canonicalize()?;
+    if top!=repo||git_output(repo,&["branch","--show-current"])?!="main"{
+        return Err(err("Publishing requires the intended checkout root and main branch"));
+    }
+    let clean=||git_output(repo,&["status","--porcelain","--untracked-files=normal"]);
+    if !clean()?.is_empty(){return Err(err("Working tree must be clean before publishing"));}
+    git_output(repo,&["remote","get-url","origin"])?;
+    checked(Command::new("git").current_dir(repo).args(["pull","--ff-only","origin","main"]))?;
+    if !clean()?.is_empty(){return Err(err("Working tree changed while pulling main"));}
+    // Rebuild after pull, and run the existing compatibility checks before
+    // touching the release version. The final signed package is rebuilt.
+    package(repo)?;
+    checked(npm().current_dir(repo).args(["ci","--ignore-scripts","--no-audit","--no-fund"]))?;
+    checked(&mut npm().current_dir(repo).args(["run","check"]))?;
+    for (_,source) in MODULES{
+        let executable=repo.join("build").join(format!("release-test-{}{}",source.trim_end_matches(".rs"),env::consts::EXE_SUFFIX));
+        checked(Command::new("rustc").current_dir(repo).args(["--edition=2021","--test"]).arg(repo.join("rust").join(source)).arg("-o").arg(&executable))?;
+        checked(&mut Command::new(&executable))?;
+    }
+    if !clean()?.is_empty(){return Err(err("Preflight produced unexpected tracked changes"));}
+    let (key,secret)=credentials()?;
+    let path=repo.join("manifest.json");
+    let original=fs::read_to_string(&path)?;
+    let mut base:Value=serde_json::from_str(&original)?;
+    let version=base["version"].as_str().ok_or_else(||err("Missing version"))?;
+    let parts=version.split('.').map(str::parse::<u32>).collect::<std::result::Result<Vec<_>,_>>()?;
+    if parts.len()!=3{return Err(err("Expected three-part version"));}
+    let next=format!("{}.{}.{}",parts[0],parts[1],parts[2].checked_add(1).ok_or_else(||err("Version overflow"))?);
+    base["version"]=json!(next);
+    fs::write(&path,serde_json::to_string_pretty(&base)?+"\n")?;
+    env::set_var("WEB_EXT_API_KEY",&key);env::set_var("WEB_EXT_API_SECRET",&secret);
+    let submission=publish(repo,false);
+    env::remove_var("WEB_EXT_API_KEY");env::remove_var("WEB_EXT_API_SECRET");
+    if let Err(e)=submission{
+        eprintln!("Keeping the bumped manifest because submission may already have started. Inspect AMO and git status before retrying.");
+        return Err(e);
+    }
+    if clean()? !=" M manifest.json"{return Err(err("Unexpected changes after submission; refusing automatic commit"));}
+    checked(Command::new("git").current_dir(repo).args(["add","--","manifest.json"]))?;
+    checked(Command::new("git").current_dir(repo).args(["commit","-m",&format!("chore(release): Firefox extension v{next}")]))?;
+    checked(Command::new("git").current_dir(repo).args(["push","origin","main"]))?;
+    println!("Release {next} submitted and version committed/pushed; Mozilla approval may remain pending.");
+    Ok(())
+}
 fn run()->Result<()>{
     let mut args=env::args().skip(1);
     let action=args.next().unwrap_or_else(||"package".into());
@@ -210,7 +273,7 @@ fn run()->Result<()>{
     let repo=repo.unwrap_or_else(||PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")).canonicalize()?;
     if !repo.join("manifest.json").is_file(){return Err(err("Missing extension manifest"));}
     match action.as_str(){"package"=>{package(&repo)?;},"install"=>install(&repo,&browser,&paths)?,
-        "publish"=>publish(&repo,local_only)?,_=>return Err(err("Expected package, install or publish"))}
+        "publish"=>publish(&repo,local_only)?, "managed-publish"=>managed_publish(&repo)?,_=>return Err(err("Expected package, install, publish or managed-publish"))}
     Ok(())
 }
 fn main(){if let Err(error)=run(){eprintln!("[ERROR] {error}");std::process::exit(1);}}
