@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 5);
+    assert.equal(e.cpo_queue_abi(), 6);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -302,4 +302,26 @@ test('native deserialization rejects malformed or non-runnable durable jobs', {s
         const result=engine.deserializeDurable({...base,...patch},1800000000000,()=> 'run');
         assert.equal(result.ok,false,JSON.stringify(patch));
     }
+});
+
+test('native application settings, popup progress and logging policy', {skip}, async () => {
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    const e=instance.exports;
+    assert.deepEqual(engine.settings({windowSize:900,batchSize:2,resourceBudget:'bad',inactiveTabMinutes:16,
+        adaptiveBudget:true,enabled:null,autoScroll:false}),{windowSize:500,batchSize:5,resourceBudget:8000,
+        inactiveTabMinutes:0,enabled:true,autoScroll:false,adaptiveBudget:true});
+    assert.deepEqual(engine.settings({queueUnlimitedRetryWait:true,queueDeepResearchAware:false,queueDeliveryTimeoutRefresh:null},'queue'),
+        {queueUnlimitedRetryWait:true,queueDeepResearchAware:false,queueDeliveryTimeoutRefresh:true});
+    assert.equal(engine.remaining({1:{remaining:4},2:{remaining:3}}),7);
+    assert.equal(e.cpo_popup_status(1|4),0);
+    assert.equal(e.cpo_popup_status(0),10);
+    for(const key of ['prompt','accesstoken','assistantpreview','filepath','authorization','tooloutput']){
+        assert.equal(engine.sensitiveKey(key),1,key);
+    }
+    assert.equal(engine.sensitiveKey('commandnumber'),0);
+    assert.equal(e.cpo_log_limit(0,0,701),697);
+    assert.equal(e.cpo_log_keep_start(299,10,300),9);
+    assert.equal(e.cpo_log_duplicate(1,29999,30000),1);
+    assert.equal(e.cpo_log_duplicate(1,30000,30000),0);
 });
