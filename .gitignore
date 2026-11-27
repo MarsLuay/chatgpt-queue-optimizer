@@ -15,3 +15,7 @@ node_modules/
 /optimizer_history.wasm
 
 /optimizer_queue.wasm
+
+# Native release helper build output and generated lock until toolchain verification.
+/Installers/native/target/
+/Installers/native/Cargo.lock
