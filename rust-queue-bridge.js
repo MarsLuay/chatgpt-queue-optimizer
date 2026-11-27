@@ -26,7 +26,7 @@
             'cpo_log_duplicate','cpo_log_keep_start','cpo_log_limit','cpo_log_sensitive',
             'cpo_event_code','cpo_content_event_kind','cpo_api_mode','cpo_api_path','cpo_injection_route','cpo_async_transition','cpo_live_new','cpo_live_delete','cpo_live_epoch','cpo_live_len','cpo_live_input','cpo_live_write','cpo_live_read','cpo_live_output','cpo_live_wipe','cpo_catalog_len','cpo_catalog_items','cpo_catalog_word','cpo_enter_eligible','cpo_enter_action','cpo_provider_predicate','cpo_log_plan','cpo_diag_pick','cpo_diag_reset','cpo_diag_update','cpo_diag_finish','cpo_log_walk_begin','cpo_log_walk_plan','cpo_log_walk_next','cpo_log_walk_close','cpo_batch_input','cpo_batch_run','cpo_batch_output','cpo_batch_wipe','cpo_keyboard_event','cpo_local_date_match','cpo_timestamp_valid','cpo_timestamp_math','cpo_live_transaction','cpo_job_binding','cpo_turn_cache_eligible','cpo_turn_text_reset','cpo_turn_text_update','cpo_turn_cache_invalidate'];
         if (!names.every(name => typeof exports[name] === 'function') ||
-            exports.cpo_queue_abi() !== 18 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
+            exports.cpo_queue_abi() !== 19 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
         core = exports;
         durableSchema = null;
         catalogCache.clear();

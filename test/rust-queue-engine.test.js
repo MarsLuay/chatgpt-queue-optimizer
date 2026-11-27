@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 18);
+    assert.equal(e.cpo_queue_abi(), 19);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -601,4 +601,14 @@ test('native provider navigation and surface policy preserve host and route dist
     assert.equal(engine.call('cpo_provider_predicate',[1,3,1|4]),0);
     assert.equal(engine.call('cpo_provider_predicate',[1,3,1|8|16]),1);
     assert.equal(engine.call('cpo_provider_predicate',[1,4,1|8]),0);
+});
+
+test('provider DOM fact catalogs are native and shared',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    const facts=engine.providerCatalog(5);
+    assert.deepEqual(facts.geminiEditorClasses,['ql-editor']);
+    assert.deepEqual(facts.claudeInputIds,['chat-input']);
+    assert.ok(facts.assistantErrorValues.includes('error-stop'));
+    assert.ok(facts.toolIncompleteStates.includes('pending'));
 });

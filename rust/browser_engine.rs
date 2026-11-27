@@ -20,7 +20,7 @@ fn h(op: u32, a: u32, b: u32, c: u32) -> u32 {
 }
 
 #[no_mangle]
-pub extern "C" fn cpo_browser_abi() -> u32 { 14 }
+pub extern "C" fn cpo_browser_abi() -> u32 { 15 }
 
 #[cfg(target_arch = "wasm32")]
 mod sequence;
@@ -1042,4 +1042,23 @@ pub extern "C" fn cpo_provider_diagnostics(optimizer:u32)->u32{
         if h(179,4,0,0)!=0{flags|=8;}
     }
     flags
+}
+
+
+// Deduplicate an existing DOM handle list without extracting message text.
+// Keep canonical descendants over generic wrappers; otherwise keep ancestors.
+#[cfg(target_arch="wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_provider_deduplicate(count:u32)->u32{
+    for i in 0..count{
+        let node=h(180,i,0,0);
+        let canonical=h(19,node,0,0)!=0;
+        let mut parent=accepted_parent(node);
+        while parent!=0{
+            if canonical&&h(19,parent,0,0)==0{h(20,parent,0,0);}
+            else{h(20,node,0,0);}
+            parent=accepted_parent(parent);
+        }
+    }
+    h(21,0,0,0)
 }

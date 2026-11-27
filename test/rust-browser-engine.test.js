@@ -23,7 +23,7 @@ async function engine(optimizer = owner()) {
         cpo: { host: (op, a, b, c) => bridge.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
     });
     bridge.exports = result.instance.exports;
-    assert.equal(bridge.exports.cpo_browser_abi(), 14);
+    assert.equal(bridge.exports.cpo_browser_abi(), 15);
     return bridge;
 }
 
@@ -442,4 +442,15 @@ test('native diagnostic scheduler observes required controls then discovery and 
     calls.length=0;
     assert.equal(bridge.providerDiagnostics(adapter,{},false).flags,5);
     assert.deepEqual(calls,['root','composer','send']);
+});
+
+test('native deduplication retains canonical descendants and avoids text extraction',{skip},async()=>{
+    const bridge=await engine();
+    const parent={tagName:'DIV',parentElement:null,getAttribute:()=>null};
+    const child={tagName:'ARTICLE',parentElement:parent,getAttribute:()=>null};
+    const other={tagName:'DIV',parentElement:null,getAttribute:()=>null};
+    Object.defineProperty(child,'textContent',{get(){throw Error('unexpected text read');}});
+    assert.deepEqual(bridge.deduplicateTurns([parent,child,parent,other]),[child,other]);
+    const generic={tagName:'DIV',parentElement:parent,getAttribute:()=>null};
+    assert.deepEqual(bridge.deduplicateTurns([generic,parent,generic,other]),[parent,other]);
 });

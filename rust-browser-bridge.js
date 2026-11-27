@@ -21,11 +21,11 @@
                     cpo: { host: (op, a, b, c) => this.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
                 });
                 const core = result.instance.exports;
-                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 14 ||
+                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 15 ||
                     !['cpo_collect_resources', 'cpo_discover_messages', 'cpo_execute_media',
                         'cpo_apply_window', 'cpo_window_visible', 'cpo_capture_history', 'cpo_process_mutations',
                         'cpo_cache_ttl', 'cpo_cache_valid', 'cpo_cache_nodes_valid', 'cpo_mutation_delay', 'cpo_provider_selectors', 'cpo_dom_composer_write', 'cpo_dom_composer_read',
-                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool', 'cpo_ui_render', 'cpo_ui_sequence_edit', 'cpo_ui_next_limit', 'cpo_ui_sequence_select', 'cpo_ui_variables', 'cpo_ui_saved_sequence', 'cpo_sequence_import', 'cpo_sequence_substitute', 'cpo_event_ready','cpo_restore_window','cpo_restore_journal','cpo_intersection_transition','cpo_message_predicate','cpo_first_matching_selector','cpo_dom_event_ancestor','cpo_dom_normalize_turn','cpo_dom_last_assistant','cpo_provider_turns','cpo_provider_exact_text','cpo_provider_scan_turns','cpo_provider_observe_generation','cpo_provider_retry','cpo_provider_diagnostics'].every(name => typeof core[name] === 'function')) {
+                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool', 'cpo_ui_render', 'cpo_ui_sequence_edit', 'cpo_ui_next_limit', 'cpo_ui_sequence_select', 'cpo_ui_variables', 'cpo_ui_saved_sequence', 'cpo_sequence_import', 'cpo_sequence_substitute', 'cpo_event_ready','cpo_restore_window','cpo_restore_journal','cpo_intersection_transition','cpo_message_predicate','cpo_first_matching_selector','cpo_dom_event_ancestor','cpo_dom_normalize_turn','cpo_dom_last_assistant','cpo_provider_turns','cpo_provider_exact_text','cpo_provider_scan_turns','cpo_provider_observe_generation','cpo_provider_retry','cpo_provider_diagnostics','cpo_provider_deduplicate'].every(name => typeof core[name] === 'function')) {
                     throw new Error('Browser WASM ABI mismatch');
                 }
                 this.exports = core;
@@ -159,6 +159,18 @@
             return this.invoke({root,selectors,seen:new Set(),nodes:[]},(core,ctx)=>{
                 if(core.cpo_provider_turns(selectors.length)!==ctx.nodes.length)throw new Error('Native turn discovery count mismatch');
                 return ctx.nodes;
+            });
+        }
+        deduplicateTurns(nodes){
+            const handles=[null],ids=new Map(),accepted=[],acceptedSet=new Set();
+            for(const node of nodes){
+                if(!node||ids.has(node))continue;
+                const id=handles.length;handles.push(node);ids.set(node,id);accepted.push(id);acceptedSet.add(id);
+            }
+            return this.invoke({handles,ids,accepted,acceptedSet,redundant:new Set()},(core,ctx)=>{
+                const count=core.cpo_provider_deduplicate(accepted.length);
+                if(count!==ctx.accepted.length)throw new Error('Native deduplication count mismatch');
+                return ctx.accepted.map(id=>ctx.handles[id]);
             });
         }
         providerRetry(adapter,doc,turns){
@@ -700,6 +712,7 @@
                         }
                     }finally{this.context=outer;}
                 }
+                case 180:return ctx.accepted[a]||0;
                 case 80: {
                     const selector = ctx.selectors[a];
                     try {
@@ -914,11 +927,9 @@
 
     globalThis.CpoRustBrowserBridge = CpoRustBrowserBridge;
     if (typeof module !== 'undefined' && module.exports) module.exports = { CpoRustBrowserBridge };
-})();
 
-// Provider host bindings: DOM observations and browser object projection only.
-(() => {
-    'use strict';
+// Provider host bindings share the bridge's lexical scope. Native host
+// callbacks use these helpers synchronously; no globals are required.
 
     const PROVIDER_CODES = { chatgpt: 1, gemini: 2, claude: 3 };
     function providerSurface(adapter,locationOrUrl){
@@ -1002,43 +1013,16 @@
         return ['','user','assistant'][requireNative(native)]||'';
     }
 
-    const ASSISTANT_ERROR_STATUS_ATTRIBUTES = [
-        'data-message-status',
-        'data-message-state',
-        'data-stop-reason',
-        'data-finish-reason',
-        'data-status',
-        'data-state',
-        'data-error'
-    ];
-    const ASSISTANT_ERROR_STATUS_VALUES = new Set([
-        'error',
-        'failed',
-        'failure',
-        'assistant-error',
-        'assistant_error',
-        'error-stop',
-        'error_stop'
-    ]);
-
-    function hasAssistantErrorStop(node, engine = null) {
-        const native=engine?.assistantError(node,ASSISTANT_ERROR_STATUS_ATTRIBUTES,ASSISTANT_ERROR_STATUS_VALUES);
-        return requireNative(native);
+    function providerFacts(){
+        return requireNative(globalThis.CpoQueueEngine?.providerCatalog(5));
     }
-
-    const TOOL_TURN_SELECTORS = [
-        '[data-tool-call]',
-        '[data-tool-result]',
-        '[data-tool-state]',
-        '[data-tool-status]',
-        '[data-testid*="tool-call"]',
-        '[data-testid*="tool-result"]'
-    ];
-    const INCOMPLETE_TOOL_STATES = new Set(['active', 'incomplete', 'pending', 'running', 'waiting']);
-
-    function hasIncompleteToolTurn(node, engine = null) {
-        const native=engine?.incompleteTool(node,TOOL_TURN_SELECTORS,INCOMPLETE_TOOL_STATES,normalizeCommandText);
-        return requireNative(native);
+    function hasAssistantErrorStop(node,engine=null){
+        const facts=providerFacts();
+        return requireNative(engine?.assistantError(node,facts.assistantErrorAttributes,new Set(facts.assistantErrorValues)));
+    }
+    function hasIncompleteToolTurn(node,engine=null){
+        const facts=providerFacts();
+        return requireNative(engine?.incompleteTool(node,facts.toolTurnSelectors,new Set(facts.toolIncompleteStates),normalizeCommandText));
     }
 
     function summarizeSelectorMatch(match) {
@@ -1368,8 +1352,20 @@
         }
     }
 
+    // Common browser projection for all supported native providers.
+    class NativeProviderAdapter extends ProviderAdapter {
+        isSupportedUrl(url){return typeof url==='string'&&providerSurface(this,url).supported;}
+        getConversationIdentity(locationOrUrl){return providerIdentity(this,locationOrUrl);}
+        getComposerText(composer){return requireNative(this._nativeSelectorEngine?.composerRead(PROVIDER_CODES[this.id],composer));}
+        clearComposer(composer){
+            if(this._nativeSelectorEngine?.composerWrite(PROVIDER_CODES[this.id],composer,'',0)!==true)throw new Error('Native composer clear unavailable.');
+        }
+        getNewConversationUrl(){return requireNative(globalThis.CpoQueueEngine?.providerNavigation(PROVIDER_CODES[this.id])).url;}
+        startNewConversation(){return requireNative(globalThis.CpoQueueEngine?.providerNavigation(PROVIDER_CODES[this.id]));}
+    }
+
     let nextTurnCacheScope=1;
-    class ChatGPTAdapter extends ProviderAdapter {
+    class ChatGPTAdapter extends NativeProviderAdapter {
         constructor() {
             super('chatgpt', 'ChatGPT', {
                 supportsOptimizer: true,
@@ -1575,25 +1571,9 @@
             };
         }
 
-        isSupportedUrl(url) {
-            return typeof url==='string'&&providerSurface(this,url).supported;
-        }
-
         classifyChatGPTSurface(locationOrUrl) {
             const {supported,...surface}=providerSurface(this,locationOrUrl);
             return {provider:this.id,...surface};
-        }
-
-        getConversationIdentity(locationOrUrl) {
-            return providerIdentity(this,locationOrUrl);
-        }
-
-        getNewConversationUrl() {
-            return requireNative(globalThis.CpoQueueEngine?.providerNavigation(1)).url;
-        }
-
-        startNewConversation() {
-            return requireNative(globalThis.CpoQueueEngine?.providerNavigation(1));
         }
 
         isFreshConversationIdentity(identity, previousConversationId = null) {
@@ -1627,17 +1607,6 @@
             return this.getCurrentSurface(doc).allowFallbackDiscovery;
         }
 
-        getComposerFromEventTarget(target, excludeSelector = '#cpo-root') {
-            return this.getComposerMatchFromEventTarget(target, excludeSelector)?.element || null;
-        }
-
-        getComposerText(composer) {
-            return requireNative(this._nativeSelectorEngine?.composerRead(1,composer));
-        }
-
-        clearComposer(composer) {
-            if(this._nativeSelectorEngine?.composerWrite(1,composer,'',0)!==true)throw new Error('Native composer clear unavailable.');
-        }
         getGenerationState(doc = (typeof document !== 'undefined' ? document : null)) {
             const emptySignals = {
                 stopButton: null,
@@ -1780,6 +1749,10 @@
             return this.getSelectorMatch(doc, 'mainRoot').element || null;
         }
 
+        removeDuplicates(nodes){
+            return requireNative(this._nativeSelectorEngine?.deduplicateTurns(nodes));
+        }
+
         getMessageNodes(doc = (typeof document !== 'undefined' ? document : null), mainRoot = null) {
             return this.getMessageDiscovery(doc, mainRoot).nodes;
         }
@@ -1816,120 +1789,32 @@
         return {generating,hasActiveStopButton:!!(flags&1),hasResultStreaming:!!(flags&2),hasActiveToolOrResearch,deepResearchActive:false,matchedResearchMarker,researchStatusPreview:statusText,hasError:hasKnownError,hasTryAgainButton,errorSnippet,matchedError,url:typeof location!=='undefined'?location.href:(doc.defaultView?.location?.href||''),title:typeof document!=='undefined'?document.title:(doc.title||'')};
     }
 
-    class GeminiAdapter extends ProviderAdapter {
-        constructor() {
-            super('gemini', 'Gemini', {
-                supportsOptimizer: false,
-                selectors: GEMINI_SELECTORS
-            });
-        }
-
-        isSupportedUrl(url) {
-            return typeof url==='string'&&providerSurface(this,url).supported;
-        }
-
-        getConversationIdentity(locationOrUrl) {
-            return providerIdentity(this,locationOrUrl);
-        }
-
-        getComposerFromEventTarget(target, excludeSelector = '#cpo-root') {
+    const CLAUDE_SELECTORS=catalogView(3);
+    class ExternalProviderAdapter extends NativeProviderAdapter {
+        getComposerFromEventTarget(target,excludeSelector='#cpo-root'){
             const match=this._nativeSelectorEngine?.eventAncestor(target,this.selectors.composer,excludeSelector,null,'composer');
             const composer=match?.element;
             if(!composer)return null;
-
-            const flags=Number((composer.tagName||'').toLowerCase()==='textarea') |
-                (Number(composer.getAttribute('contenteditable')==='true')<<1) |
-                (Number(!!composer.classList?.contains?.('ql-editor'))<<3) |
-                (Number(false)<<4) |
-                (Number(!!composer.closest('model-response, .model-response, .response-container, message-content'))<<5);
-            const native=providerPredicate(this.id,2,flags);
-            if(requireNative(native)!==1)return null;
-
-            return composer;
+            const facts=providerFacts();
+            const classes=facts[this.id+'EditorClasses'];
+            const excluded=facts[this.id+'ExcludedAncestors'];
+            const flags=Number((composer.tagName||'').toLowerCase()==='textarea')|
+                (Number(composer.getAttribute?.('contenteditable')==='true')<<1)|
+                (Number(classes.some(name=>composer.classList?.contains?.(name)))<<3)|
+                (Number((facts[this.id+'InputIds']||[]).includes(composer.getAttribute?.('data-testid')))<<4)|
+                (Number(!!composer.closest?.(excluded.join(',')))<<5);
+            return requireNative(providerPredicate(this.id,2,flags))===1?composer:null;
         }
-
-        getComposerText(composer) {
-            return requireNative(this._nativeSelectorEngine?.composerRead(2,composer));
-        }
-
-        clearComposer(composer) {
-            if(this._nativeSelectorEngine?.composerWrite(2,composer,'',0)!==true)throw new Error('Native composer clear unavailable.');
-        }
-        getGenerationState(doc = (typeof document !== 'undefined' ? document : null)) {
-            return externalGeneration(this,doc);
-        }
-
-        getMainRoot() {
-            // Optimizer is unsupported on Gemini; fail closed.
-            return null;
-        }
-
-        getMessageNodes() {
-            return [];
-        }
-
-        getFallbackMessages() {
-            return [];
-        }
+        getGenerationState(doc=(typeof document!=='undefined'?document:null)){return externalGeneration(this,doc);}
+        getMainRoot(){return null;}
     }
-
-    const CLAUDE_SELECTORS = catalogView(3);
-
-    class ClaudeAdapter extends ProviderAdapter {
-        constructor() {
-            super('claude', 'Claude', {
-                supportsOptimizer: false,
-                selectors: CLAUDE_SELECTORS
-            });
-        }
-
-        isSupportedUrl(url) {
-            return typeof url==='string'&&providerSurface(this,url).supported;
-        }
-
-        getConversationIdentity(locationOrUrl) {
-            return providerIdentity(this,locationOrUrl);
-        }
-
-        getComposerFromEventTarget(target, excludeSelector = '#cpo-root') {
-            const match=this._nativeSelectorEngine?.eventAncestor(target,this.selectors.composer,excludeSelector,null,'composer');
-            const composer=match?.element;
-            if(!composer)return null;
-
-            const flags=Number((composer.tagName||'').toLowerCase()==='textarea') |
-                (Number(composer.getAttribute('contenteditable')==='true')<<1) |
-                (Number(!!composer.classList?.contains?.('ProseMirror'))<<3) |
-                (Number(composer.getAttribute('data-testid') === 'chat-input')<<4) |
-                (Number(!!composer.closest('[data-testid="user-message"], .font-claude-response, .font-user-message'))<<5);
-            const native=providerPredicate(this.id,2,flags);
-            if(requireNative(native)!==1)return null;
-
-            return composer;
-        }
-
-        getComposerText(composer) {
-            return requireNative(this._nativeSelectorEngine?.composerRead(3,composer));
-        }
-
-        clearComposer(composer) {
-            if(this._nativeSelectorEngine?.composerWrite(3,composer,'',0)!==true)throw new Error('Native composer clear unavailable.');
-        }
-        getGenerationState(doc = (typeof document !== 'undefined' ? document : null)) {
-            return externalGeneration(this,doc);
-        }
-
-        getMainRoot() {
-            // Optimizer is unsupported on Claude; fail closed.
-            return null;
-        }
-
-        getMessageNodes() {
-            return [];
-        }
-
-        getFallbackMessages() {
-            return [];
-        }
+    // Preserve constructor names and instanceof compatibility, without
+    // maintaining separate Gemini and Claude implementations.
+    class GeminiAdapter extends ExternalProviderAdapter {
+        constructor(){super('gemini','Gemini',{supportsOptimizer:false,selectors:GEMINI_SELECTORS});}
+    }
+    class ClaudeAdapter extends ExternalProviderAdapter {
+        constructor(){super('claude','Claude',{supportsOptimizer:false,selectors:CLAUDE_SELECTORS});}
     }
 
     const chatGPTAdapterInstance = new ChatGPTAdapter();

@@ -322,3 +322,7 @@ The browser engine now controls latest-turn retry precedence, alert traversal an
 ### Native provider surface and navigation policy (queue ABI 18)
 
 Provider host validation, route identity, conversation surface eligibility, fallback discovery and new-conversation navigation are settled together in Rust using browser-parsed URL components. ChatGPT composer/send eligibility is native, and selector matching now preserves the outer native discovery context instead of falling back to JavaScript. The browser remains responsible for WHATWG URL parsing and DOM property access. Native compilation and integration tests remain unverified.
+
+### Shared provider bindings and native DOM fact catalogs (queue ABI 19, browser ABI 15)
+
+Gemini and Claude share a single browser projection; supported providers share native identity, navigation and composer access. Native catalogs supply editor, exclusion, error and tool-state facts. The browser engine also owns deduplication of already-collected turn lists. Native callbacks and provider helpers share a lexical scope, correcting an earlier cross-scope binding defect. Compatibility constructors remain, and full generated binding migration and native test verification are outstanding.

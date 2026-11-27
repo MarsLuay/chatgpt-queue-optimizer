@@ -1,7 +1,7 @@
 //! Queue execution decisions and streaming legacy-compatible UTF-16 fingerprints.
 
 #[no_mangle]
-pub extern "C" fn cpo_queue_abi() -> u32 { 18 }
+pub extern "C" fn cpo_queue_abi() -> u32 { 19 }
 
 const OFFSET: u32 = 2166136261;
 const PRIME: u32 = 16777619;
@@ -1357,8 +1357,20 @@ const CATALOG_4: &[(&str, &[&str])] = &[
     ("conversationCapacityMarkers", &["you've reached the maximum length for this conversation", "maximum length for this conversation", "keep talking by starting a new chat"]),
 ];
 
+// DOM fact catalogs used by the shared provider binding.
+const CATALOG_5: &[(&str,&[&str])]=&[
+    ("geminiEditorClasses",&["ql-editor"]),
+    ("geminiExcludedAncestors",&["model-response, .model-response, .response-container, message-content"]),
+    ("claudeEditorClasses",&["ProseMirror"]),
+    ("claudeExcludedAncestors",&["[data-testid=\"user-message\"], .font-claude-response, .font-user-message"]),
+    ("claudeInputIds",&["chat-input"]),
+    ("assistantErrorAttributes",&["data-message-status","data-message-state","data-stop-reason","data-finish-reason","data-status","data-state","data-error"]),
+    ("assistantErrorValues",&["error","failed","failure","assistant-error","assistant_error","error-stop","error_stop"]),
+    ("toolTurnSelectors",&["[data-tool-call]","[data-tool-result]","[data-tool-state]","[data-tool-status]","[data-testid*=\"tool-call\"]","[data-testid*=\"tool-result\"]"]),
+    ("toolIncompleteStates",&["active","incomplete","pending","running","waiting"]),
+];
 fn catalog(id:u32)-> &'static [(&'static str, &'static [&'static str])] {
-    match id {1=>CATALOG_1,2=>CATALOG_2,3=>CATALOG_3,4=>CATALOG_4,_=>&[]}
+    match id {1=>CATALOG_1,2=>CATALOG_2,3=>CATALOG_3,4=>CATALOG_4,5=>CATALOG_5,_=>&[]}
 }
 #[no_mangle]
 pub extern "C" fn cpo_catalog_len(id:u32)->u32 {catalog(id).len() as u32}
