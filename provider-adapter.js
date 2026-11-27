@@ -378,6 +378,10 @@
             }
         }
 
+        setNativeSelectorEngine(engine) {
+            this._nativeSelectorEngine = engine || null;
+        }
+
         normalizeCommandText(text) {
             return normalizeCommandText(text);
         }
@@ -409,6 +413,8 @@
             const seen = new Set();
 
             if (!root || selectors.length === 0) return matches;
+            const native = this._nativeSelectorEngine?.providerSelectors(root, selectors, selectorKey, predicate);
+            if (native != null) return native;
 
             for (const selector of selectors) {
                 let nodes = [];
@@ -438,7 +444,9 @@
         }
 
         getSelectorMatch(root, selectorKey, predicate = null) {
-            return this.getSelectorNodes(root, selectorKey, predicate)[0] || {
+            const selectors = Array.isArray(this.selectors?.[selectorKey]) ? this.selectors[selectorKey] : [];
+            const native = root && selectors.length ? this._nativeSelectorEngine?.providerSelectors(root, selectors, selectorKey, predicate, true) : null;
+            return (native ?? this.getSelectorNodes(root, selectorKey, predicate))[0] || {
                 element: null,
                 selector: '',
                 signalKey: selectorKey
@@ -1689,7 +1697,7 @@
                 const label = (btn.getAttribute('aria-label') || '').toLowerCase().trim();
                 const text = (btn.innerText || btn.textContent || '').toLowerCase().trim();
                 return this.compatibilitySignals.retryLabels.some(marker =>
-                    label === marker || label.includes(marker) || text === marker || text.includes(marker)
+                    label === marker || nativeContains(label, marker) || text === marker || nativeContains(text, marker)
                 );
             };
 
