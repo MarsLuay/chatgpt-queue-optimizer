@@ -23,7 +23,7 @@ async function engine(optimizer = owner()) {
         cpo: { host: (op, a, b, c) => bridge.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
     });
     bridge.exports = result.instance.exports;
-    assert.equal(bridge.exports.cpo_browser_abi(), 7);
+    assert.equal(bridge.exports.cpo_browser_abi(), 8);
     return bridge;
 }
 
@@ -345,4 +345,13 @@ test('emergency journal rollback works with an unavailable WASM runtime',()=>{
     optimizer.restoreMediaJournal();
     assert.equal(img.getAttribute('src'),'old.png');
     assert.equal(optimizer.mediaJournal.size,0);
+});
+
+test('Rust intersection transition only expands on a newly armed visible edge',{skip},async()=>{
+    const bridge=await engine();
+    assert.equal(bridge.intersection(1|4|16),6);
+    assert.equal(bridge.intersection(1|2|16),2);
+    assert.equal(bridge.intersection(2),1);
+    assert.equal(bridge.intersection(1|4|8|16),3);
+    assert.equal(bridge.context,null);
 });
