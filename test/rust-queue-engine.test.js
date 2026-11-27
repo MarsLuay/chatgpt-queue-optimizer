@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 7);
+    assert.equal(e.cpo_queue_abi(), 8);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -343,4 +343,18 @@ test('native browser API routing and event classification reject unknown names a
     assert.equal(engine.call('cpo_api_mode',[9,1,3]),0);
     assert.equal(engine.call('cpo_api_mode',[99,1,3]),0);
     assert.equal(engine.call('cpo_api_mode',[11,1,0]),0);
+});
+
+test('native method paths, injection capability and completion transitions',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    assert.deepEqual(engine.apiPath(1),['storage','local','get']);
+    assert.deepEqual(engine.apiPath(13),['scripting','executeScript']);
+    assert.deepEqual(engine.apiPath(16),['tabs','insertCSS']);
+    assert.equal(engine.apiPath(99),null);
+    assert.equal(engine.call('cpo_injection_route',[0,1|2|4|16]),13);
+    assert.equal(engine.call('cpo_injection_route',[1,2|4|16]),16);
+    assert.equal(engine.call('cpo_injection_route',[1,2|8|16]),0);
+    assert.equal(engine.call('cpo_async_transition',[0,1]),1);
+    assert.equal(engine.call('cpo_async_transition',[1,2]),0);
 });
