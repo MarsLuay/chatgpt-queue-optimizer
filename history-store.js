@@ -74,7 +74,7 @@
         metaValid(kind, existing, options) {
             const updated = options.updated || {};
             const rows = options.records || [];
-            const same = !!existing && existing.id === options.id;
+            const same = !!existing && typeof options.id === 'string' && !!options.id && existing.id === options.id;
             const flags = Number(!!existing) | (Number(same) << 1) |
                 (Number(!!existing?.complete) << 2) | (Number(!!updated.complete) << 3);
             const nums = [existing?.count ?? 0, updated.count ?? 0, existing?.bytes ?? 0,
@@ -102,7 +102,9 @@
         }
 
         prepareRow(row, expected, used) {
-            if (!row || !Number.isSafeInteger(row.index) || row.index < 0 || row.index > 0xffffffff ||
+            if (!Number.isSafeInteger(expected) || expected < 0 || expected > MAX_TURNS ||
+                !Number.isSafeInteger(used) || used < 0 || used > MAX_BYTES ||
+                !row || !Number.isSafeInteger(row.index) || row.index < 0 || row.index > 0xffffffff ||
                 typeof row.text !== 'string' || row.text.length > 37000 || !ROLES.includes(row.role) || !row.role) {
                 throw new Error('Invalid snapshot row.');
             }
@@ -115,9 +117,11 @@
                 const capacity = core.cpo_history_capacity() >>> 0;
                 const buffer = new Uint8Array(core.memory.buffer, ptr, capacity);
                 let written = 0;
+                let wipeSize = capacity;
                 try {
                     const result = this.encoder.encodeInto(row.text, buffer.subarray(HEADER));
                     written = result.written;
+                    wipeSize = HEADER + written;
                     if (result.read !== row.text.length) throw new Error('Snapshot row exceeds codec capacity.');
                     size = written + 128;
                     const decision = core.cpo_history_row_decision(row.index, expected, role, row.text.length, used, written);
@@ -127,7 +131,7 @@
                     if (length !== HEADER + written) throw new Error('Rust snapshot codec rejected row.');
                     binary = buffer.slice(0, length);
                 } finally {
-                    core.cpo_history_wipe(HEADER + written);
+                    core.cpo_history_wipe(wipeSize);
                 }
             } else {
                 size = this.encoder.encode(row.text).byteLength + 128;
