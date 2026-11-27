@@ -155,7 +155,15 @@
             this.state.manualVisibleCount = 0;
             this.resourceSample = null;
           }
+          const mediaChanged = Object.prototype.hasOwnProperty.call(message.config || {}, 'evictPausedMedia') &&
+            message.config.evictPausedMedia !== this.config.evictPausedMedia;
           this.config = { ...this.config, ...message.config };
+          if (mediaChanged && this.state.container) {
+            for (const message of this.state.container.querySelectorAll('.cpo-hidden')) {
+              if (this.config.evictPausedMedia) this.evictPlayback(message);
+              else this.restorePlayback(message);
+            }
+          }
           this.saveConfig();
 
           if (this.config.enabled) {
@@ -1414,10 +1422,7 @@
     }
 
     hideMessage(message) {
-      if (message.classList.contains('cpo-hidden')) {
-        if (!this.config.evictPausedMedia) this.restorePlayback(message);
-        return;
-      }
+      if (message.classList.contains('cpo-hidden')) return;
       message.classList.add('cpo-hidden');
       this.preventImageLoading(message);
       if (this.config.evictPausedMedia) this.evictPlayback(message);
@@ -1434,6 +1439,10 @@
 
     // The WeakMap is deliberately the only owner of removed attributes. Its
     // keys never keep a detached DOM node alive, and no URLs enter telemetry.
+    isProtectedMediaSource(value) {
+      return typeof value === 'string' && (/(?:^|[\s,])(?:blob:|data:|mediasource:)/i.test(value) || value.length > 8192);
+    }
+
     stashSources(element, names) {
       const originals = this.mediaOriginals.get(element) || {};
       let changed = false;
@@ -1442,7 +1451,7 @@
         const value = element.getAttribute(name);
         // Never replace application-owned object URLs, nor retain enormous
         // inline payloads solely for the purpose of evicting them.
-        if (!value || /^\s*(?:blob:|data:|mediasource:)/i.test(value) || value.length > 8192) continue;
+        if (!value || this.isProtectedMediaSource(value)) continue;
         originals[name] = value;
         changed = true;
       }
@@ -1460,23 +1469,24 @@
       if (!originals) return false;
       // Site changes win over cached attributes. Never overwrite new values.
       this.mediaOriginals.delete(element);
-      if (Object.keys(originals).some(name => element.hasAttribute(name))) return false;
+      if (['src', 'srcset'].some(name => element.hasAttribute(name))) return false;
       for (const [name, value] of Object.entries(originals)) element.setAttribute(name, value);
       this.mediaStats.restored++;
       return true;
     }
 
     preventImageLoading(element) {
-      for (const img of element.querySelectorAll('img[src], img[srcset]')) {
+      for (const img of element.querySelectorAll('img')) {
         const width = this.policyCount(img.naturalWidth);
         const height = this.policyCount(img.naturalHeight);
         let changed = false;
         const picture = img.closest?.('picture');
-        if (picture && element.contains(picture)) {
-          for (const source of picture.querySelectorAll('source[srcset]')) {
-            changed = this.stashSources(source, ['srcset']) || changed;
-          }
-        }
+        const sources = picture && element.contains(picture) ? Array.from(picture.querySelectorAll('source[srcset]')) : [];
+        // Treat responsive image candidates as a group: leave the whole
+        // group alone if any candidate uses an application-owned payload.
+        if ([img, ...sources].some(node => ['src', 'srcset'].some(name =>
+          this.isProtectedMediaSource(node.getAttribute(name))))) continue;
+        for (const source of sources) changed = this.stashSources(source, ['srcset']) || changed;
         changed = this.stashSources(img, ['srcset', 'src']) || changed;
         if (changed) {
           const bytes = this.policyCall('cpo_image_surface_bytes', [width, height],
@@ -1489,9 +1499,18 @@
     }
 
     restoreImages(element) {
-      for (const source of element.querySelectorAll('picture source')) this.restoreSources(source);
       for (const img of element.querySelectorAll('img')) {
-        this.restoreSources(img);
+        const picture = img.closest?.('picture');
+        const sources = picture && element.contains(picture) ? Array.from(picture.querySelectorAll('source')) : [];
+        const group = [img, ...sources];
+        const replaced = group.some(node => this.mediaOriginals.has(node) &&
+          ['src', 'srcset'].some(name => node.hasAttribute(name)));
+        if (replaced) {
+          for (const node of group) this.mediaOriginals.delete(node);
+        } else {
+          for (const source of sources) this.restoreSources(source);
+          this.restoreSources(img);
+        }
         // Recover any markup left by the previous optimizer implementation.
         if (img.hasAttribute('data-cpo-original-src')) {
           const original = img.getAttribute('data-cpo-original-src');
@@ -1505,8 +1524,8 @@
       const sources = [media, ...media.querySelectorAll('source')];
       const protectedSource = sources.some(source => {
         const src = source.getAttribute('src') || '';
-        return /^\s*(?:blob:|data:|mediasource:)/i.test(src) || src.length > 8192;
-      }) || /^\s*(?:blob:|data:|mediasource:)/i.test(media.currentSrc || '');
+        return this.isProtectedMediaSource(src);
+      }) || this.isProtectedMediaSource(media.currentSrc || '');
       const flags = [media.paused === true ? 1 : 0, media.currentTime === 0 ? 1 : 0,
         media.srcObject || media.mediaKeys || media.autoplay ? 1 : 0, protectedSource ? 1 : 0];
       return this.policyCall('cpo_can_evict_playback', flags,
