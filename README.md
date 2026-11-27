@@ -229,3 +229,9 @@ Main files:
 - `Installers/` - browser installer and store-packaging tools.
 
 Contributor setup and validation steps are documented in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### Native application and release utilities
+
+Queue ABI 6 supplies shared optimizer/queue settings validation, popup status precedence and remaining-message aggregation, log redaction classification, truncation bounds, retention and duplicate suppression. History ABI 3 supplies reader control state, page movement and capture-batch/completion decisions. Browser DOM rendering, async API callbacks and compatibility paths remain JavaScript.
+
+The Rust CLI in `Installers/native` owns production WASM compilation, browser package assembly, MV2 manifest conversion, ZIP output, local installer coordination and managed Windows Firefox publishing. Run `cargo run --release --manifest-path Installers/native/Cargo.toml -- package --repo-dir .` for packages; `install locally.bat` invokes the native installer coordinator and `upload.bat` invokes managed publishing. Rust/Cargo is required; the native CLI resolves its Cargo dependencies on the first build. The native publisher requires explicit invocation, validates a clean main checkout, runs preflight checks, bumps the patch version, uses web-ext to submit, and commits/pushes the release version after confirmed submission. It reads AMO credentials from the environment or hidden console prompts. The Windows browser-specific UI Automation scripts and older Python compatibility/release entry points are retained, and actual browser UI interactions and signing use platform tooling. The native utility has not yet been verified on Windows.
