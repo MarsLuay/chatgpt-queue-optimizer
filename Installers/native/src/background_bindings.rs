@@ -748,23 +748,24 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 if (chrome.alarms && chrome.alarms.onAlarm) {
-    chrome.alarms.onAlarm.addListener((alarm) => {
-        if (!alarm || !alarm.name) return;
-
-        if (alarm.name === IDLE_DISCARD_ALARM_NAME) {
+    chrome.alarms.onAlarm.addListener(async (alarm) => {
+        if(!await globalThis.CpoQueueEngine?.load())return;
+        const route=globalThis.CpoQueueEngine?.alarmRoute(alarm?.name);
+        if(!route)return;
+        if (route.code===1) {
             discardInactiveChatGPTTabs().catch(error => {
                 console.warn('Inactive-tab sweep failed:', error);
             });
             return;
         }
 
-        if (alarm.name === QUEUE_WAKE_ALARM_NAME) {
+        if (route.code===2) {
             resumeDurableQueues('alarm');
             return;
         }
 
-        if (alarm.name.startsWith(SCHEDULED_ALARM_PREFIX)) {
-            const scheduledId = alarm.name.slice(SCHEDULED_ALARM_PREFIX.length);
+        if (route.code===3) {
+            const scheduledId=route.id;
             processDueScheduledMessages('alarm', scheduledId).catch((error) => {
                 console.warn('Could not process scheduled message alarm:', error);
             });
@@ -1043,12 +1044,12 @@ function handleLogAutomationEvent(request, sendResponse) {
  */
 function handleStartSequence(request, sendResponse) {
     (async () => {
-        const tabId = request.tabId;
+        const tabId = Number(request.tabId||0);
         const messages = Array.isArray(request.messages)
             ? request.messages.map(msg => String(msg || '').trim()).filter(Boolean)
             : [];
 
-        if (!tabId || messages.length === 0) {
+        if (!Number.isSafeInteger(tabId)||tabId<=0||messages.length===0) {
             logQueueEvent(tabId, 'warn', 'Could not start sequence: missing tab or messages.', {
                 messageCount: messages.length
             });
@@ -1078,42 +1079,11 @@ function handleStartSequence(request, sendResponse) {
         const conversationId = identity?.conversationId || null;
         const targetKey = normalizedIdentityKey(provider,conversationType,conversationId,identity?.key);
 
-        jobs.set(tabId, {
-            tabId,
-            provider,
-            conversationId,
-            conversationType,
-            targetKey,
-            queue: [...messages],
-            currentMessage: null,
-            isRunning: true,
-            isPaused: false,
-            isStopped: false,
-            pausedReason: '',
-            lastError: '',
-            runId: createRunId(),
-            totalMessages: messages.length,
-            completedCount: 0,
-            currentCommandNumber: 0,
-            currentPhase: waitForIdleBeforeStart ? 'waiting-for-idle' : 'queued',
-            waitForIdleBeforeSend: waitForIdleBeforeStart,
-            deliveryTimeoutAttempts: 0,
-            retryAttemptCount: 0,
-            lastRetryableReason: '',
-            retryClass: '',
-            retryMode: '',
-            nextRetryDelayMs: 0,
-            nextRetryAt: 0,
-            retryExhausted: false,
-            waitStartedAt: 0,
-            lastResearchProgressAt: 0,
-            sawDeepResearch: false,
-            sawGenerating: false,
-            ...emptyDeliveryFields(),
-            ...emptyRolloverFields(),
-            startedAt: Date.now(),
-            updatedAt: Date.now()
-        });
+        // Resolve identity before publication; never replace a queue created
+        // by another request while this request was awaiting the browser.
+        if(jobs.has(tabId)||!jobs.startQueue(tabId,{provider,conversationId,conversationType,targetKey,queue:messages,runId:createRunId(),waitForIdleBeforeSend:waitForIdleBeforeStart})){
+            sendResponse({ok:false,error:'A sequence is already running or paused on this tab.'});return;
+        }
 
         logQueueEvent(tabId, 'info', `Started sequence with ${messages.length} command${messages.length === 1 ? '' : 's'}.`, {
             totalMessages: messages.length,
@@ -1177,49 +1147,26 @@ function enqueueToRunningJobResult(tabId, existingJob, message, addToEnd, source
     };
 }
 
-async function startNewJobFromEnqueueResult(tabId, message, waitForIdleBeforeStart, source, conversationIdentity) {
+async function startNewJobFromEnqueueResult(tabId, message, waitForIdleBeforeStart, source, conversationIdentity,addToEnd=false) {
     const identity = conversationIdentity || await resolveTabConversationIdentity(tabId);
     const provider = identity?.provider || 'chatgpt';
     const conversationType = identity?.type || 'unknown';
     const conversationId = identity?.conversationId || null;
     const targetKey = normalizedIdentityKey(provider,conversationType,conversationId,identity?.key);
 
-    jobs.set(tabId, {
-        tabId,
-        provider,
-        conversationId,
-        conversationType,
-        targetKey,
-        queue: [message],
-        currentMessage: null,
-        isRunning: true,
-        isPaused: false,
-        isStopped: false,
-        pausedReason: '',
-        lastError: '',
-        runId: createRunId(),
-        totalMessages: 1,
-        completedCount: 0,
-        currentCommandNumber: 0,
-        currentPhase: waitForIdleBeforeStart ? 'waiting-for-idle' : 'queued',
-        waitForIdleBeforeSend: waitForIdleBeforeStart,
-        deliveryTimeoutAttempts: 0,
-        retryAttemptCount: 0,
-        lastRetryableReason: '',
-        retryClass: '',
-        retryMode: '',
-        nextRetryDelayMs: 0,
-        nextRetryAt: 0,
-        retryExhausted: false,
-        waitStartedAt: 0,
-        lastResearchProgressAt: 0,
-        sawDeepResearch: false,
-        sawGenerating: false,
-        ...emptyDeliveryFields(),
-        ...emptyRolloverFields(),
-        startedAt: Date.now(),
-        updatedAt: Date.now()
-    });
+    // A concurrent start or scheduled delivery must not replace an owner.
+    const concurrent=jobs.get(tabId);
+    if(concurrent){
+        if(!identitiesMatchForSchedule(buildScheduledConversationIdentity(concurrent),{provider,conversationId,type:conversationType,key:targetKey})){
+            return {ok:false,error:'The target conversation changed while preparing the queue.'};
+        }
+        if(concurrent.isPaused)return enqueueToPausedJobResult(tabId,concurrent,message,addToEnd,source);
+        if(concurrent.isRunning)return enqueueToRunningJobResult(tabId,concurrent,message,addToEnd,source);
+        return {ok:false,error:'Queue ownership changed while preparing the command.'};
+    }
+    if(!jobs.startQueue(tabId,{provider,conversationId,conversationType,targetKey,queue:[message],runId:createRunId(),waitForIdleBeforeSend:waitForIdleBeforeStart})){
+        return {ok:false,error:'Queue ownership changed while preparing the command.'};
+    }
 
     logQueueEvent(
         tabId,
@@ -1260,7 +1207,7 @@ async function enqueueMessageInternal({
     const normalizedTabId = Number(tabId || 0);
     const normalizedMessage = String(message || '').trim();
 
-    if (!normalizedTabId || !normalizedMessage) {
+    if (!Number.isSafeInteger(normalizedTabId)||normalizedTabId<=0||!normalizedMessage) {
         logQueueEvent(normalizedTabId, 'warn', 'Could not enqueue command: missing tab or message.');
         return { ok: false, error: 'Missing tabId or message.' };
     }
@@ -1297,7 +1244,7 @@ async function enqueueMessageInternal({
         normalizedMessage,
         waitForIdleBeforeStart,
         source,
-        conversationIdentity
+        conversationIdentity,addToEnd
     );
 }
 

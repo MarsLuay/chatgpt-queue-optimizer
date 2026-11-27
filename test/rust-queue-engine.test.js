@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 39);
+    assert.equal(e.cpo_queue_abi(), 40);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -947,4 +947,18 @@ test('native diagnostic records serialize and enqueue exactly once',{skip},async
     assert.deepEqual(engine.workerCollection(1),[entry]);assert.deepEqual(engine.workerCollection(1),[]);
     const state=engine.diagnosticProviderSummary({hasTryAgainButton:true,matchedError:'  a\tb ',compatibilityState:'  ok '},{phase:'error',source:'test'});
     assert.equal(state.hasError,true);assert.equal(state.hasTryAgainButton,true);assert.equal(state.matchedSignal,'a b');assert.equal(state.compatibilityState,'ok');
+});
+
+
+test('native queue initialization owns defaults and alarm dispatch',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});engine.install(instance.exports);
+    const jobs=engine.createLiveJobs(),before=jobs.revision();
+    const initial={provider:'chatgpt',conversationId:'a',conversationType:'existing',targetKey:'chatgpt:c:a',runId:'run',queue:['one','two'],waitForIdleBeforeSend:true};
+    const job=jobs.startQueue(7,initial,1000);assert.ok(job);assert.equal(jobs.revision(),before+1);
+    assert.equal(job.currentMessage,null);assert.equal(job.currentPhase,'waiting-for-idle');assert.equal(job.totalMessages,2);
+    assert.equal(job.startedAt,1000);assert.equal(job.updatedAt,1000);assert.equal(job.handoffSubmitted,false);
+    assert.equal(jobs.startQueue(7,initial,2000),null);assert.deepEqual([...job.queue],['one','two']);
+    assert.deepEqual(engine.alarmRoute('queue-wake'),{code:2,id:''});
+    assert.deepEqual(engine.alarmRoute('scheduled-msg:a\ud800'),{code:3,id:'a\ud800'});
+    assert.deepEqual(engine.alarmRoute('scheduled-msg:'),{code:0,id:''});
 });

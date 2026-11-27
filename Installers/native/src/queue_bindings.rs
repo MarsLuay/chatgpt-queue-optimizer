@@ -359,7 +359,7 @@ const HOST:&str=r####"(() => {
                 }
                 return entries;
         }
-        function initialize(initial,restore=false){
+        function initialize(initial,restore=false,start=false,now=Date.now()){
             const entries=initialEntries(initial);
             return native(e=>{
                 const length=entries.reduce((sum,[,bytes])=>sum+8+bytes.length,0);
@@ -373,7 +373,7 @@ const HOST:&str=r####"(() => {
                     let at=0;
                     for(const [field,bytes] of entries){view.setUint32(at,field,true);view.setUint32(at+4,bytes.length,true);out.set(bytes,at+8);at+=8+bytes.length;}
                 }
-                const id=(restore?e.cpo_live_restore():e.cpo_live_initialize())>>>0;
+                const id=(start?e.cpo_live_start(now):restore?e.cpo_live_restore():e.cpo_live_initialize())>>>0;
                 if(!id)throw new Error('Native initialization rejected');
                 return id;
             });
@@ -476,6 +476,25 @@ const HOST:&str=r####"(() => {
                     catch(error){store.delete(tabId);throw error;}
                 }
                 return store;
+            },
+            startQueue(tabId,initial,now=Date.now()){
+                if(handles.has(tabId))return null;
+                const record={...initial,tabId};
+                let id=initialize(record,false,true,now);
+                if(id==null){
+                    // Oversized combined frames retain per-prompt transport,
+                    // with no published JS owner until initialization ends.
+                    id=initialize({...record,queue:[record.queue[0]]},false,true,now);
+                    if(!id)throw new Error('Native queue start exceeds transfer capacity');
+                    try{
+                        for(let i=1;i<record.queue.length;i++)bulk(id,1,0,[record.queue[i]]);
+                        write(id,fields.get('totalMessages'),0,0,record.queue.length);
+                    }catch(error){if(!broken)native(e=>e.cpo_live_delete(id));throw error;}
+                }
+                let owner;
+                try{owner=makeJob(tabId,id,record,true);}
+                catch(error){if(!broken)native(e=>e.cpo_live_delete(id));throw error;}
+                handles.set(tabId,owner);return owner;
             },
             restoreBatch(records){
                 const tabs=new Set();
@@ -1153,6 +1172,11 @@ const HOST:&str=r####"(() => {
         return workerCollection(19,0,[String(flags),...[response.phase,state.phase,response.source,state.compatibilityState,
             state.matchedSignals?.error,state.matchedError].map(v=>JSON.stringify(String(v||'')))]);
     }
+    function alarmRoute(name){
+        if(typeof name!=='string')return null;
+        const result=batch(41,[name]);
+        return result?.length===2?{code:Number(result[0]),id:result[1]}:null;
+    }
     function diagnosticGroups(groups,limit=160){
         const fields=[];
         for(const group of groups)fields.push(limit,group.length,...group.map(v=>v?String(v):''));
@@ -1292,7 +1316,7 @@ const HOST:&str=r####"(() => {
             (Number(!!job.waitForIdleBeforeSend) << 6);
         return call('cpo_queue_next', [flags, phase, job.queue.length]);
     }
-    const api = { appendDiagnostic, diagnosticProviderSummary, diagnosticGroups, waitObservation, scheduledTransaction, scheduledRecoveryPlan, scheduledUpsertPlan, completedRunCount, workerCollection, backgroundWaitTimeout, genericProviderResponse, providerSurface, providerNavigation, providerTurnMetadata, invalidateProviderTurn, providerLastAssistant, providerGenerationState, providerMarker, providerButtons, providerGenerationText, providerDiagnostics, providerTurnSnapshot, providerBoundResponse, providerSemanticButton, classifyFailure, bindingDecision, scheduledMutation, sequenceName, validSequenceName, sequenceVariables, keyboardEvent, localDateParts, localDateMatches, localDateInput, timestampValid, timestampMath, batch, textBatch, scheduledSort, scheduledLookup, scheduledWithout, scheduledDue, identityKey, continuationHandoff, supportedTabs, popupStatus, popupRunningLabel, popupScheduledLabel, popupStats, providerCatalog, diagnosticText, diagnosticPick, sanitizeDiagnostic, createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, installationDefaults, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
+    const api = { alarmRoute, appendDiagnostic, diagnosticProviderSummary, diagnosticGroups, waitObservation, scheduledTransaction, scheduledRecoveryPlan, scheduledUpsertPlan, completedRunCount, workerCollection, backgroundWaitTimeout, genericProviderResponse, providerSurface, providerNavigation, providerTurnMetadata, invalidateProviderTurn, providerLastAssistant, providerGenerationState, providerMarker, providerButtons, providerGenerationText, providerDiagnostics, providerTurnSnapshot, providerBoundResponse, providerSemanticButton, classifyFailure, bindingDecision, scheduledMutation, sequenceName, validSequenceName, sequenceVariables, keyboardEvent, localDateParts, localDateMatches, localDateInput, timestampValid, timestampMath, batch, textBatch, scheduledSort, scheduledLookup, scheduledWithout, scheduledDue, identityKey, continuationHandoff, supportedTabs, popupStatus, popupRunningLabel, popupScheduledLabel, popupStats, providerCatalog, diagnosticText, diagnosticPick, sanitizeDiagnostic, createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, installationDefaults, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
     globalThis.CpoQueueEngine = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();

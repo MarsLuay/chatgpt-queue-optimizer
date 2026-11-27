@@ -1057,6 +1057,33 @@ mod live_state {
             let Some(id)=self.next.checked_add(1)else{return 0;};
             self.next=id;job.dirty(self.advance());self.jobs.insert(id,job);id
         }
+        fn start(&mut self,now:f64)->u32{
+            let mut input=std::mem::take(&mut self.input);
+            let decoded=Self::decode_initial(&input,false);input.fill(0);
+            let Some(mut job)=decoded else{return 0;};
+            if !now.is_finite()||now<0.0||job.queue.is_empty()||
+                super::cpo_restore_eligible(std::str::from_utf8(job.get("tabId")).ok().and_then(|v|v.parse::<f64>().ok()).unwrap_or(0.0),job.queue.len() as u32,0,0)!=1{return 0;}
+            for name in ["provider","conversationType","targetKey","runId"]{
+                if super::command_identity::decode_units(job.get(name)).is_none(){return 0;}
+            }
+            let wait=job.get("waitForIdleBeforeSend")==TRUE;
+            // Initialize the durable schema from canonical defaults, accepting
+            // only browser identity, run ID, queue and idle-wait preference.
+            for (i,f) in super::DURABLE_FIELDS.iter().enumerate(){
+                if matches!(f.name,"tabId"|"provider"|"conversationId"|"conversationType"|"targetKey"|"queue"|"runId"|"waitForIdleBeforeSend"){continue;}
+                let value=match f.project{
+                    2|7=>NULL,3|4|13|14=>FALSE,5|16|17|18=>ZERO,_=>EMPTY
+                };
+                job.fields[i]=Some(value.to_vec());
+            }
+            job.set("isRunning",TRUE);job.set("currentPhase",if wait{b"\"waiting-for-idle\""}else{b"\"queued\""});
+            job.set("waitForIdleBeforeSend",if wait{TRUE}else{FALSE});
+            job.set("totalMessages",job.queue.len().to_string().as_bytes());
+            let time=now.to_string();job.set("startedAt",time.as_bytes());job.set("updatedAt",time.as_bytes());
+            job.fields[super::DURABLE_FIELDS.len()]=Some(FALSE.to_vec());
+            let Some(id)=self.next.checked_add(1)else{return 0;};
+            self.next=id;job.dirty(self.advance());self.jobs.insert(id,job);id
+        }
         // Length-prefixed complete job frames. Decode and validate every
         // record before assigning any visible native handles or revisions.
         fn restore_batch(&mut self)->u32{
@@ -1692,6 +1719,8 @@ mod live_state {
     pub extern "C" fn cpo_live_initialize()->u32{STORE.with(|s|s.borrow_mut().initialize(false))}
     #[no_mangle]
     pub extern "C" fn cpo_live_restore()->u32{STORE.with(|s|s.borrow_mut().initialize(true))}
+    #[no_mangle]
+    pub extern "C" fn cpo_live_start(now:f64)->u32{STORE.with(|s|s.borrow_mut().start(now))}
     #[no_mangle]
     pub extern "C" fn cpo_live_restore_batch()->u32{STORE.with(|s|s.borrow_mut().restore_batch())}
     #[no_mangle]
@@ -2542,6 +2571,16 @@ mod presentation_batch {
                     else{out.push(ascii(&defaults[i].to_string()));}
                 }
                 Some(out)
+            },
+            41=>{ // Browser alarm names are exact; scheduled ID is opaque UTF-16.
+                if f.len()!=1{return None;}
+                let name=f[0];
+                let prefix=ascii("scheduled-msg:");
+                let (code,id)=if eq(name,"cpo-idle-tab-discard"){(1,&[][..])}
+                    else if eq(name,"queue-wake"){(2,&[][..])}
+                    else if name.starts_with(&prefix)&&name.len()>prefix.len(){(3,&name[prefix.len()..])}
+                    else{(0,&[][..])};
+                Some(vec![ascii(&code.to_string()),id.to_vec()])
             },
             _=>None
         }
