@@ -22,7 +22,7 @@ if errorlevel 1 (
     echo [ERROR] Package generation failed. Firefox was not modified.
     exit /b 1
 )
-powershell.exe -NoProfile -STA -File "%REPO_ROOT%Installers\install_firefox_locally.ps1" %*
+powershell.exe -NoProfile -STA -ExecutionPolicy RemoteSigned -File "%REPO_ROOT%Installers\install_firefox_locally.ps1" %*
 set "RESULT=%ERRORLEVEL%"
 if not "%RESULT%"=="0" echo [ERROR] Local installation failed. See the Firefox setup stage above.
 exit /b %RESULT%
