@@ -13,7 +13,7 @@ const DEFAULT_WINDOW: u32 = 50;
 const DEFAULT_BATCH: u32 = 25;
 
 #[no_mangle]
-pub extern "C" fn cpo_abi_version() -> u32 { 1 }
+pub extern "C" fn cpo_abi_version() -> u32 { 2 }
 
 /// Retain the configured window and any explicitly expanded history.
 /// Preserve the preexisting optimizer's behavior while moving policy to Rust.
@@ -47,6 +47,30 @@ pub extern "C" fn cpo_batch_count(hidden: u32, batch: u32) -> u32 {
     hidden.min(if batch == 0 { DEFAULT_BATCH } else { batch })
 }
 
+/// Relative resource units, not measured memory bytes. Media gets a larger
+/// weight because decoded resources and rendering surfaces can be expensive.
+#[no_mangle]
+pub extern "C" fn cpo_resource_units(nodes: u32, text_chars: u32, images: u32,
+    media: u32, surfaces: u32, truncated: u32) -> u32 {
+    nodes.saturating_add(text_chars.div_ceil(128))
+        .saturating_add(images.saturating_mul(32))
+        .saturating_add(media.saturating_mul(128))
+        .saturating_add(surfaces.saturating_mul(128))
+        .saturating_add(truncated.saturating_mul(512))
+}
+
+/// Estimate the recent-window limit from the sampled average cost. A manual
+/// history expansion is handled separately by the browser bridge.
+#[no_mangle]
+pub extern "C" fn cpo_adaptive_window(total: u32, configured: u32, sampled: u32,
+    units: u32, budget: u32) -> u32 {
+    let cap = cpo_visible_count(total, configured, 0);
+    if sampled == 0 || units == 0 || budget == 0 { return cap; }
+    let allowed = (u64::from(budget) * u64::from(sampled) / u64::from(units))
+        .min(u64::from(u32::MAX)) as u32;
+    cap.min(allowed.max(MIN_RECENT))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,6 +82,17 @@ mod tests {
         assert_eq!(cpo_visible_count(100, 2, 0), 8);
         assert_eq!(cpo_visible_count(100, 0, 0), 50);
         assert_eq!(cpo_visible_count(0, 50, 0), 0);
+    }
+    #[test]
+    fn adaptive_resource_budget() {
+        assert_eq!(cpo_resource_units(100, 129, 2, 1, 1, 0), 422);
+        assert_eq!(cpo_resource_units(u32::MAX, 0, 1, 0, 0, 1), u32::MAX);
+        assert_eq!(cpo_adaptive_window(500, 50, 20, 4000, 4000), 20);
+        assert_eq!(cpo_adaptive_window(500, 50, 20, 4000, 1), 8);
+        assert_eq!(cpo_adaptive_window(4, 50, 4, 4000, 1), 4);
+        assert_eq!(cpo_adaptive_window(500, 50, 0, 0, 4000), 50);
+        assert_eq!(cpo_adaptive_window(500, 50, 20, 4000, 100000), 50);
+        assert_eq!(cpo_adaptive_window(u32::MAX, u32::MAX, u32::MAX, 1, u32::MAX), u32::MAX);
     }
     #[test]
     fn bounds_and_saturation() {
