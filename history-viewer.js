@@ -207,6 +207,7 @@
     discardButton.addEventListener('click', () => run(async () => {
         const saved = await readMeta();
         if (!saved?.complete || saved.id !== meta?.id || saved.tabId !== sourceTab) throw new Error('Snapshot is no longer current.');
+        if (!window.confirm('Unload the original ChatGPT tab? The saved snapshot is read-only and may be incomplete. Opening the original will reload the conversation.')) return;
         const response = await sendRuntime({ action: 'discardHistorySource', tabId: sourceTab,
             expectedUrl: saved.url, expectedIdentity: saved.identity });
         if (!response?.ok) throw new Error(response?.error || 'Original tab could not be unloaded safely.');
@@ -244,6 +245,7 @@
         busy = true;
         updateButtons();
         try {
+            if (chrome.extension?.inIncognitoContext) throw new Error('Private context');
             const open = indexedDB.open(DB, 1);
             open.onupgradeneeded = () => {
                 open.result.createObjectStore('meta');
@@ -260,7 +262,7 @@
             } catch {}
             await renderPage();
             if (!meta?.complete) setStatus(meta ? 'An incomplete snapshot exists. Delete it or capture again.' : 'No saved snapshot. Capture a loaded conversation to begin.');
-        } catch { setStatus('Local history storage could not be opened.'); }
+        } catch { setStatus('Local history storage could not be opened or is unavailable in this private context.'); }
         finally { busy = false; updateButtons(); if (!db) captureButton.disabled = true; }
     }
     init();
