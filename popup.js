@@ -2351,7 +2351,7 @@ The sequence should do the following: `;
                 }).catch(() => {});
 
                 // Firefox MV2 accepts one script file per legacy injection.
-                for (const file of ['rust-browser-bridge.js', 'content.js']) {
+                for (const file of ['rust-queue-bridge.js', 'rust-browser-bridge.js', 'content.js']) {
                     await executeScript({ target: { tabId }, files: [file] });
                 }
 
