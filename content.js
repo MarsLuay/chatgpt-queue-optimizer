@@ -12,7 +12,8 @@
         autoScroll: true,
         offscreenRendering: false,
         adaptiveBudget: false,
-        resourceBudget: 8000
+        resourceBudget: 8000,
+        evictPausedMedia: false
       };
 
       this.state = {
@@ -44,6 +45,10 @@
 
       this._cachedMessages = null;
       this._cacheTimestamp = null;
+      this._messageCacheTimer = null;
+      /** @type {WeakMap<Element, Record<string, string>>} */
+      this.mediaOriginals = new WeakMap();
+      this.mediaStats = { imagesEvicted: 0, playbackEvicted: 0, restored: 0, estimatedImageBytes: 0 };
       this._loggedSelector = null;
       this._isRefreshing = false;
       this._lastNoMessageLog = 0;
@@ -446,9 +451,9 @@
           );
           const required = ['cpo_abi_version', 'cpo_visible_count', 'cpo_expand_count',
             'cpo_hidden_count', 'cpo_offscreen_end', 'cpo_batch_count',
-            'cpo_resource_units', 'cpo_adaptive_window'];
+            'cpo_resource_units', 'cpo_adaptive_window', 'cpo_image_surface_bytes', 'cpo_can_evict_playback'];
           if (!required.every(name => typeof core[name] === 'function') ||
-              core.cpo_abi_version() !== 2) {
+              core.cpo_abi_version() !== 3) {
             throw new Error('Rust optimizer ABI mismatch');
           }
           const memory = result.instance.exports.memory;
@@ -559,6 +564,7 @@
         usedJsHeapBytes: typeof used === 'number' && Number.isFinite(used) ? used : null,
         wasmLinearBytes: this.nativeMemoryBytes || 0,
         cachedMessageRefs: this._cachedMessages?.length || 0,
+        mediaEviction: { ...this.mediaStats },
         adaptiveEnabled: this.config.adaptiveBudget === true,
         budget: this.policyCount(this.config.resourceBudget, 8000),
         adaptiveTarget: this.state.adaptiveTarget || 0,
@@ -1036,15 +1042,24 @@
       return document.body || null;
     }
 
+    clearMessageCache() {
+      clearTimeout(this._messageCacheTimer);
+      this._messageCacheTimer = null;
+      this._cachedMessages = null;
+      this._cacheTimestamp = null;
+    }
+
     getMessageNodes() {
       if (
         this._cachedMessages &&
         this._cacheTimestamp &&
-        Date.now() - this._cacheTimestamp < 800
+        Date.now() - this._cacheTimestamp < 800 &&
+        this._cachedMessages.every(node => node.isConnected !== false)
       ) {
         return this._cachedMessages;
       }
 
+      this.clearMessageCache();
       const surface = this.getCurrentSurface();
       if (this.provider?.supportsOptimizer && !surface.optimizerEligible) {
         return [];
@@ -1071,6 +1086,9 @@
 
         this._cachedMessages = messages;
         this._cacheTimestamp = Date.now();
+        this._messageCacheTimer = setTimeout(() => this.clearMessageCache(), 800);
+        // Avoid keeping a Node test process alive; browsers return a number.
+        if (typeof this._messageCacheTimer?.unref === 'function') this._messageCacheTimer.unref();
 
         return messages;
       }
@@ -1214,6 +1232,7 @@
 
       if (this.state.observer) {
         this.state.observer.disconnect();
+        this.state.observer = null;
       }
 
       this.state.mutationObserver = new MutationObserver((mutations) => {
@@ -1257,8 +1276,7 @@
         return;
       }
       this.state.perf.mutationRefreshes++;
-      this._cachedMessages = null;
-      this._cacheTimestamp = null;
+      this.clearMessageCache();
       clearTimeout(this.refreshTimeout);
       this.refreshTimeout = setTimeout(() => {
         if (!this.config.enabled || !this.state.optimizerBound) return;
@@ -1331,10 +1349,6 @@
     showOlderMessages() {
       const messages = this.getMessageNodes();
 
-      if (this.state.observer) {
-        this.state.observer.disconnect();
-      }
-
       const currentVisible = this.state.visibleCount;
       const toShow = this.policyBatch(this.state.hiddenCount);
 
@@ -1400,46 +1414,133 @@
     }
 
     hideMessage(message) {
-      if (message.classList.contains('cpo-hidden')) return;
-
+      if (message.classList.contains('cpo-hidden')) {
+        if (!this.config.evictPausedMedia) this.restorePlayback(message);
+        return;
+      }
       message.classList.add('cpo-hidden');
       this.preventImageLoading(message);
+      if (this.config.evictPausedMedia) this.evictPlayback(message);
     }
 
     showMessage(message) {
-      if (!message.classList.contains('cpo-hidden')) {
-        this.applyLazyLoading(message);
-        return;
+      if (message.classList.contains('cpo-hidden')) {
+        message.classList.remove('cpo-hidden');
+        this.restoreImages(message);
+        this.restorePlayback(message);
       }
-
-      message.classList.remove('cpo-hidden');
-      this.restoreImages(message);
       this.applyLazyLoading(message);
     }
 
-    preventImageLoading(element) {
-      const images = element.querySelectorAll('img[src]');
+    // The WeakMap is deliberately the only owner of removed attributes. Its
+    // keys never keep a detached DOM node alive, and no URLs enter telemetry.
+    stashSources(element, names) {
+      const originals = this.mediaOriginals.get(element) || {};
+      let changed = false;
+      for (const name of names) {
+        if (!element.hasAttribute(name)) continue;
+        const value = element.getAttribute(name);
+        // Never replace application-owned object URLs, nor retain enormous
+        // inline payloads solely for the purpose of evicting them.
+        if (!value || /^\s*(?:blob:|data:|mediasource:)/i.test(value) || value.length > 8192) continue;
+        originals[name] = value;
+        changed = true;
+      }
+      if (!changed) return false;
+      this.mediaOriginals.set(element, originals);
+      for (const name of names) {
+        if (Object.prototype.hasOwnProperty.call(originals, name) &&
+            element.getAttribute(name) === originals[name]) element.removeAttribute(name);
+      }
+      return true;
+    }
 
-      images.forEach((img) => {
-        if (!img.dataset.cpoOriginalSrc) {
-          img.dataset.cpoOriginalSrc = img.src;
-          img.removeAttribute('src');
-          img.setAttribute('loading', 'lazy');
+    restoreSources(element) {
+      const originals = this.mediaOriginals.get(element);
+      if (!originals) return false;
+      // Site changes win over cached attributes. Never overwrite new values.
+      this.mediaOriginals.delete(element);
+      if (Object.keys(originals).some(name => element.hasAttribute(name))) return false;
+      for (const [name, value] of Object.entries(originals)) element.setAttribute(name, value);
+      this.mediaStats.restored++;
+      return true;
+    }
+
+    preventImageLoading(element) {
+      for (const img of element.querySelectorAll('img[src], img[srcset]')) {
+        const width = this.policyCount(img.naturalWidth);
+        const height = this.policyCount(img.naturalHeight);
+        let changed = false;
+        const picture = img.closest?.('picture');
+        if (picture && element.contains(picture)) {
+          for (const source of picture.querySelectorAll('source[srcset]')) {
+            changed = this.stashSources(source, ['srcset']) || changed;
+          }
         }
-      });
+        changed = this.stashSources(img, ['srcset', 'src']) || changed;
+        if (changed) {
+          const bytes = this.policyCall('cpo_image_surface_bytes', [width, height],
+            () => Math.min(0xffffffff, width * height * 4));
+          this.mediaStats.imagesEvicted++;
+          this.mediaStats.estimatedImageBytes = Math.min(Number.MAX_SAFE_INTEGER,
+            this.mediaStats.estimatedImageBytes + bytes);
+        }
+      }
     }
 
     restoreImages(element) {
-      const images = element.querySelectorAll('img[data-cpo-original-src]:not([src])');
-
-      images.forEach((img) => {
-        const originalSrc = img.dataset.cpoOriginalSrc;
-
-        if (originalSrc) {
-          img.src = originalSrc;
-          delete img.dataset.cpoOriginalSrc;
+      for (const source of element.querySelectorAll('picture source')) this.restoreSources(source);
+      for (const img of element.querySelectorAll('img')) {
+        this.restoreSources(img);
+        // Recover any markup left by the previous optimizer implementation.
+        if (img.hasAttribute('data-cpo-original-src')) {
+          const original = img.getAttribute('data-cpo-original-src');
+          if (original && !img.hasAttribute('src') && !img.hasAttribute('srcset')) img.setAttribute('src', original);
+          img.removeAttribute('data-cpo-original-src');
         }
-      });
+      }
+    }
+
+    canEvictPlayback(media) {
+      const sources = [media, ...media.querySelectorAll('source')];
+      const protectedSource = sources.some(source => {
+        const src = source.getAttribute('src') || '';
+        return /^\s*(?:blob:|data:|mediasource:)/i.test(src) || src.length > 8192;
+      }) || /^\s*(?:blob:|data:|mediasource:)/i.test(media.currentSrc || '');
+      const flags = [media.paused === true ? 1 : 0, media.currentTime === 0 ? 1 : 0,
+        media.srcObject || media.mediaKeys || media.autoplay ? 1 : 0, protectedSource ? 1 : 0];
+      return this.policyCall('cpo_can_evict_playback', flags,
+        () => Number(flags[0] === 1 && flags[1] === 1 && !flags[2] && !flags[3])) === 1;
+    }
+
+    evictPlayback(element) {
+      for (const media of element.querySelectorAll('video, audio')) {
+        if (!this.canEvictPlayback(media)) continue;
+        let changed = false;
+        for (const source of media.querySelectorAll('source[src]')) {
+          changed = this.stashSources(source, ['src']) || changed;
+        }
+        changed = this.stashSources(media, ['src']) || changed;
+        if (changed) {
+          this.mediaStats.playbackEvicted++;
+          // load() requests that the browser release the prior media pipeline.
+          // It may emit normal media lifecycle events.
+          try { media.load(); } catch {}
+        }
+      }
+    }
+
+    restorePlayback(element) {
+      for (const media of element.querySelectorAll('video, audio')) {
+        let changed = false;
+        for (const source of media.querySelectorAll('source')) {
+          changed = this.restoreSources(source) || changed;
+        }
+        changed = this.restoreSources(media) || changed;
+        if (changed && media.paused === true && media.currentTime === 0 && !media.srcObject) {
+          try { media.load(); } catch {}
+        }
+      }
     }
 
     applyLazyLoading(element) {
@@ -1485,9 +1586,8 @@
         return;
       }
 
-      if (this.state.observer) {
-        this.state.observer.disconnect();
-      }
+      if (this.state.observer) return;
+      if (typeof IntersectionObserver === 'undefined') return;
 
       this.state._autoArmed = true;
       this.state._autoWasIntersecting = false;
@@ -1542,8 +1642,7 @@
       try {
         // Refresh the list once, then reuse that exact result while selecting
         // its container. The old flow discarded the cache twice per refresh.
-        this._cachedMessages = null;
-        this._cacheTimestamp = null;
+        this.clearMessageCache();
         this.setupContainer();
         const messages = this.getMessageNodes();
 
@@ -1588,6 +1687,7 @@
         message.classList.remove('cpo-hidden');
         message.classList.remove('cpo-offscreen');
         this.restoreImages(message);
+        this.restorePlayback(message);
       });
 
       if (this.state.moreBanner) {
@@ -1619,8 +1719,8 @@
       this.state.manualVisibleCount = 0;
       this.state.adaptiveTarget = 0;
       this.resourceSample = null;
-      this._cachedMessages = null;
-      this._cacheTimestamp = null;
+      this.mediaStats = { imagesEvicted: 0, playbackEvicted: 0, restored: 0, estimatedImageBytes: 0 };
+      this.clearMessageCache();
     }
   }
 
