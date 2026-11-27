@@ -237,6 +237,18 @@ pub extern "C" fn cpo_cache_valid(kind: u32, age: u32, flags: u32) -> u32 {
     (flags & 3 == 3 && age < cpo_cache_ttl(kind)) as u32
 }
 
+// Check expiry before walking cached handles. A disconnected node invalidates
+// the entire cache; the host never needs to allocate a second reference list.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_cache_nodes_valid(kind: u32, age: u32, count: u32) -> u32 {
+    if age >= cpo_cache_ttl(kind) { return 0; }
+    for index in 0..count {
+        if h(74, index, 0, 0) == 0 { return 0; }
+    }
+    1
+}
+
 #[no_mangle]
 pub extern "C" fn cpo_mutation_delay() -> u32 { 700 }
 
