@@ -1143,10 +1143,9 @@
 
     getMessageNodes() {
       const cached = this._cachedMessages;
-      const connected = !!cached && cached.every(node => node.isConnected !== false);
-      if (cached && (this.browserEngine?.cacheValid(0, this._cacheTimestamp, !!this._cacheTimestamp, connected) ??
+      if (cached && (this.browserEngine?.cacheNodesValid(0, this._cacheTimestamp, cached) ??
           (!!this._cacheTimestamp && Date.now() >= this._cacheTimestamp &&
-            Date.now() - this._cacheTimestamp < 800 && connected))) {
+            Date.now() - this._cacheTimestamp < 800 && cached.every(node => node.isConnected !== false)))) {
         return cached;
       }
 
