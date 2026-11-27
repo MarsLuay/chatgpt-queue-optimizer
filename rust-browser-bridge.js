@@ -25,7 +25,7 @@
                     !['cpo_collect_resources', 'cpo_discover_messages', 'cpo_execute_media',
                         'cpo_apply_window', 'cpo_window_visible', 'cpo_capture_history', 'cpo_process_mutations',
                         'cpo_cache_ttl', 'cpo_cache_valid', 'cpo_cache_nodes_valid', 'cpo_mutation_delay', 'cpo_provider_selectors', 'cpo_dom_composer_write', 'cpo_dom_composer_read',
-                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool', 'cpo_ui_render', 'cpo_ui_sequence_edit', 'cpo_ui_next_limit', 'cpo_ui_sequence_select'].every(name => typeof core[name] === 'function')) {
+                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool', 'cpo_ui_render', 'cpo_ui_sequence_edit', 'cpo_ui_next_limit', 'cpo_ui_sequence_select', 'cpo_ui_variables', 'cpo_ui_saved_sequence'].every(name => typeof core[name] === 'function')) {
                     throw new Error('Browser WASM ABI mismatch');
                 }
                 this.exports = core;
@@ -199,6 +199,14 @@
         sequenceEdit(messages,action,index=0,text='') {
             return this.invoke({messages,value:text},core=>
                 core.cpo_ui_sequence_edit(action,index,messages.length,Number(!!text))===1);
+        }
+        variables(value) {
+            return this.invoke({value,spans:[]},(core,ctx)=>core.cpo_ui_variables(value.length)===1?ctx.spans:null);
+        }
+        savedSequence(action,sequences,name,messages) {
+            const valid=typeof name==='string'&&!!name&&!['__proto__','constructor','prototype','__edit_selected_sequence__'].includes(name);
+            const flags=Number(valid)|(Number(Object.hasOwn(sequences,name)&&Array.isArray(sequences[name]))<<1);
+            return this.invoke({sequences,name,messages,result:null},(core,ctx)=>core.cpo_ui_saved_sequence(action,flags)===1?{ok:true,messages:ctx.result}:{ok:false});
         }
         nextLimit(total,shown) { return this.invoke({},core=>core.cpo_ui_next_limit(total,shown)>>>0); }
         sequenceSelection(flags,count) { return this.invoke({},core=>core.cpo_ui_sequence_select(flags,count)>>>0); }
@@ -573,6 +581,14 @@
                     else if(a===1)ctx.messages[b]=ctx.value;
                     else if(a===2)ctx.messages.splice(b,1);
                     else if(a===3)ctx.messages.length=0;
+                    else return 0;
+                    return 1;
+                case 124: return ctx.value.charCodeAt(a)||0;
+                case 125: ctx.spans.push([a,b]);return 1;
+                case 126:
+                    if(a===0)Object.defineProperty(ctx.sequences,ctx.name,{value:ctx.messages.slice(),writable:true,enumerable:true,configurable:true});
+                    else if(a===1)ctx.result=ctx.sequences[ctx.name].slice();
+                    else if(a===2)delete ctx.sequences[ctx.name];
                     else return 0;
                     return 1;
                 default: throw new Error('Unknown Rust browser host operation: ' + op);
