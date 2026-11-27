@@ -2,7 +2,6 @@
     'use strict';
     const DB = 'cpo-local-history-v1';
     const PAGE_SIZE = 16;
-    const MAX_BYTES = 8 * 1024 * 1024;
     const MAX_TURNS = 4096;
     const sourceTab = Number(new URLSearchParams(location.search).get('tab') || 0);
     const el = id => document.getElementById(id);
@@ -15,7 +14,7 @@
     let db;
     let meta = null;
     let pageStart = 0;
-    let core = null;
+    let historyStore = null;
     let busy = false;
     let renderEpoch = 0;
 
@@ -23,21 +22,6 @@
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error || new Error('Local database request failed.'));
     });
-    function transaction(mode, operation) {
-        return new Promise((resolve, reject) => {
-            const tx = db.transaction(['meta', 'turns'], mode);
-            let result;
-            tx.oncomplete = () => resolve(result);
-            tx.onabort = () => reject(tx.error || new Error('Local database transaction aborted.'));
-            tx.onerror = () => reject(tx.error || new Error('Local database transaction failed.'));
-            Promise.resolve().then(() => operation(tx.objectStore('meta'), tx.objectStore('turns')))
-                .then(value => { result = value; })
-                .catch(error => {
-                    try { tx.abort(); } catch {}
-                    reject(error);
-                });
-        });
-    }
     function getTab(id) {
         return extensionApiPromise(done => chrome.tabs.get(id, done), () => chrome.tabs.get(id));
     }
@@ -59,50 +43,9 @@
         prevButton.disabled = busy || !complete || pageStart === 0;
         nextButton.disabled = busy || !complete || pageStart + PAGE_SIZE >= meta?.count;
     }
-    function pageCount(total, offset) {
-        return core ? core.cpo_history_page_count(total, offset, PAGE_SIZE) >>> 0 :
-            Math.min(PAGE_SIZE, Math.max(0, total - offset));
-    }
-    function acceptsBytes(used, next) {
-        return core ? core.cpo_history_accept_bytes(used, next) === 1 :
-            used <= MAX_BYTES && next <= MAX_BYTES - used;
-    }
-    async function readMeta() {
-        return transaction('readonly', store => request(store.get('current')));
-    }
-    async function replaceSnapshot(initial) {
-        await transaction('readwrite', async (store, turns) => {
-            await request(turns.clear());
-            await request(store.put(initial, 'current'));
-        });
-    }
-    async function appendBatch(id, records, updated) {
-        await transaction('readwrite', async (store, turns) => {
-            const existing = await request(store.get('current'));
-            if (existing?.id !== id || existing.count !== records[0]?.index) {
-                throw new Error('Another reader replaced this snapshot.');
-            }
-            for (const record of records) await request(turns.put(record, record.index));
-            await request(store.put(updated, 'current'));
-        });
-    }
-    async function finalize(id, updated) {
-        await transaction('readwrite', async store => {
-            const existing = await request(store.get('current'));
-            if (existing?.id !== id || existing.count !== updated.count) throw new Error('Snapshot changed.');
-            await request(store.put(updated, 'current'));
-        });
-    }
     async function renderPage() {
         const epoch = ++renderEpoch;
-        const result = await transaction('readonly', async (store, turns) => {
-            const current = await request(store.get('current'));
-            if (!current?.complete) return { current, records: [] };
-            const start = Math.min(pageStart, Math.max(0, Math.floor((current.count - 1) / PAGE_SIZE) * PAGE_SIZE));
-            const count = pageCount(current.count, start);
-            const records = count ? await request(turns.getAll(IDBKeyRange.bound(start, start + count - 1), count)) : [];
-            return { current, records, start };
-        });
+        const result = await historyStore.page(pageStart);
         if (epoch !== renderEpoch) return;
         meta = result.current || null;
         el('turns').replaceChildren();
@@ -132,7 +75,7 @@
             Math.min(pageStart + PAGE_SIZE, meta.count) + ' of ' + meta.count;
         setStatus('Saved ' + new Date(meta.created).toLocaleString() + ' · ' +
             (meta.bytes / 1048576).toFixed(2) + ' MiB estimated payload · ' +
-            (core ? 'Rust/WASM paging' : 'JavaScript fallback') +
+            (historyStore.core ? 'Rust/WASM storage and codec' : 'JavaScript fallback') +
             (meta.partial ? ' · Partial snapshot (limits reached or incomplete turn text)' : '') +
             '. The original conversation is unchanged.');
         updateButtons();
@@ -150,7 +93,6 @@
         if (!tab || tab.incognito || !isChatGPTUrl(tab.url) || tab.discarded || tab.active) {
             throw new Error('Select an inactive, loaded, non-private ChatGPT tab first.');
         }
-        const encoder = new TextEncoder();
         const id = crypto.randomUUID();
         let offset = 0;
         let current = null;
@@ -169,7 +111,7 @@
                 current = { id, tabId: sourceTab, url: tab.url, identity: reply.identity,
                     total: reply.total, created: Date.now(), count: 0, bytes: 0,
                     partial: false, complete: false };
-                await replaceSnapshot(current);
+                await historyStore.replace(current);
                 meta = current;
                 el('turns').replaceChildren();
                 pageStart = 0;
@@ -178,18 +120,15 @@
             const records = [];
             let bytes = current.bytes;
             for (const row of reply.records) {
-                if (row.index !== current.count + records.length ||
-                    !['user','assistant','message'].includes(row.role) || typeof row.text !== 'string' ||
-                    row.text.length > 37000) throw new Error('Invalid snapshot row.');
-                const size = encoder.encode(row.text).byteLength + 128;
-                if (row.index >= MAX_TURNS || !acceptsBytes(bytes, size)) { partial = true; break; }
-                bytes += size;
-                partial ||= row.truncated === true;
-                records.push({ index: row.index, role: row.role, text: row.text, truncated: row.truncated === true });
+                const encoded = historyStore.prepareRow(row, current.count + records.length, bytes);
+                if (!encoded) { partial = true; break; }
+                bytes += encoded.size;
+                partial ||= encoded.truncated;
+                records.push(encoded);
             }
             if (records.length) {
                 const updated = { ...current, count: current.count + records.length, bytes };
-                await appendBatch(id, records, updated);
+                await historyStore.append(id, records, updated);
                 current = updated;
                 meta = current;
             }
@@ -201,11 +140,11 @@
         const source = await getTab(sourceTab);
         if (source.url !== current.url || source.active || source.discarded) throw new Error('Source tab changed during capture.');
         current = { ...current, partial: partial || current.count < current.total, complete: true };
-        await finalize(id, current);
+        await historyStore.finalize(id, current);
         await renderPage();
     }));
     discardButton.addEventListener('click', () => run(async () => {
-        const saved = await readMeta();
+        const saved = await historyStore.readMeta();
         if (!saved?.complete || saved.id !== meta?.id || saved.tabId !== sourceTab) throw new Error('Snapshot is no longer current.');
         if (!window.confirm('Unload the original ChatGPT tab? The saved snapshot is read-only and may be incomplete. Opening the original will reload the conversation.')) return;
         const response = await sendRuntime({ action: 'discardHistorySource', tabId: sourceTab,
@@ -214,7 +153,7 @@
         setStatus('Original tab discarded. Browser may release its page memory; opening the original reloads it.');
     }));
     originalButton.addEventListener('click', () => run(async () => {
-        const saved = await readMeta();
+        const saved = await historyStore.readMeta();
         if (!saved?.complete || !isChatGPTUrl(saved.url)) throw new Error('No valid original conversation URL.');
         let tab;
         try { tab = await getTab(saved.tabId); } catch {}
@@ -227,12 +166,7 @@
         }
     }));
     deleteButton.addEventListener('click', () => run(async () => {
-        await transaction('readwrite', async (store, turns) => {
-            const current = await request(store.get('current'));
-            if (current?.id !== meta?.id) throw new Error('Snapshot has changed. Reload the reader.');
-            await request(turns.clear());
-            await request(store.clear());
-        });
+        await historyStore.delete(meta?.id);
         meta = null;
         pageStart = 0;
         await renderPage();
@@ -252,14 +186,8 @@
                 open.result.createObjectStore('turns');
             };
             db = await request(open);
-            try {
-                const response = await fetch(chrome.runtime.getURL('optimizer_core.wasm'));
-                if (!response.ok) throw new Error('WASM unavailable');
-                const result = await WebAssembly.instantiate(await response.arrayBuffer(), {});
-                const exports = result.instance.exports;
-                if (exports.cpo_abi_version() === 4 && typeof exports.cpo_history_page_count === 'function' &&
-                    typeof exports.cpo_history_accept_bytes === 'function') core = exports;
-            } catch {}
+            historyStore = new globalThis.CpoHistoryStore(db);
+            await historyStore.load();
             await renderPage();
             if (!meta?.complete) setStatus(meta ? 'An incomplete snapshot exists. Delete it or capture again.' : 'No saved snapshot. Capture a loaded conversation to begin.');
         } catch { setStatus('Local history storage could not be opened or is unavailable in this private context.'); }
