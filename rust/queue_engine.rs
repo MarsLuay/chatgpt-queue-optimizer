@@ -5,7 +5,7 @@
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! { core::arch::wasm32::unreachable() }
 
 #[no_mangle]
-pub extern "C" fn cpo_queue_abi() -> u32 { 4 }
+pub extern "C" fn cpo_queue_abi() -> u32 { 5 }
 
 const OFFSET: u32 = 2166136261;
 const PRIME: u32 = 16777619;
@@ -510,9 +510,158 @@ pub extern "C" fn cpo_tab_close_action(flags: u32) -> u32 {
     (flags & 1 != 0) as u32
 }
 
+// The durable schema is native-owned. The browser receives only field names,
+// conversion instructions and scalar results, never a retained copy of a job.
+// Mode 0 projects a live job, mode 1 reconstructs a stored job.
+struct DurableField { name: &'static str, project: u32, restore: u32 }
+const DURABLE_FIELDS: &[DurableField] = &[
+    DurableField { name: "tabId", project: 18, restore: 18 },
+    DurableField { name: "provider", project: 8, restore: 8 },
+    DurableField { name: "conversationId", project: 2, restore: 2 },
+    DurableField { name: "conversationType", project: 9, restore: 9 },
+    DurableField { name: "targetKey", project: 10, restore: 10 },
+    DurableField { name: "queue", project: 6, restore: 6 },
+    DurableField { name: "currentMessage", project: 7, restore: 7 },
+    DurableField { name: "isRunning", project: 13, restore: 13 },
+    DurableField { name: "isPaused", project: 4, restore: 3 },
+    DurableField { name: "isStopped", project: 14, restore: 14 },
+    DurableField { name: "pausedReason", project: 1, restore: 1 },
+    DurableField { name: "lastError", project: 1, restore: 1 },
+    DurableField { name: "runId", project: 11, restore: 11 },
+    DurableField { name: "totalMessages", project: 17, restore: 17 },
+    DurableField { name: "completedCount", project: 5, restore: 5 },
+    DurableField { name: "currentCommandNumber", project: 5, restore: 5 },
+    DurableField { name: "currentPhase", project: 12, restore: 12 },
+    DurableField { name: "waitForIdleBeforeSend", project: 3, restore: 3 },
+    DurableField { name: "deliveryTimeoutAttempts", project: 5, restore: 5 },
+    DurableField { name: "retryAttemptCount", project: 5, restore: 5 },
+    DurableField { name: "lastRetryableReason", project: 1, restore: 1 },
+    DurableField { name: "retryClass", project: 1, restore: 1 },
+    DurableField { name: "retryMode", project: 15, restore: 15 },
+    DurableField { name: "nextRetryDelayMs", project: 5, restore: 5 },
+    DurableField { name: "nextRetryAt", project: 5, restore: 5 },
+    DurableField { name: "retryExhausted", project: 3, restore: 3 },
+    DurableField { name: "waitStartedAt", project: 5, restore: 5 },
+    DurableField { name: "lastResearchProgressAt", project: 5, restore: 5 },
+    DurableField { name: "sawDeepResearch", project: 3, restore: 3 },
+    DurableField { name: "sawGenerating", project: 3, restore: 3 },
+    DurableField { name: "deliveryState", project: 1, restore: 1 },
+    DurableField { name: "commandId", project: 1, restore: 1 },
+    DurableField { name: "commandFingerprint", project: 1, restore: 1 },
+    DurableField { name: "submittedUserTurnId", project: 2, restore: 2 },
+    DurableField { name: "assistantTurnId", project: 2, restore: 2 },
+    DurableField { name: "submissionAckSource", project: 1, restore: 1 },
+    DurableField { name: "terminalAckSource", project: 1, restore: 1 },
+    DurableField { name: "lastResponsePhase", project: 1, restore: 1 },
+    DurableField { name: "rolloverInProgress", project: 3, restore: 3 },
+    DurableField { name: "rolloverStage", project: 1, restore: 1 },
+    DurableField { name: "rolloverReason", project: 1, restore: 1 },
+    DurableField { name: "rolloverFromConversationId", project: 2, restore: 2 },
+    DurableField { name: "rolloverToConversationId", project: 2, restore: 2 },
+    DurableField { name: "rolloverNavigationStarted", project: 3, restore: 3 },
+    DurableField { name: "rolloverRebindApplied", project: 3, restore: 3 },
+    DurableField { name: "handoffSubmitted", project: 3, restore: 3 },
+    DurableField { name: "handoffEstablished", project: 3, restore: 3 },
+    DurableField { name: "handoffFingerprint", project: 1, restore: 1 },
+    DurableField { name: "conversationGeneration", project: 5, restore: 5 },
+    DurableField { name: "startedAt", project: 16, restore: 16 },
+    DurableField { name: "updatedAt", project: 16, restore: 16 },
+];
+#[no_mangle]
+pub extern "C" fn cpo_durable_field_count() -> u32 { DURABLE_FIELDS.len() as u32 }
+#[no_mangle]
+pub extern "C" fn cpo_durable_field_rule(index: u32, mode: u32) -> u32 {
+    DURABLE_FIELDS.get(index as usize).map_or(0, |field| if mode == 0 { field.project } else { field.restore })
+}
+#[no_mangle]
+pub extern "C" fn cpo_durable_field_name(index: u32, offset: u32) -> u32 {
+    let Some(field) = DURABLE_FIELDS.get(index as usize) else { return 0; };
+    let bytes = field.name.as_bytes();
+    let mut value = 0;
+    for i in 0..4 { if let Some(&byte) = bytes.get(offset as usize + i) { value |= u32::from(byte) << (i*8); } }
+    value
+}
+
+// Defaults for missing text fields. 1 empty, 2 null, 3 chatgpt,
+// 4 existing, 5 new, 6 unknown, 7 synthesized target, 8 new run ID,
+// 9 queued, 10 waiting-for-idle, 11 waiting.
+// flags: conversation ID=1, legacy chatgpt:new=2, wait for idle=4,
+// current message=8.
+#[no_mangle]
+pub extern "C" fn cpo_durable_default(rule: u32, mode: u32, flags: u32) -> u32 {
+    match rule {
+        1 | 15 => 1,
+        2 => 2,
+        7 => if mode == 0 { 1 } else { 2 },
+        8 => 3,
+        9 => if flags & 1 != 0 { 4 } else if mode == 1 && flags & 2 != 0 { 5 } else { 6 },
+        10 => 7,
+        11 => if mode == 0 { 1 } else { 8 },
+        12 => if mode == 1 && flags & 4 != 0 { 10 }
+              else if mode == 1 && flags & 8 != 0 { 11 } else { 9 },
+        _ => 0,
+    }
+}
+#[no_mangle]
+pub extern "C" fn cpo_durable_number(rule: u32, mode: u32, value: f64, now: f64) -> f64 {
+    let v = if rule == 16 && mode == 1 && value == 0.0 { now } else { value };
+    if !v.is_finite() || v < 0.0 || v > 9007199254740991.0 ||
+        (v as u64) as f64 != v || (rule == 18 && v == 0.0) { f64::NAN } else { v }
+}
+// flags: exact true=1, exact false=2, truthy=4, paused=true=8.
+#[no_mangle]
+pub extern "C" fn cpo_durable_boolean(rule: u32, mode: u32, flags: u32) -> u32 {
+    match rule {
+        3 => (flags & 1 != 0) as u32,
+        4 => (flags & 4 != 0) as u32,
+        13 if mode == 1 => (flags & 10 == 0) as u32,
+        13 => (flags & 4 != 0) as u32,
+        14 if mode == 1 => 0,
+        14 => (flags & 4 != 0) as u32,
+        _ => 0,
+    }
+}
+#[no_mangle]
+pub extern "C" fn cpo_durable_retry_mode(mode: u32, value: u32) -> u32 {
+    if mode == 0 || value <= 2 { value } else { 0 }
+}
+// Preserve the legacy ECMAScript trim semantics without allocating a
+// normalized copy of a potentially enormous queued prompt in WASM.
+fn trim_edges(input: &[u16]) -> (usize, usize) {
+    let start = input.iter().position(|&c| !whitespace(c)).unwrap_or(input.len());
+    let end = input.iter().rposition(|&c| !whitespace(c)).map_or(start, |i| i+1);
+    (start,end)
+}
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_durable_trim(len: u32) -> u32 {
+    if len as usize > CHUNK { return u32::MAX; }
+    let input=unsafe { core::slice::from_raw_parts(cpo_fingerprint_buffer() as *const u16,len as usize) };
+    let (start,end)=trim_edges(input);
+    (start as u32) | ((end as u32)<<11)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn durable_schema_and_defaults() {
+        assert_eq!(cpo_durable_field_count(),51);
+        assert_eq!(cpo_durable_field_name(0,0),u32::from_le_bytes(*b"tabI"));
+        assert_eq!(cpo_durable_field_rule(8,0),4);
+        assert_eq!(cpo_durable_field_rule(8,1),3);
+        assert_eq!(cpo_durable_default(9,1,2),5);
+        assert_eq!(cpo_durable_default(9,0,2),6);
+        assert_eq!(cpo_durable_default(12,1,12),10);
+        assert_eq!(cpo_durable_default(12,1,8),11);
+        assert_eq!(cpo_durable_boolean(13,1,8),0);
+        assert_eq!(cpo_durable_boolean(13,1,0),1);
+        assert_eq!(cpo_durable_number(16,1,0.0,1800000000000.0),1800000000000.0);
+        assert!(cpo_durable_number(5,1,-1.0,0.0).is_nan());
+        assert!(cpo_durable_number(18,1,0.0,0.0).is_nan());
+        assert_eq!(trim_edges(&[0xfeff,32,97,0xd800,32]),(2,4));
+        assert_eq!(trim_edges(&[32,10]),(2,2));
+    }
     #[test]
     fn json_escape_and_tab_lifecycle() {
         let input = [34,92,10,0,0xd800,0xd83d,0xde00,0xdc00];
