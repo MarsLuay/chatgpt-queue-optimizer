@@ -140,6 +140,10 @@
      * @param {(response?: ContentScriptResponse) => void} sendResponse
      */
     handleMessage(message, sender, sendResponse) {
+      // Queue-only providers load browser execution only on demand.
+      if (['CHECK_GENERATION_STATE','GET_COMMAND_TURN_SNAPSHOT','GET_COMMAND_RESPONSE_STATE','INSPECT_GENERATION_STATE','CLICK_RETRY_BUTTON'].includes(message.type)) {
+        this.loadRustBrowserEngine();
+      }
       switch (message.type) {
         case 'TOGGLE_OPTIMIZER':
           if (!this.provider?.supportsOptimizer) {
@@ -688,6 +692,7 @@
         this.provider?.setNativeMessageDiscovery?.((adapter, doc, root) =>
           engine.discover(adapter, doc, root));
         this.provider?.setNativeLifecycle?.(engine);
+        this.provider?.setNativeSelectorEngine?.(engine);
         this.clearMessageCache();
         this.resourceSample = null;
         if (this.state.optimizerBound && this.config.enabled) this.refresh();
