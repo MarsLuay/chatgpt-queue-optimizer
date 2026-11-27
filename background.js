@@ -907,6 +907,7 @@ function initializeQueueDiagnostics() {
 }
 
 async function resumeDurableQueues(source = 'manual') {
+    await globalThis.CpoQueueEngine?.load();
     if (jobs.size > 0) {
         updateQueueWakeAlarm(true);
 
@@ -973,7 +974,9 @@ function restoreDurableJobs(durableJobs) {
             : [];
         const currentMessage = String(rawJob.currentMessage || '').trim() || null;
 
-        if (!currentMessage && queue.length === 0) continue;
+        const eligible = globalThis.CpoQueueEngine?.numeric('cpo_restore_eligible', [tabId, queue.length, Number(!!currentMessage), Number(rawJob.isStopped === true)]);
+        if (eligible == null ? (!Number.isSafeInteger(tabId) || tabId <= 0 || rawJob.isStopped === true || (!currentMessage && queue.length === 0)) : eligible === 0) continue;
+        if (jobs.has(tabId)) continue;
 
         const provider = rawJob.provider || 'chatgpt';
         const conversationId = rawJob.conversationId || null;
@@ -1026,21 +1029,21 @@ function restoreDurableJobs(durableJobs) {
 
         job.totalMessages = getTotalMessages(job);
 
-        if (job.currentMessage && !job.currentCommandNumber) {
-            job.currentCommandNumber = Number(job.completedCount || 0) + 1;
-        }
+        const restoredNumber = globalThis.CpoQueueEngine?.call('cpo_restore_command_number', [
+            Number(!!job.currentMessage), job.currentCommandNumber, job.completedCount]);
+        if (restoredNumber != null) job.currentCommandNumber = restoredNumber;
+        else if (job.currentMessage && !job.currentCommandNumber) job.currentCommandNumber = Number(job.completedCount || 0) + 1;
 
-        if (job.currentPhase === 'waiting' && isSubmissionConfirmed(job)) {
-            job.currentPhase = 'awaiting-response';
-            if (!job.deliveryState) {
-                job.deliveryState = 'confirmed-submission';
-            }
-        }
-
-        if (job.currentPhase === 'terminal' || job.deliveryState === 'terminal-awaiting-bookkeeping') {
+        const confirmed = isSubmissionConfirmed(job);
+        const sending = ['sending', 'awaiting-submission-ack'].includes(job.currentPhase);
+        const restoreAction = globalThis.CpoQueueEngine?.restoreAction(job, confirmed) ??
+            (job.currentPhase === 'terminal' || job.deliveryState === 'terminal-awaiting-bookkeeping' ? 2 :
+                confirmed && (job.currentPhase === 'waiting' || sending) ? 1 :
+                job.currentMessage && (sending || ['pre-click','unknown-acceptance'].includes(job.deliveryState)) ? 3 : 0);
+        if (restoreAction === 2) {
             job.currentPhase = 'terminal';
             job.deliveryState = 'terminal-awaiting-bookkeeping';
-        } else if (isSubmissionConfirmed(job) && (job.currentPhase === 'sending' || job.currentPhase === 'awaiting-submission-ack')) {
+        } else if (restoreAction === 1) {
             logQueueEvent(tabId, 'info', 'Recovered a command with confirmed submission; resuming wait instead of resending.', {
                 phase: job.currentPhase,
                 commandNumber: job.currentCommandNumber || 0,
@@ -1049,7 +1052,7 @@ function restoreDurableJobs(durableJobs) {
             });
             job.currentPhase = 'awaiting-response';
             job.deliveryState = job.deliveryState === 'active-response' ? 'active-response' : 'confirmed-submission';
-        } else if (job.currentPhase === 'sending' || job.currentPhase === 'awaiting-submission-ack' || job.deliveryState === 'pre-click' || job.deliveryState === 'unknown-acceptance') {
+        } else if (restoreAction === 3) {
             logQueueEvent(tabId, 'warn', 'Recovered a command that was not confirmed submitted; retrying it.', {
                 phase: job.currentPhase,
                 commandNumber: job.currentCommandNumber || 0,
@@ -2278,10 +2281,10 @@ function getQueueFailureDiagnostics(job, phase, diagnostics = {}, retryDecision 
 }
 
 function persistCommandDelivery(tabId, job, patch = {}) {
-    if (!job) return;
+    if (!job || jobs.get(tabId) !== job) return;
     Object.assign(job, patch);
     job.updatedAt = Date.now();
-    updateRunningJobsStorage({ force: true });
+    return updateRunningJobsStorage({ force: true });
 }
 
 function getRetryBackoffDelayMs(attemptCount, unlimited = false) {
@@ -2540,7 +2543,11 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
     const attempt = job.deliveryTimeoutAttempts;
     const maxAttempts = queueSettings.queueUnlimitedRetryWait ? Number.POSITIVE_INFINITY : 3;
 
-    if (attempt > maxAttempts) {
+    const initialRecovery = globalThis.CpoQueueEngine?.call('cpo_delivery_recovery', [0,
+        1 | (Number(!!waitResult?.details?.state?.hasTryAgainButton) << 1) |
+        (Number(!!queueSettings.queueUnlimitedRetryWait) << 6), attempt, 3]) ??
+        (attempt > maxAttempts ? 8 : waitResult?.details?.state?.hasTryAgainButton ? 1 : 2);
+    if (initialRecovery === 8) {
         logQueueEvent(tabId, 'error', `Exceeded maximum delivery timeout recovery attempts (${maxAttempts}) for command ${job.currentCommandNumber || '?'}/${totalMessages}.`, {
             commandNumber: job.currentCommandNumber || 0,
             totalMessages,
@@ -2555,8 +2562,7 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
     await updateRunningJobsStorage({ force: true });
 
     // Stage 1: In-page retry if a retry/regenerate button is currently present
-    const hasTryAgain = !!waitResult?.details?.state?.hasTryAgainButton;
-    if (hasTryAgain) {
+    if (initialRecovery === 1) {
         logQueueEvent(tabId, 'info', `Delivery timeout detected. Attempting in-page retry (attempt ${attempt}/${maxAttempts === Number.POSITIVE_INFINITY ? 'unlimited' : maxAttempts}) for command ${job.currentCommandNumber || '?'}/${totalMessages}.`, {
             commandNumber: job.currentCommandNumber || 0,
             totalMessages,
@@ -2647,8 +2653,20 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
     const reloadedState = inspect?.state || {};
     const lastAssistant = inspect?.lastAssistant || null;
 
+    const recoveryFlags = () => Number(jobs.get(tabId) === job && job.isRunning && !job.isStopped && !job.isPaused) |
+        (Number(!!(reloadedState.hasTryAgainButton || lastAssistant?.hasRetry)) << 1) |
+        (Number(!!(reloadedState.generating || reloadedState.deepResearchActive)) << 2) |
+        (Number(!!lastAssistant?.hasCompletedText) << 3) |
+        (Number(isSubmissionConfirmed(job)) << 4) | (Number(!!job.currentMessage) << 5);
+    const recoveryDecision = stage => {
+        const flags = recoveryFlags();
+        return globalThis.CpoQueueEngine?.call('cpo_delivery_recovery', [stage, flags, attempt, 3]) ??
+            (!(flags & 1) ? 0 : stage === 1 && (flags & 4) ? 3 :
+                stage < 3 && (flags & 8) ? 4 : stage < 3 && (flags & 2) ? 5 :
+                flags & 16 ? 6 : flags & 32 ? 7 : 8);
+    };
     // Case 0: Page reloaded and is actively generating
-    if (reloadedState.generating || reloadedState.deepResearchActive) {
+    if (recoveryDecision(1) === 3) {
         logQueueEvent(tabId, 'info', `ChatGPT resumed generating after reload for command ${job.currentCommandNumber || '?'}/${totalMessages}. Waiting for completion...`, {
             commandNumber: job.currentCommandNumber || 0,
             totalMessages
@@ -2678,7 +2696,7 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
     }
 
     // Case A: Completed on backend prior to or during reload
-    if (lastAssistant && lastAssistant.hasCompletedText) {
+    if (recoveryDecision(2) === 4) {
         logQueueEvent(tabId, 'success', `Response completed on backend prior to reload for command ${job.currentCommandNumber || '?'}/${totalMessages}. Advancing queue.`, {
             commandNumber: job.currentCommandNumber || 0,
             totalMessages,
@@ -2696,7 +2714,7 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
     }
 
     // Case B: Retry / Regenerate button present on reloaded page
-    if (reloadedState.hasTryAgainButton || lastAssistant?.hasRetry) {
+    if (recoveryDecision(2) === 5) {
         logQueueEvent(tabId, 'info', `Found Regenerate/Try Again button on reloaded page. Clicking for command ${job.currentCommandNumber || '?'}/${totalMessages}.`, {
             commandNumber: job.currentCommandNumber || 0,
             totalMessages
@@ -2737,7 +2755,9 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
     }
 
     // Case C: Turn not completed and no retry button.
-    if (isSubmissionConfirmed(job)) {
+    const finalRecovery = recoveryDecision(3);
+    if (finalRecovery === 0) return { action: 'return' };
+    if (finalRecovery === 6) {
         logQueueEvent(tabId, 'warn', `Delivery timeout recovery kept the confirmed command without resending.`, {
             commandNumber: job.currentCommandNumber || 0,
             totalMessages,
@@ -2749,7 +2769,7 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
         return { action: 'retry' };
     }
 
-    if (job.currentMessage) {
+    if (finalRecovery === 7) {
         logQueueEvent(tabId, 'info', `Re-submitting prompt after reload for command ${job.currentCommandNumber || '?'}/${totalMessages}.`, {
             commandNumber: job.currentCommandNumber || 0,
             totalMessages,
@@ -2862,6 +2882,7 @@ async function inspectTabCommandTurns(tabId, { expectedText, expectedFingerprint
  * @param {{ expectedText?: string, beforeSnapshot?: { userTurns?: Array<{ turnId?: string, matchedExpected?: boolean, fingerprint?: string }>, latestUserTurnId?: string|null, matchedUserTurnId?: string|null, conversationId?: string|null }, timeoutMs?: number, pollMs?: number }} [options]
  */
 async function waitForSubmissionAck(tabId, { expectedText, beforeSnapshot, timeoutMs, pollMs } = {}) {
+    await globalThis.CpoQueueEngine?.load();
     const job = jobs.get(tabId);
     const provider = getActiveProviderAdapter(job?.provider) || getActiveProviderAdapter('chatgpt');
     const timeout = Number(timeoutMs) > 0 ? Number(timeoutMs) : QUEUE_WAIT_POLICY.submissionAckTimeoutMs;
@@ -2871,19 +2892,24 @@ async function waitForSubmissionAck(tabId, { expectedText, beforeSnapshot, timeo
     const supportsTurnAck = provider?.supportsCommandTurnAck !== false;
 
     if (job) {
-        persistCommandDelivery(tabId, job, {
+        await persistCommandDelivery(tabId, job, {
             currentPhase: 'awaiting-submission-ack',
             deliveryState: 'unknown-acceptance'
         });
     }
 
-    while (Date.now() - startedAt <= timeout) {
+    while (true) {
         const liveJob = jobs.get(tabId);
-        if (liveJob && (liveJob.isStopped || liveJob.isPaused || !liveJob.isRunning)) {
+        const cancelled = !!(job && liveJob !== job) || !!(liveJob && (liveJob.isStopped || liveJob.isPaused || !liveJob.isRunning));
+        const elapsed = Date.now() - startedAt;
+        const poll = globalThis.CpoQueueEngine?.numeric('cpo_submission_poll', [elapsed, timeout, Number(cancelled)]) ??
+            (cancelled ? 2 : elapsed <= timeout ? 1 : 0);
+        if (poll === 0) break;
+        if (poll === 2) {
             return {
                 ok: false,
-                error: liveJob.isStopped ? 'Queue was stopped.' : 'Queue was paused.',
-                details: { failureClass: liveJob.isStopped ? 'user-stop' : 'non-retryable' }
+                error: !liveJob || liveJob.isStopped || liveJob !== job ? 'Queue was stopped.' : 'Queue was paused.',
+                details: { failureClass: !liveJob || liveJob.isStopped || liveJob !== job ? 'user-stop' : 'non-retryable' }
             };
         }
 
@@ -2893,14 +2919,20 @@ async function waitForSubmissionAck(tabId, { expectedText, beforeSnapshot, timeo
                 expectedFingerprint: liveJob?.commandFingerprint || fingerprintCommandTextForJob(expectedText)
             });
             const snapshot = inspected.snapshot || { userTurns: [] };
-            const matched = (snapshot.userTurns || []).find(turn => turn.matchedExpected && !beforeIds.has(turn.turnId)) ||
-                (snapshot.matchedUserTurnId && !beforeIds.has(snapshot.matchedUserTurnId)
-                    ? (snapshot.userTurns || []).find(turn => turn.turnId === snapshot.matchedUserTurnId)
-                    : null);
+            const accept = (turn, expected) => {
+                const flags = 1 | (Number(!!expected) << 1) | (Number(beforeIds.has(turn.turnId)) << 2) |
+                    (Number(!!turn.turnId) << 3);
+                return (globalThis.CpoQueueEngine?.call('cpo_submission_ack', [flags]) ??
+                    ((flags & 14) === 10 ? 1 : 0)) === 1;
+            };
+            const matched = (snapshot.userTurns || []).find(turn => accept(turn, turn.matchedExpected)) ||
+                (snapshot.matchedUserTurnId ? (snapshot.userTurns || []).find(turn =>
+                    turn.turnId === snapshot.matchedUserTurnId && accept(turn, true)) : null);
+            if (job && (jobs.get(tabId) !== job || job.isPaused || job.isStopped || !job.isRunning)) continue;
 
             if (matched) {
                 if (liveJob) {
-                    persistCommandDelivery(tabId, liveJob, {
+                    await persistCommandDelivery(tabId, liveJob, {
                         deliveryState: 'confirmed-submission',
                         submittedUserTurnId: matched.turnId,
                         submissionAckSource: inspected.source || 'user-turn',
@@ -2923,9 +2955,11 @@ async function waitForSubmissionAck(tabId, { expectedText, beforeSnapshot, timeo
             try {
                 const response = await sendTabMessage(tabId, { type: 'CHECK_GENERATION_STATE' });
                 const state = response?.state || {};
-                if (state.generating || state.deepResearchActive) {
+                const generating = !!(state.generating || state.deepResearchActive);
+                if (job && (jobs.get(tabId) !== job || job.isPaused || job.isStopped || !job.isRunning)) continue;
+                if ((globalThis.CpoQueueEngine?.call('cpo_submission_ack', [Number(generating) << 4]) ?? (generating ? 2 : 0)) === 2) {
                     if (liveJob) {
-                        persistCommandDelivery(tabId, liveJob, {
+                        await persistCommandDelivery(tabId, liveJob, {
                             deliveryState: 'confirmed-submission',
                             submissionAckSource: 'generation-started'
                         });
@@ -2959,6 +2993,7 @@ async function waitForSubmissionAck(tabId, { expectedText, beforeSnapshot, timeo
 
 async function sendPromptToSpecificTab(tabId, text) {
     try {
+        await globalThis.CpoQueueEngine?.load();
         let tabUrl = '';
         try {
             const tab = await getTab(tabId);
@@ -2981,12 +3016,20 @@ async function sendPromptToSpecificTab(tabId, text) {
             expectedFingerprint: job?.commandFingerprint || fingerprintCommandTextForJob(text)
         });
         if (job) {
-            persistCommandDelivery(tabId, job, {
+            await persistCommandDelivery(tabId, job, {
                 currentPhase: 'sending',
                 deliveryState: 'pre-click'
             });
         }
 
+        const ownsSubmission = () => !job || (jobs.get(tabId) === job && job.isRunning && !job.isStopped && !job.isPaused);
+        const stageDecision = (stage, flags) => globalThis.CpoQueueEngine?.call('cpo_submission_stage',
+            [stage, flags | Number(ownsSubmission())]) ??
+            (!ownsSubmission() ? 0 : stage === 0 ? 1 : stage === 1 && (flags & 4) ? 2 :
+                stage === 2 && (flags & 8) ? 3 : 0);
+        if (stageDecision(0, Number(!!beforeInspect.ok) << 1) !== 1) {
+            return { ok: false, error: 'Queue stopped or paused before submission.', details: { failureClass: 'non-retryable' } };
+        }
         const results = await executeScript({
             target: { tabId },
             func: async (msg, contract, providerName) => {
@@ -3316,10 +3359,10 @@ async function sendPromptToSpecificTab(tabId, text) {
 
         const result = results?.[0]?.result;
 
-        if (!result || !result.ok) {
+        if (stageDecision(1, Number(!!result?.ok) << 2) !== 2) {
             return {
                 ok: false,
-                error: result?.error || 'Could not send prompt.',
+                error: result?.error || 'Could not send prompt, or queue ownership changed.',
                 details: result?.details || {
                     compatibilityFailure: 'script-result',
                     scriptResultCount: Array.isArray(results) ? results.length : 0
@@ -3334,10 +3377,10 @@ async function sendPromptToSpecificTab(tabId, text) {
             pollMs: QUEUE_WAIT_POLICY.submissionAckPollMs
         });
 
-        if (!ack.ok) {
+        if (stageDecision(2, Number(!!ack.ok) << 3) !== 3) {
             return {
                 ok: false,
-                error: ack.error || 'Send was not acknowledged as a new user turn.',
+                error: ack.error || 'Send was not acknowledged as a new user turn, or queue ownership changed.',
                 details: {
                     ...(result.details || {}),
                     ...(ack.details || {}),
@@ -3952,11 +3995,17 @@ function updateRunningJobsStorage(options = {}) {
 
     updateQueueWakeAlarm(hasJobs);
 
-    if (pendingQueueState?.serialized === serialized) {
-        return queueStateWrite;
-    }
-
-    if (serialized === queueStateInFlightSerialized) {
+    const flags = Number(pendingQueueState?.serialized === serialized) |
+        (Number(serialized === queueStateInFlightSerialized) << 1) |
+        (Number(serialized === lastPersistedQueueState) << 2) |
+        (Number(queueStateInFlightSerialized === null) << 3) |
+        (Number(options.force === true) << 4) |
+        (Number(queueStateFlushTimer !== null) << 5);
+    const action = globalThis.CpoQueueEngine?.call('cpo_persist_action', [flags]) ??
+        ((flags & 1) ? (flags & 16 ? 2 : 0) : ((flags & 2) || (flags & 12) === 12) ? 1 :
+            (flags & 16) ? 2 : !(flags & 32) ? 3 : 4);
+    if (action === 0) return queueStateWrite;
+    if (action === 1) {
         pendingQueueState = null;
         if (queueStateFlushTimer !== null) {
             clearTimeout(queueStateFlushTimer);
@@ -3964,23 +4013,9 @@ function updateRunningJobsStorage(options = {}) {
         }
         return queueStateWrite;
     }
-
-    if (serialized === lastPersistedQueueState && queueStateInFlightSerialized === null) {
-        pendingQueueState = null;
-        if (queueStateFlushTimer !== null) {
-            clearTimeout(queueStateFlushTimer);
-            queueStateFlushTimer = null;
-        }
-        return queueStateWrite;
-    }
-
     pendingQueueState = { items, serialized };
-
-    if (options.force === true) {
-        return flushQueueState();
-    }
-
-    if (queueStateFlushTimer === null) {
+    if (action === 2) return flushQueueState();
+    if (action === 3) {
         queueStateFlushTimer = setTimeout(() => {
             queueStateFlushTimer = null;
             flushQueueState();
