@@ -712,10 +712,15 @@
             this._turnListCache = null;
             this._turnListCacheTimer = null;
             this._nativeMessageDiscovery = null;
+            this._nativeLifecycle = null;
         }
 
         setNativeMessageDiscovery(discover) {
             this._nativeMessageDiscovery = typeof discover === 'function' ? discover : null;
+        }
+
+        setNativeLifecycle(engine) {
+            this._nativeLifecycle = engine || null;
         }
 
         clearTurnListCache() {
@@ -732,6 +737,11 @@
 
         invalidateTurnScanCache(mutations) {
             if (!this._turnScanCacheEnabled) return;
+            const nativeStructural = this._nativeLifecycle?.mutations(mutations, 1, false, this);
+            if (nativeStructural != null) {
+                if (nativeStructural) this.clearTurnListCache();
+                return;
+            }
             const turnSelector = '[data-testid*="conversation-turn"], [data-message-author-role], [data-message-id], article';
             let structureChanged = false;
             // Deduplicate changed ancestors across large streaming mutation batches.
@@ -891,8 +901,10 @@
             const now = Date.now();
             const cache = this._turnListCache;
             if (this._turnScanCacheEnabled && cache?.doc === doc &&
-                now - cache.createdAt < 8000 &&
-                cache.nodes.every(node => node.isConnected !== false)) {
+                (this._nativeLifecycle?.cacheValid(1, cache.createdAt, true,
+                    cache.nodes.every(node => node.isConnected !== false), now) ??
+                 (now >= cache.createdAt && now - cache.createdAt < 8000 &&
+                    cache.nodes.every(node => node.isConnected !== false)))) {
                 return cache.nodes;
             }
             this.clearTurnListCache();
@@ -919,7 +931,7 @@
             }
             if (this._turnScanCacheEnabled) {
                 this._turnListCache = { doc, nodes, createdAt: now };
-                this._turnListCacheTimer = setTimeout(() => this.clearTurnListCache(), 8000);
+                this._turnListCacheTimer = setTimeout(() => this.clearTurnListCache(), this._nativeLifecycle?.cacheTtl(1) ?? 8000);
                 if (typeof this._turnListCacheTimer?.unref === 'function') this._turnListCacheTimer.unref();
             }
             return nodes;
