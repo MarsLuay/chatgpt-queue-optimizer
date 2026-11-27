@@ -334,11 +334,15 @@
             delete(tabId){
                 const handle=handles.get(tabId);
                 if(!handle)return false;
-                if(!broken)native(e=>e.cpo_live_delete(ids.get(handle)));
+                if(!broken&&core){
+                    try { native(e=>e.cpo_live_delete(ids.get(handle))); }
+                    finally { handles.delete(tabId); }
+                    return true;
+                }
                 return handles.delete(tabId);
             },
             clear(){for(const key of handles.keys())store.delete(key);},
-            canPersist(){return !broken&&!!(engine||core);},
+            canPersist(){return !broken&&!!core&&(!engine||engine===core);},
             revision(){return native(e=>e.cpo_live_epoch());},
             checkpoint(job){
                 const id=ids.get(job);

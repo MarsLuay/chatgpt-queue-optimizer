@@ -759,10 +759,10 @@ globalThis.CpoBrowserApi.listen(
         }
 
         if (code === 8) {
-            sendResponse({
-                ok: true,
-                jobs: getRunningJobsSnapshot()
-            });
+            if(!jobs.canPersist()){
+                const stored=await readLocalStorage(['runningJobs']);
+                sendResponse({ok:true,jobs:stored.runningJobs||{},nativeUnavailable:true});
+            }else sendResponse({ok:true,jobs:getRunningJobsSnapshot()});
             return true;
         }
 
@@ -900,6 +900,10 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
     nativeClickGrants.delete(tabId);
+    if(!jobs.canPersist()){
+        if(jobs.has(tabId))emergencyStopQueues(tabId);
+        return;
+    }
     if ((globalThis.CpoQueueEngine?.call('cpo_tab_close_action',[Number(jobs.has(tabId))]) ?? Number(jobs.has(tabId))) === 1) {
         const job = jobs.get(tabId);
         logQueueEvent(tabId, 'warn', 'ChatGPT tab closed while queue was active.', {
@@ -1073,7 +1077,20 @@ function restoreDurableJobs(durableJobs) {
         restoredJobs.push(job);
     }
     // Publish the reconstructed jobs only after the entire decode succeeds.
-    return restoredJobs.map(job=>{jobs.set(job.tabId,job);return jobs.get(job.tabId);});
+    const published=[];
+    try{
+        for(const job of restoredJobs){
+            jobs.set(job.tabId,job);
+            published.push(jobs.get(job.tabId));
+        }
+    }catch(error){
+        for(const job of published){
+            // On a trapped store the host handle can still be revoked.
+            for(const [tabId,owner] of jobs.entries())if(owner===job)jobs.delete(tabId);
+        }
+        throw error;
+    }
+    return published;
 }
 
 function logLegacyStaleRunningJobs() {
@@ -1565,8 +1582,49 @@ function handleRetryPausedJob(request, sendResponse) {
     sendResponse({ ok: true, tabId });
 }
 
+// An unavailable native engine cannot publish a live snapshot. Explicit
+// cancellation is still permitted by deleting only the requested persisted
+// records, after earlier writes settle. Never replay or reconstruct prompts here.
+function emergencyStopQueues(tabId, sendResponse=()=>{}) {
+    const all=tabId==null;
+    const found=all?jobs.size>0:jobs.has(tabId);
+    if(all){
+        nativeClickGrants.clear();
+        jobs.clear();
+    }else{
+        nativeClickGrants.delete(tabId);
+        jobs.delete(tabId);
+    }
+    pendingQueueState=null;
+    if(queueStateFlushTimer!==null){
+        clearTimeout(queueStateFlushTimer);
+        queueStateFlushTimer=null;
+    }
+    const operation=queueStateWrite.catch(()=>{}).then(async()=>{
+        const stored=await readLocalStorage([QUEUE_DURABLE_STATE_KEY,'runningJobs']);
+        const durable={...(stored[QUEUE_DURABLE_STATE_KEY]||{})};
+        const running={...(stored.runningJobs||{})};
+        const existed=found||Object.hasOwn(durable,tabId)||Object.hasOwn(running,tabId);
+        if(all){
+            for(const key of Object.keys(durable))delete durable[key];
+            for(const key of Object.keys(running))delete running[key];
+        }else{
+            delete durable[tabId];
+            delete running[tabId];
+        }
+        if(!all&&!existed)return {ok:false,error:'No running or paused queue found for this tab.'};
+        const isRunning=Object.keys(durable).length>0||Object.keys(running).length>0;
+        await writeLocalStorage({[QUEUE_DURABLE_STATE_KEY]:durable,runningJobs:running,isRunning});
+        updateQueueWakeAlarm(isRunning);
+        return all?{ok:true,stopped:'all'}:{ok:true,stopped:'selected',tabId};
+    });
+    queueStateWrite=operation.catch(error=>{console.warn('Emergency queue cancellation failed:',error);});
+    operation.then(sendResponse,error=>sendResponse({ok:false,error:String(error?.message||error)}));
+}
+
 function handleStopSequence(request, sendResponse) {
     const tabId = request.tabId;
+    if(tabId&&!jobs.canPersist()){emergencyStopQueues(tabId,sendResponse);return;}
 
     if (tabId && jobs.has(tabId)) {
         const job = jobs.get(tabId);
@@ -1593,6 +1651,7 @@ function handleStopSequence(request, sendResponse) {
 }
 
 function handleStopAllSequences(sendResponse) {
+    if(!jobs.canPersist()){emergencyStopQueues(null,sendResponse);return;}
     for (const [tabId, job] of jobs.entries()) {
         job.isRunning = false;
         job.isPaused = false;

@@ -358,3 +358,45 @@ test('native method paths, injection capability and completion transitions',{ski
     assert.equal(engine.call('cpo_async_transition',[0,1]),1);
     assert.equal(engine.call('cpo_async_transition',[1,2]),0);
 });
+
+test('native live jobs preserve queue order, revision and durable recovery schema',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    const jobs=engine.createLiveJobs();
+    jobs.set(17,{tabId:17,queue:['second','third'],runId:'run-17',
+        provider:'chatgpt',conversationType:'existing',conversationId:'abc',
+        targetKey:'chatgpt:c:abc',isRunning:true,isPaused:false,isStopped:false,
+        currentMessage:null,currentPhase:'queued',totalMessages:2,completedCount:0,
+        startedAt:1800000000000,updatedAt:1800000000000});
+    const job=jobs.get(17);
+    job.queue.unshift('first');
+    job.queue.splice(1,0,'next');
+    job.queue.push('last\ud800');
+    assert.deepEqual([...job.queue],['first','next','second','third','last\ud800']);
+    assert.equal(job.queue.shift(),'first');
+    assert.deepEqual([...job.queue],['next','second','third','last\ud800']);
+    const revision=jobs.revision();
+    job.isProcessing=true;
+    assert.equal(jobs.revision(),revision);
+    job.currentPhase='queued';
+    assert.equal(jobs.revision(),revision);
+    const checkpoint=jobs.checkpoint(job);
+    assert.deepEqual(checkpoint.queue,['next','second','third','last\ud800']);
+    assert.equal(checkpoint.totalMessages,4);
+    assert.deepEqual(jobs.checkpoint(job),checkpoint);
+    job.currentMessage=job.queue.shift();
+    assert.ok(jobs.revision()>revision);
+    const second=jobs.checkpoint(job);
+    assert.equal(second.currentMessage,'next');
+    assert.deepEqual(second.queue,['second','third','last\ud800']);
+    assert.deepEqual(checkpoint.queue,['next','second','third','last\ud800']);
+    assert.equal(engine.deserializeDurable(second,1800000000000,()=> 'replacement').ok,true);
+    jobs.delete(17);
+    jobs.set(17,{tabId:17,queue:['replacement'],isRunning:true});
+    job.currentMessage='stale';
+    job.queue.push('stale');
+    assert.deepEqual([...jobs.get(17).queue],['replacement']);
+    assert.notEqual(jobs.get(17),job);
+    jobs.clear();
+    assert.equal(jobs.size,0);
+});
