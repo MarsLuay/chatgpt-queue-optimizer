@@ -395,7 +395,8 @@ function applyAuthorizedConversationRebind(job, identity) {
         : `${job.provider}:${job.conversationType}`);
     job.rolloverToConversationId = job.conversationId;
     if (!job.rolloverRebindApplied) {
-        job.conversationGeneration = Number(job.conversationGeneration || 0) + 1;
+        const generation = Number(job.conversationGeneration || 0);
+        job.conversationGeneration = globalThis.CpoQueueEngine?.call('cpo_rollover_generation',[generation,0]) ?? generation + 1;
         job.rolloverRebindApplied = true;
     }
     job.rolloverStage = 'identity-confirmed';
@@ -404,6 +405,12 @@ function applyAuthorizedConversationRebind(job, identity) {
 }
 
 function isVerifiedFreshConversation(adapter, identity, fromConversationId, navigationStarted) {
+    const kind = identity?.type === 'existing' ? 1 : identity?.type === 'new' ? 2 : 0;
+    const flags = Number(adapter?.id === 'chatgpt' && identity?.provider === 'chatgpt') |
+        (Number(!!identity?.conversationId)<<1) | (Number(identity?.conversationId !== fromConversationId)<<2) |
+        (Number(!!fromConversationId)<<3) | (Number(navigationStarted === true)<<4);
+    const native = globalThis.CpoQueueEngine?.call('cpo_rollover_fresh',[kind,flags]);
+    if (native != null) return native === 1;
     if (adapter && typeof adapter.isFreshConversationIdentity === 'function' && adapter.isFreshConversationIdentity(identity, fromConversationId)) {
         return true;
     }
@@ -419,6 +426,7 @@ async function confirmFreshConversationIdentity(tabId, job, adapter, fromConvers
             return { ok: false, interrupted: true, identity: null };
         }
         const identity = await resolveTabConversationIdentity(tabId);
+        if (jobs.get(tabId) !== job || job.isStopped || job.isPaused || !job.isRunning) return { ok: false, interrupted: true, identity: null };
         if (isVerifiedFreshConversation(adapter, identity, fromConversationId, job.rolloverNavigationStarted)) {
             return { ok: true, identity };
         }
@@ -429,7 +437,8 @@ async function confirmFreshConversationIdentity(tabId, job, adapter, fromConvers
 }
 
 async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
-    if (!job || job.isStopped || job.isPaused || !job.isRunning) {
+    await globalThis.CpoQueueEngine?.load();
+    if (!job || jobs.get(tabId) !== job || job.isStopped || job.isPaused || !job.isRunning) {
         return { action: 'return' };
     }
 
@@ -439,7 +448,25 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
         : { ok: false, url: '', method: 'unsupported' };
     const newConversationUrl = startPlan?.url || (typeof adapter?.getNewConversationUrl === 'function' ? adapter.getNewConversationUrl() : '');
 
-    if (!adapter || typeof adapter.isFreshConversationIdentity !== 'function' || !newConversationUrl) {
+    const identityStages = new Set(['identity-confirmed','handoff-sending','handoff-waiting','handoff-established','resumed']);
+    const supported = !!(adapter && typeof adapter.isFreshConversationIdentity === 'function' && newConversationUrl);
+    const owned = () => jobs.get(tabId) === job && job.isRunning && !job.isStopped && !job.isPaused;
+    const rolloverNext = (stage, fresh = false, present = false) => {
+        const flags = Number(owned()) | (Number(supported)<<1) | (Number(!!job.rolloverInProgress)<<2) |
+            (Number(identityStages.has(job.rolloverStage))<<3) | (Number(!!job.rolloverRebindApplied)<<4) |
+            (Number(fresh)<<5) | (Number(!!job.rolloverNavigationStarted)<<6) |
+            (Number(!!job.handoffSubmitted)<<7) | (Number(!!job.handoffEstablished)<<8) | (Number(present)<<9);
+        return globalThis.CpoQueueEngine?.call('cpo_rollover_next',[stage,flags]) ??
+            (!(flags&1) ? 0 : !(flags&2) ? 1 : stage === 0 && !(flags&4) ? 2 :
+                stage <= 1 && (flags&24) !== 24 ? 3 :
+                stage === 2 && !(flags&32) ? (flags&64 ? 5 : 4) :
+                stage === 2 && !(flags&16) ? 6 :
+                stage === 3 ? (flags&256 ? 11 : flags&128 ? 10 : 7) :
+                stage === 4 ? (flags&512 ? 9 : 8) : 10);
+    };
+    const initialAction = rolloverNext(0);
+    if (initialAction === 0) return { action: 'return' };
+    if (initialAction === 1) {
         pauseJob(tabId, 'Conversation reached maximum length, but automatic rollover is unavailable for this provider.', {
             phase: 'rollover',
             failureClass: 'conversation-max-length'
@@ -447,7 +474,7 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
         return { action: 'return' };
     }
 
-    if (!job.rolloverInProgress) {
+    if (initialAction === 2) {
         job.rolloverInProgress = true;
         job.rolloverStage = 'detected';
         job.rolloverReason = 'conversation-max-length';
@@ -483,14 +510,15 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
     await updateRunningJobsStorage({ force: true });
 
     const fromConversationId = job.rolloverFromConversationId || null;
-    const identityStages = new Set(['identity-confirmed', 'handoff-sending', 'handoff-waiting', 'handoff-established', 'resumed']);
-
-    if (!identityStages.has(job.rolloverStage) || !job.rolloverRebindApplied) {
+    if (!owned()) return { action: 'return' };
+    if (rolloverNext(1) === 3) {
         const currentIdentity = await resolveTabConversationIdentity(tabId);
         const alreadyFresh = isVerifiedFreshConversation(adapter, currentIdentity, fromConversationId, job.rolloverNavigationStarted);
 
-        if (!alreadyFresh) {
-            if (!job.rolloverNavigationStarted) {
+        if (!owned()) return { action: 'return' };
+        const identityAction = rolloverNext(2, alreadyFresh);
+        if (identityAction === 4 || identityAction === 5) {
+            if (identityAction === 4) {
                 job.rolloverNavigationStarted = true;
                 job.rolloverStage = 'navigating';
                 job.updatedAt = Date.now();
@@ -502,6 +530,7 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
                     method: startPlan.method || 'route',
                     conversationGeneration: Number(job.conversationGeneration || 0)
                 });
+                if (!owned()) return { action: 'return' };
                 await updateTabUrl(tabId, newConversationUrl);
             }
 
@@ -510,7 +539,7 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
             await updateRunningJobsStorage({ force: true });
 
             const confirmed = await confirmFreshConversationIdentity(tabId, job, adapter, fromConversationId);
-            if (confirmed.interrupted || !jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+            if (confirmed.interrupted || jobs.get(tabId) !== job || job.isStopped || job.isPaused || !job.isRunning) {
                 return { action: 'return' };
             }
             if (!confirmed.ok) {
@@ -521,7 +550,7 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
                 return { action: 'return' };
             }
             applyAuthorizedConversationRebind(job, confirmed.identity);
-        } else if (!job.rolloverRebindApplied) {
+        } else if (identityAction === 6) {
             applyAuthorizedConversationRebind(job, currentIdentity);
         }
 
@@ -536,7 +565,16 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
         });
     }
 
-    if (!job.handoffEstablished) {
+    if (!owned()) return { action: 'return' };
+    const handoffAction = rolloverNext(3);
+    if (handoffAction === 7 || handoffAction === 10) {
+        // A persisted checkpoint is not permission to send into a different chat.
+        const validation = await validateJobTargetConversation(tabId, job);
+        if (!owned()) return { action: 'return' };
+        if (!validation.ok || (job.conversationId && validation.currentIdentity?.conversationId !== job.conversationId)) {
+            pauseJob(tabId, 'Rollover target identity could not be verified before handoff.', { phase: 'rollover-handoff', failureClass: 'conversation-max-length' });
+            return { action: 'return' };
+        }
         const remainingAfterCurrent = Math.max(0, (Array.isArray(job.queue) ? job.queue.length : 0));
         const handoffText = adapter.buildContinuationHandoffMessage({
             runId: job.runId,
@@ -548,7 +586,7 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
         });
         job.handoffFingerprint = job.handoffFingerprint || fingerprintCommandTextForJob(handoffText);
 
-        if (!job.handoffSubmitted) {
+        if (handoffAction === 7) {
             const inspect = await inspectTabCommandTurns(tabId, {
                 expectedText: handoffText,
                 expectedFingerprint: job.handoffFingerprint
@@ -560,9 +598,10 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
             job.updatedAt = Date.now();
             await updateRunningJobsStorage({ force: true });
 
-            if (!alreadyPresent) {
+            if (!owned()) return { action: 'return' };
+            if (rolloverNext(4,false,alreadyPresent) === 8) {
                 const sendResult = await sendPromptToSpecificTab(tabId, handoffText, job);
-                if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+                if (jobs.get(tabId) !== job || job.isStopped || job.isPaused || !job.isRunning) {
                     return { action: 'return' };
                 }
                 if (!sendResult.ok) {
@@ -591,7 +630,7 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
             maxWaitMs: Math.min(Number(QUEUE_WAIT_POLICY.responseMaxWaitMs) || 60000, 60000),
             checkIntervalMs: Number(QUEUE_WAIT_POLICY.checkIntervalMs) || 1000
         });
-        if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+        if (jobs.get(tabId) !== job || job.isStopped || job.isPaused || !job.isRunning) {
             return { action: 'return' };
         }
         if (!handoffWait.ok && !isConversationCapacityFailure(handoffWait)) {
@@ -615,6 +654,7 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
         });
     }
 
+    if (!owned() || rolloverNext(3) !== 11) return { action: 'return' };
     const preservedCurrent = job.currentMessage || null;
     const preservedCommandNumber = Number(job.currentCommandNumber || 0);
     if (preservedCurrent) {
@@ -3411,6 +3451,7 @@ async function sendPromptToSpecificTab(tabId, text, expectedJob = jobs.get(tabId
 }
 
 async function waitForTabResponse(tabId, context = {}) {
+    await globalThis.CpoQueueEngine?.load();
     const queueSettings = {
         ...QUEUE_SETTINGS_DEFAULTS,
         ...context.queueSettings
@@ -3596,7 +3637,13 @@ async function waitForTabResponse(tabId, context = {}) {
                         (typeof state.matchedError === 'string' && /delivery time(?:d\s*)?out/i.test(state.matchedError)) ||
                         (typeof state.errorSnippet === 'string' && /delivery time(?:d\s*)?out/i.test(state.errorSnippet));
 
-                    if (isDeliveryTimeout) {
+                    const failureFlags = Number(isDeliveryTimeout) |
+                        (Number(!!(state.conversationCapacityReached || state.requiresNewConversation || responseState?.source === 'conversation-max-length'))<<1) |
+                        (Number(!!(state.hasError || state.hasTryAgainButton || phase === 'error'))<<2) |
+                        (Number(phase === 'waiting-for-user')<<3) | (Number(phase === 'interrupted')<<4);
+                    const failure = globalThis.CpoQueueEngine?.call('cpo_wait_failure',[failureFlags]) ??
+                        (failureFlags&1 ? 1 : failureFlags&2 ? 2 : failureFlags&4 ? 3 : failureFlags&8 ? 4 : failureFlags&16 ? 5 : 0);
+                    if (failure === 1) {
                         clearInterval(checkInterval);
                         resolve({
                             ok: false,
@@ -3611,7 +3658,7 @@ async function waitForTabResponse(tabId, context = {}) {
                         return;
                     }
 
-                    if (state.conversationCapacityReached || state.requiresNewConversation || responseState?.source === 'conversation-max-length') {
+                    if (failure === 2) {
                         clearInterval(checkInterval);
                         resolve({
                             ok: false,
@@ -3628,7 +3675,7 @@ async function waitForTabResponse(tabId, context = {}) {
                         return;
                     }
 
-                    if (state.hasError || state.hasTryAgainButton || phase === 'error') {
+                    if (failure === 3) {
                         clearInterval(checkInterval);
                         resolve({
                             ok: false,
@@ -3644,7 +3691,7 @@ async function waitForTabResponse(tabId, context = {}) {
                         return;
                     }
 
-                    if (phase === 'waiting-for-user') {
+                    if (failure === 4) {
                         clearInterval(checkInterval);
                         resolve({
                             ok: false,
@@ -3658,7 +3705,7 @@ async function waitForTabResponse(tabId, context = {}) {
                         return;
                     }
 
-                    if (phase === 'interrupted') {
+                    if (failure === 5) {
                         clearInterval(checkInterval);
                         resolve({
                             ok: false,
@@ -3753,8 +3800,20 @@ async function waitForTabResponse(tabId, context = {}) {
 
                 const pageIsIdle = !state.generating && !deepResearchActive && phase !== 'active' && !incompleteToolTurn;
 
-                if (context.waitForExistingGeneration) {
-                    if (!pageIsIdle) {
+                const bindingMatches = !commandBinding.userTurnId || !responseState?.userTurnId ||
+                    responseState.userTurnId === commandBinding.userTurnId;
+                const settleFlags = Number(!!context.waitForExistingGeneration) | (Number(!pageIsIdle)<<1) |
+                    (Number(phase === 'transient-idle')<<2) | (Number(hasCommandBinding)<<3) |
+                    (Number(phase === 'terminal')<<4) | (Number(bindingMatches)<<5) |
+                    (Number(!!(sawGenerating || sawDeepResearch))<<6) | (Number(!phase)<<7) |
+                    (Number(incompleteToolTurn)<<8);
+                const settle = globalThis.CpoQueueEngine?.call('cpo_wait_settle',[settleFlags]) ??
+                    (context.waitForExistingGeneration ? (pageIsIdle ? 2 : 1) :
+                        !incompleteToolTurn && (phase === 'transient-idle' || (hasCommandBinding && !phase && pageIsIdle && !sawGenerating && !sawDeepResearch)) ? 3 :
+                        hasCommandBinding && phase === 'terminal' && bindingMatches && pageIsIdle ? 4 :
+                        !hasCommandBinding && (sawGenerating || sawDeepResearch) && pageIsIdle ? 5 : 0);
+                if (settle === 1 || settle === 2) {
+                    if (settle === 1) {
                         idleStreak = 0;
                         persistWaitSignals();
                         return;
@@ -3780,7 +3839,7 @@ async function waitForTabResponse(tabId, context = {}) {
                     return;
                 }
 
-                if (!incompleteToolTurn && (phase === 'transient-idle' || (hasCommandBinding && !phase && pageIsIdle && !sawGenerating && !sawDeepResearch))) {
+                if (settle === 3) {
                     terminalStreak = 0;
                     idleStreak = 0;
                     job.lastResponsePhase = phase || 'transient-idle';
@@ -3788,13 +3847,7 @@ async function waitForTabResponse(tabId, context = {}) {
                     return;
                 }
 
-                const boundTerminal = hasCommandBinding && phase === 'terminal' && (
-                    !commandBinding.userTurnId ||
-                    !responseState?.userTurnId ||
-                    responseState.userTurnId === commandBinding.userTurnId
-                );
-
-                if (boundTerminal) {
+                if (settle === 4) {
                     idleStreak = 0;
                     terminalStreak += 1;
                     job.lastResponsePhase = 'terminal';
@@ -3819,7 +3872,7 @@ async function waitForTabResponse(tabId, context = {}) {
                     return;
                 }
 
-                if (!hasCommandBinding && (sawGenerating || sawDeepResearch) && pageIsIdle) {
+                if (settle === 5) {
                     terminalStreak = 0;
                     idleStreak += 1;
                     persistWaitSignals();
