@@ -1009,7 +1009,7 @@ mod live_state {
                 let raw=self.get(n);
                 let fallback=match n{
                     "provider"=>b"\"chatgpt\"".as_slice(),
-                    "conversationType"=>if self.truth("conversationId"){b"\"existing\""}else{b"\"unknown\""},
+                    "conversationType"=>if self.truth("conversationId"){b"\"existing\"".as_slice()}else{b"\"unknown\"".as_slice()},
                     "conversationId"|"submittedUserTurnId"|"assistantTurnId"|"rolloverFromConversationId"|"rolloverToConversationId"=>NULL,
                     "isRunning"|"isPaused"|"isStopped"|"waitForIdleBeforeSend"|"retryExhausted"|"sawDeepResearch"|"sawGenerating"|"rolloverInProgress"|"rolloverNavigationStarted"|"rolloverRebindApplied"|"handoffSubmitted"|"handoffEstablished"=>FALSE,
                     "tabId"|"completedCount"|"currentCommandNumber"|"deliveryTimeoutAttempts"|"retryAttemptCount"|"nextRetryDelayMs"|"nextRetryAt"|"waitStartedAt"|"lastResearchProgressAt"|"conversationGeneration"|"startedAt"|"updatedAt"=>ZERO,
@@ -1021,7 +1021,7 @@ mod live_state {
                     let provider=self.get("provider");
                     let provider=if present(provider){provider}else{b"\"chatgpt\""};
                     let kind=self.get("conversationType");
-                    let kind=if present(kind){kind}else{if self.truth("conversationId"){b"\"existing\""}else{b"\"unknown\""}};
+                    let kind=if present(kind){kind}else{if self.truth("conversationId"){b"\"existing\"".as_slice()}else{b"\"unknown\"".as_slice()}};
                     let id=self.get("conversationId");
                     let body=|v:&[u8]|if v.first()==Some(&b'"')&&v.last()==Some(&b'"')&&v.len()>=2{Some(1..v.len()-1)}else{None};
                     let mut key=vec![b'"'];
