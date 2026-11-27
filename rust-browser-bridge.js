@@ -192,7 +192,7 @@
             if(!node||typeof node.getAttribute!=='function')return false;
             return this.invoke({node,selectors,states,normalize},(core,ctx)=>{
                 ctx.candidates=[node];
-                ctx.attrs=selectors.flatMap(selector=>selector.match(/\\[([^=\\]]+)/g)||[]).map(attr=>attr.slice(1));
+                ctx.attrs=selectors.flatMap(selector=>selector.match(/\[([^=\]]+)/g)||[]).map(attr=>attr.slice(1));
                 try{for(const candidate of node.querySelectorAll?.(selectors.join(','))||[])ctx.candidates.push(candidate);}catch{}
                 return core.cpo_dom_incomplete_tool(ctx.candidates.length)===1;
             });
