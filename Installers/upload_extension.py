@@ -295,33 +295,17 @@ def run_upload_workflow(
 
 
 def main(argv: list[str] | None = None) -> int:
-    default_root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo-dir", type=Path, default=default_root)
-    parser.add_argument(
-        "--local-only",
-        action="store_true",
-        help="Build and launch the temporary Firefox test without submitting to AMO.",
-    )
+    parser.add_argument("--repo-dir", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--local-only", action="store_true")
     args = parser.parse_args(argv)
-    repo_root = args.repo_dir.resolve()
-    if not (repo_root / "manifest.json").is_file():
-        log(f"manifest.json was not found in {repo_root}.")
-        return 1
-
-    global LOG_PATH
-    logs_dir = repo_root / "build" / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    LOG_PATH = logs_dir / "upload.log"
-    LOG_PATH.write_text("", encoding="utf-8")
-    log("Starting ChatGPT Queue + Optimizer upload workflow.")
-    try:
-        errors = run_upload_workflow(repo_root, upload=not args.local_only)
-    except Exception as error:
-        log(f"Upload workflow failed: {error}")
-        errors = [str(error)]
-    log(f"Workflow log: {LOG_PATH}")
-    return 1 if errors else 0
+    root = args.repo_dir.resolve()
+    command = ["cargo", "run", "--release", "--manifest-path",
+               str(root / "Installers" / "native" / "Cargo.toml"),
+               "--", "publish", "--repo-dir", str(root)]
+    if args.local_only:
+        command.append("--local-only")
+    return subprocess.call(command)
 
 
 if __name__ == "__main__":
