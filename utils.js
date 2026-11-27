@@ -95,6 +95,34 @@ function extensionApiPromise(callWithCallback, callWithoutCallback) {
     });
 }
 
+// Shared host ABI for browser API effects. Keep method access on the
+// browser side; WASM owns decisions and never receives privileged API objects.
+const CpoBrowserApi = Object.freeze({
+    invoke(operation, ...args) {
+        const operations = {
+            localGet:['storage','local','get'], localSet:['storage','local','set'],
+            syncGet:['storage','sync','get'], syncSet:['storage','sync','set'],
+            tabGet:['tabs','get'], tabQuery:['tabs','query'], tabUpdate:['tabs','update'],
+            tabCreate:['tabs','create'], tabSend:['tabs','sendMessage'],
+            runtimeSend:['runtime','sendMessage']
+        };
+        const path=operations[operation];
+        if(!path)return Promise.reject(new Error('Unknown browser API operation'));
+        const parent=path.slice(0,-1).reduce((value,key)=>value?.[key],globalThis.chrome);
+        const method=parent?.[path[path.length-1]];
+        if(typeof method!=='function')return Promise.reject(new Error('Browser API unavailable: '+operation));
+        // Firefox's Promise-only API is selected before invocation. Never
+        // repeat a potentially mutating request after an uncertain failure.
+        const browserParent=path.slice(0,-1).reduce((value,key)=>value?.[key],globalThis.browser);
+        const browserMethod=browserParent?.[path[path.length-1]];
+        if(typeof browserMethod==='function'){
+            try{return Promise.resolve(browserMethod.apply(browserParent,args));}
+            catch(error){return Promise.reject(error);}
+        }
+        return extensionApiPromise(done=>method.apply(parent,[...args,done]));
+    }
+});
+
 function isGeminiUrl(url) {
     return getUrlProvider(url) === 'gemini';
 }
@@ -105,6 +133,7 @@ function isClaudeUrl(url) {
 
 if (typeof globalThis !== 'undefined') {
     globalThis.extensionApiPromise = extensionApiPromise;
+    globalThis.CpoBrowserApi = CpoBrowserApi;
     globalThis.CHATGPT_HOSTS = CHATGPT_HOSTS;
     globalThis.GEMINI_HOSTS = GEMINI_HOSTS;
     globalThis.CLAUDE_HOSTS = CLAUDE_HOSTS;
@@ -127,6 +156,7 @@ if (typeof module !== 'undefined' && module.exports) {
         isChatGPTUrl,
         isGeminiUrl,
         isClaudeUrl,
-        extensionApiPromise
+        extensionApiPromise,
+        CpoBrowserApi
     };
 }
