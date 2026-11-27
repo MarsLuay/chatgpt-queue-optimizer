@@ -596,7 +596,15 @@ public static class QueueOptimizerFirefoxWindows {
                 if ($idLabels.Count -gt 1 -or $inspect.Count -gt 1 -or $remove.Count -gt 1 -or $reload.Count -gt 1) { break }
                 if ($ids.Count) {
                     if ($remove.Count -eq 1 -and $reload.Count -eq 1) {
-                        return @{ temporary=$true; remove=$remove[0] }
+                        # Firefox exposes the temporary extension's location in the debugging card.
+                        # Check both decoded URI and native Windows path, including jar:file URLs.
+                        $locationMatches=@($nodes | Where-Object {
+                            $value=[string]$_.Current.Name
+                            try { $value=[Uri]::UnescapeDataString($value) } catch {}
+                            $value=$value.Replace('/','\')
+                            $value.IndexOf($xpi,[StringComparison]::OrdinalIgnoreCase) -ge 0
+                        })
+                        return @{ temporary=$true; pathVerified=($locationMatches.Count -gt 0) }
                     }
                     if ($inspect.Count -eq 1) { return @{ temporary=$false } }
                 }
@@ -616,6 +624,7 @@ public static class QueueOptimizerFirefoxWindows {
     $stage='open Firefox internal setup page'
     Navigate-Internal $firstPage
     Wait-DebugPage
+    $previous=Find-DebugOptimizer
     # Let Firefox replace a temporary copy (or temporarily override a signed
     # copy) with the same Gecko ID. Never uninstall the existing add-on.
     function Resolve-InstallControl {
@@ -739,7 +748,7 @@ public static class QueueOptimizerFirefoxWindows {
     $null=Wait-For 'temporary add-on with the pinned Gecko ID' {
         if (Is-InternalPage $nav.window 'about:debugging') {
             $target=Find-DebugOptimizer
-            if ($target -and $target.temporary) { return $true }
+            if ($target -and $target.temporary -and ($target.pathVerified -or -not ($previous -and $previous.temporary))) { return $true }
         }
     } 30
     Write-Output "ChatGPT Queue + Optimizer temporary add-on is present in the opened Firefox profile (selected XPI version $version). Run this installer again after restarting Firefox."
