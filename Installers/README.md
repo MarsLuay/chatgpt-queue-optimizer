@@ -229,3 +229,5 @@ Use the Windows `.bat` or macOS `.app` when you want the repository to attempt l
 Use the Rust `package` command when you are preparing store submissions, testing the generated Firefox source manually, or need build artifacts without changing browser installation state.
 
 The removed Python build/packaging and managed-release scripts and the PowerShell coordinator are no longer needed. The remaining legacy cross-platform installer and optional Python upload helper invoke the Rust build/package commands directly. The native macOS launcher is generated locally, and `upload.app` must be rebuilt when its Rust implementation changes. Native source and integration verification must be completed on the target platforms.
+
+The tracked-file signing-key scanner and release regression tests are now native Rust. Run `cargo test --manifest-path Installers/native/Cargo.toml` and `cargo run --release --manifest-path Installers/native/Cargo.toml -- check-secrets --repo-root .`. The release tests use local disposable Git repositories and simulated submission, never a live AMO upload. Python release-test discovery is no longer required.

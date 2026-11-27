@@ -9,7 +9,7 @@ For normal extension development you need:
 - Git.
 - Node.js 18+ with npm, including the built-in `node --test` test runner.
 - Google Chrome for testing the primary Manifest V3 build.
-- Python 3 and Rust (rustup, with the `wasm32-unknown-unknown` target) for building the optimizer WASM and browser/store packages.
+- Rust (rustup, with the `wasm32-unknown-unknown` target) for building the optimizer WASM, browser/store packages, and native verification. Python is only needed by the remaining legacy installer helpers.
 - Firefox 140+ when testing the generated Firefox build.
 
 Install development dependencies from the repository root before running lint, typecheck, or the combined verification command:
@@ -47,7 +47,7 @@ npm run check
 - `npm test` maps to Node's built-in test runner (`node --test`).
 - `npm run lint` runs ESLint with correctness rules over extension sources, tests, provider adapters, and config files.
 - `npm run typecheck` runs checked JavaScript / JSDoc analysis (`allowJs` + `checkJs`) without converting the extension to TypeScript.
-- `npm run check` is the single local verification command: tests, lint, then typecheck.
+- `npm run check` runs the native tracked-file secret scanner, JavaScript tests, lint, and typecheck. Run `cargo test --manifest-path Installers/native/Cargo.toml` for native release and scanner tests.
 
 Use `npm ci` to install the locked development dependencies. Keep `package-lock.json` committed.
 

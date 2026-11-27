@@ -1,5 +1,8 @@
 #[cfg(windows)]
 mod windows_ui;
+mod secrets;
+#[cfg(test)]
+mod release_tests;
 use serde_json::{json, Value};
 use std::{env, fs, io::{self, Write, BufRead, BufReader}, path::{Path, PathBuf}, process::{Command, Stdio}, time::{SystemTime, UNIX_EPOCH}};
 use zip::{ZipWriter, write::FileOptions};
@@ -181,16 +184,49 @@ fn install(repo:&Path, browser:&str, paths:&[Option<String>;3], legacy_ui:bool)-
 fn npm()->Command{
     if cfg!(windows){Command::new("npm.cmd")}else{Command::new("npm")}
 }
+
+fn local_firefox_command(repo:&Path,source:&Path)->Command{
+    let mut command=npm();
+    command.current_dir(repo).args(["exec","--yes","--package=web-ext@10.7.0","--","web-ext","run","--source-dir"]).arg(source)
+        .args(["--no-config-discovery","--start-url","https://chatgpt.com/"]).env_remove("WEB_EXT_API_KEY").env_remove("WEB_EXT_API_SECRET");
+    command
+}
+fn amo_command(repo:&Path,source:&Path,artifacts:&Path,key:&str,secret:&str)->Command{
+    let mut command=npm();
+    command.current_dir(repo).args(["exec","--yes","--package=web-ext@10.7.0","--","web-ext","sign","--source-dir"]).arg(source)
+        .arg("--artifacts-dir").arg(artifacts).args(["--channel","listed","--approval-timeout","0","--no-input","--no-config-discovery"])
+        .env("WEB_EXT_API_KEY",key).env("WEB_EXT_API_SECRET",secret);
+    command
+}
+fn redact_release_output(bytes:&[u8],key:&str,secret:&str)->String{
+    let text=String::from_utf8_lossy(bytes);
+    let mut values=[key,secret];values.sort_by_key(|v|std::cmp::Reverse(v.len()));
+    let mut result=String::new();let mut offset=0;
+    while offset<text.len(){
+        let remaining=&text[offset..];
+        if let Some(value)=values.iter().find(|v|!v.is_empty()&&remaining.starts_with(**v)){
+            result.push_str("[redacted]");offset+=value.len();
+        }else{let ch=remaining.chars().next().unwrap();result.push(ch);offset+=ch.len_utf8();}
+    }
+    result
+}
+fn read_credentials_with(mut key:String,mut secret:String,interactive:bool,mut prompt:impl FnMut(&str)->Result<String>)->Result<(String,String)>{
+    if key.trim().is_empty()||secret.trim().is_empty(){
+        if !interactive{return Err(err("AMO credentials must be configured in the environment for noninteractive publishing"));}
+        if key.trim().is_empty(){key=prompt("AMO API key (hidden): ")?;}
+        if secret.trim().is_empty(){secret=prompt("AMO API secret (hidden): ")?;}
+    }
+    if key.trim().is_empty()||secret.trim().is_empty(){return Err(err("Both AMO credentials are required"));}
+    Ok((key.trim().to_owned(),secret.trim().to_owned()))
+}
 fn publish(repo:&Path,local_only:bool,configured:Option<(String,String)>)->Result<()>{
     let version=package(repo)?;
     let source=repo.join("build/firefox-src");let artifacts=repo.join("build/amo-artifacts");
     fs::create_dir_all(&artifacts)?;
     let logs=repo.join("build/logs");fs::create_dir_all(&logs)?;
     let output=fs::File::create(logs.join("upload-firefox-test.log"))?;
-    let mut command=npm();
-    command.current_dir(repo).args(["exec","--yes","--package=web-ext@10.7.0","--","web-ext","run","--source-dir"]).arg(&source)
-        .args(["--no-config-discovery","--start-url","https://chatgpt.com/"]).env_remove("WEB_EXT_API_KEY").env_remove("WEB_EXT_API_SECRET")
-        .stdin(Stdio::null()).stdout(Stdio::from(output.try_clone()?)).stderr(Stdio::from(output));
+    let mut command=local_firefox_command(repo,&source);
+    command.stdin(Stdio::null()).stdout(Stdio::from(output.try_clone()?)).stderr(Stdio::from(output));
     #[cfg(windows)] {use std::os::windows::process::CommandExt;command.creation_flags(0x00000200);}
     let managed=configured.is_some();
     let mut child=command.spawn()?;fs::write(logs.join("upload-firefox-test.pid"),format!("{}\n",child.id()))?;
@@ -211,10 +247,8 @@ fn publish(repo:&Path,local_only:bool,configured:Option<(String,String)>)->Resul
     // Never expose signing secrets on a command line or in raw logs.
     let (key,secret)=match configured{Some(values)=>values,None=>credentials()?};
     if key.trim().is_empty()||secret.trim().is_empty(){return Err(err("Set WEB_EXT_API_KEY and WEB_EXT_API_SECRET before explicit publishing."));}
-    let result=npm().current_dir(repo).args(["exec","--yes","--package=web-ext@10.7.0","--","web-ext","sign","--source-dir"]).arg(&source)
-        .arg("--artifacts-dir").arg(&artifacts).args(["--channel","listed","--approval-timeout","0","--no-input","--no-config-discovery"])
-        .env("WEB_EXT_API_KEY",&key).env("WEB_EXT_API_SECRET",&secret).output()?;
-    let redact=|bytes:&[u8]|String::from_utf8_lossy(bytes).replace(key.as_str(),"[redacted]").replace(secret.as_str(),"[redacted]");
+    let result=amo_command(repo,&source,&artifacts,&key,&secret).output()?;
+    let redact=|bytes:&[u8]|redact_release_output(bytes,&key,&secret);
     let message=format!("{}\n{}",redact(&result.stdout),redact(&result.stderr));
     fs::write(logs.join("upload.log"),&message)?;println!("{message}");
     if !result.status.success(){return Err(err("AMO submission failed; see redacted upload.log"));}
@@ -229,18 +263,29 @@ fn git_output(repo:&Path,args:&[&str])->Result<String>{
 }
 fn credentials()->Result<(String,String)>{
     use std::io::IsTerminal;
-    let mut key=env::var("WEB_EXT_API_KEY").unwrap_or_default();
-    let mut secret=env::var("WEB_EXT_API_SECRET").unwrap_or_default();
+    let key=env::var("WEB_EXT_API_KEY").unwrap_or_default();
+    let secret=env::var("WEB_EXT_API_SECRET").unwrap_or_default();
     if key.trim().is_empty()||secret.trim().is_empty(){
-        if !io::stdin().is_terminal(){return Err(err("AMO credentials must be configured in the environment for noninteractive publishing"));}
         println!("Create AMO credentials at https://addons.mozilla.org/developers/addon/api/key/");
-        if key.trim().is_empty(){key=rpassword::prompt_password("AMO API key (hidden): ")?;}
-        if secret.trim().is_empty(){secret=rpassword::prompt_password("AMO API secret (hidden): ")?;}
     }
-    if key.trim().is_empty()||secret.trim().is_empty(){return Err(err("Both AMO credentials are required"));}
-    Ok((key.trim().to_owned(),secret.trim().to_owned()))
+    read_credentials_with(key,secret,io::stdin().is_terminal(),|prompt|Ok(rpassword::prompt_password(prompt)?))
 }
 fn managed_publish(repo:&Path)->Result<()>{
+    managed_publish_with(repo,||{
+        secrets::require_clean(repo)?;
+        package(repo)?;
+        checked(npm().current_dir(repo).args(["ci","--ignore-scripts","--no-audit","--no-fund"]))?;
+        checked(npm().current_dir(repo).args(["run","check"]))?;
+        checked(Command::new("cargo").current_dir(repo).args(["test","--manifest-path","Installers/native/Cargo.toml"]))?;
+        for (_,source) in MODULES{
+            let executable=repo.join("build").join(format!("release-test-{}{}",source.trim_end_matches(".rs"),env::consts::EXE_SUFFIX));
+            checked(Command::new("rustc").current_dir(repo).args(["--edition=2021","--test"]).arg(repo.join("rust").join(source)).arg("-o").arg(&executable))?;
+            checked(&mut Command::new(&executable))?;
+        }
+        Ok(())
+    },credentials,|values|publish(repo,false,Some(values)))
+}
+fn managed_publish_with(repo:&Path,preflight:impl FnOnce()->Result<()>,get_credentials:impl FnOnce()->Result<(String,String)>,submit:impl FnOnce((String,String))->Result<()>)->Result<()>{
     let top=PathBuf::from(git_output(repo,&["rev-parse","--show-toplevel"])?).canonicalize()?;
     if top!=repo||git_output(repo,&["branch","--show-current"])?!="main"{
         return Err(err("Publishing requires the intended checkout root and main branch"));
@@ -250,19 +295,9 @@ fn managed_publish(repo:&Path)->Result<()>{
     git_output(repo,&["remote","get-url","origin"])?;
     checked(Command::new("git").current_dir(repo).args(["pull","--ff-only","origin","main"]))?;
     if !clean()?.is_empty(){return Err(err("Working tree changed while pulling main"));}
-    // Rebuild after pull, and run the existing compatibility checks before
-    // touching the release version. The final signed package is rebuilt.
-    package(repo)?;
-    checked(npm().current_dir(repo).args(["ci","--ignore-scripts","--no-audit","--no-fund"]))?;
-    checked(npm().current_dir(repo).args(["run","check"]))?;
-    checked(Command::new("cargo").current_dir(repo).args(["test","--manifest-path","Installers/native/Cargo.toml"]))?;
-    for (_,source) in MODULES{
-        let executable=repo.join("build").join(format!("release-test-{}{}",source.trim_end_matches(".rs"),env::consts::EXE_SUFFIX));
-        checked(Command::new("rustc").current_dir(repo).args(["--edition=2021","--test"]).arg(repo.join("rust").join(source)).arg("-o").arg(&executable))?;
-        checked(&mut Command::new(&executable))?;
-    }
+    preflight()?;
     if !clean()?.is_empty(){return Err(err("Preflight produced unexpected tracked changes"));}
-    let (key,secret)=credentials()?;
+    let credentials=get_credentials()?;
     let path=repo.join("manifest.json");
     let original=fs::read_to_string(&path)?;
     let mut base:Value=serde_json::from_str(&original)?;
@@ -270,7 +305,7 @@ fn managed_publish(repo:&Path)->Result<()>{
     let next=next_patch_version(version)?;
     base["version"]=json!(next);
     fs::write(&path,serde_json::to_string_pretty(&base)?+"\n")?;
-    let submission=publish(repo,false,Some((key,secret)));
+    let submission=submit(credentials);
     if let Err(e)=submission{
         eprintln!("Keeping the bumped manifest because submission may already have started. Inspect AMO and git status before retrying.");
         return Err(e);
@@ -345,7 +380,7 @@ fn run()->Result<()>{
     let action=args.next().unwrap_or_else(||"package".into());
     let mut repo=None;let mut browser=String::new();let mut paths=[None,None,None];let mut local_only=false;let mut legacy_ui=false;
     while let Some(arg)=args.next(){match arg.as_str(){
-        "--repo-dir"=>repo=Some(PathBuf::from(args.next().ok_or_else(||err("Missing repository path"))?)),
+        "--repo-dir"|"--repo-root"=>repo=Some(PathBuf::from(args.next().ok_or_else(||err("Missing repository path"))?)),
         "--browser"|"-Browser"=>browser=args.next().ok_or_else(||err("Missing browser"))?,
         "--firefox-path"|"-FirefoxPath"=>paths[0]=Some(args.next().ok_or_else(||err("Missing Firefox path"))?),
         "--chromium-path"|"-ChromiumPath"=>paths[1]=Some(args.next().ok_or_else(||err("Missing Chromium path"))?),
@@ -353,6 +388,11 @@ fn run()->Result<()>{
         "--local-only"=>local_only=true,"--legacy-ui"|"-LegacyUI"=>legacy_ui=true,_=>return Err(err(format!("Unknown argument: {arg}")))
     }}
     let repo=repo.unwrap_or_else(||PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")).canonicalize()?;
+    if action=="check-secrets"{
+        let status=secrets::run(&repo);
+        if status!=0{std::process::exit(status);}
+        return Ok(());
+    }
     if !repo.join("manifest.json").is_file(){return Err(err("Missing extension manifest"));}
     match action.as_str(){"package"=>{package(&repo)?;},"build"=>build_only(&repo)?,"install"=>install(&repo,&browser,&paths,legacy_ui)?,
         "native-ui"=>{
@@ -363,7 +403,7 @@ fn run()->Result<()>{
             }
             #[cfg(not(windows))]{return Err(err("Native Windows UI Automation requires Windows"));}
         },
-        "publish"=>publish(&repo,local_only,None)?, "managed-publish"=>managed_publish(&repo)?, "install-upload-launcher"=>install_upload_launcher(&repo)?,_=>return Err(err("Expected build, package, install, native-ui, publish, managed-publish or install-upload-launcher"))}
+        "publish"=>publish(&repo,local_only,None)?, "managed-publish"=>managed_publish(&repo)?, "install-upload-launcher"=>install_upload_launcher(&repo)?,_=>return Err(err("Expected build, package, install, native-ui, publish, managed-publish, install-upload-launcher or check-secrets"))}
     Ok(())
 }
 fn main(){if let Err(error)=run(){eprintln!("[ERROR] {error}");std::process::exit(1);}}

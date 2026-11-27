@@ -58,3 +58,7 @@ Please report security issues privately instead of opening a public issue.
 3. Allow reasonable time for a fix before public disclosure.
 
 We will acknowledge valid reports and coordinate a fix and disclosure timeline.
+
+## Tracked signing-key guard
+
+Run `cargo run --release --manifest-path Installers/native/Cargo.toml -- check-secrets --repo-root .` to inspect Git-tracked working-tree files for PEM private-key headers. It streams file contents, skips symlinks, rejects paths outside the repository, and reports paths only. Exit status 1 indicates prohibited material; 2 indicates inspection failure. The scanner is also part of CI, `npm run check`, and managed release preflight. It does not inspect Git history or untracked files, and is not a general-purpose credential detector.

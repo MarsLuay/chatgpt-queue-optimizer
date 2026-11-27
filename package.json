@@ -6,7 +6,8 @@
     "test": "node --test",
     "lint": "eslint .",
     "typecheck": "tsc --project jsconfig.json",
-    "check": "npm test && npm run lint && npm run typecheck"
+    "check:secrets": "cargo run --release --manifest-path Installers/native/Cargo.toml -- check-secrets --repo-root .",
+    "check": "npm run check:secrets && npm test && npm run lint && npm run typecheck"
   },
   "license": "ISC",
   "devDependencies": {
