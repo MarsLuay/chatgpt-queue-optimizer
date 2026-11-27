@@ -1037,66 +1037,80 @@ function restoreDurableJobs(durableJobs) {
     const restoredJobs = [];
 
     for (const rawJob of Object.values(durableJobs || {})) {
-        if (!rawJob || !rawJob.tabId) continue;
+        let job;
+        const decoded = globalThis.CpoQueueEngine?.deserializeDurable(rawJob, Date.now(), createRunId);
+        if (decoded != null) {
+            if (!decoded.ok) {
+                // Never auto-run malformed persisted prompts or delivery state.
+                console.warn('CPO: durable queue restore skipped:', decoded.error);
+                continue;
+            }
+            job = decoded.value;
+        } else {
+            if (!rawJob || !rawJob.tabId) continue;
 
-        const tabId = Number(rawJob.tabId);
-        const queue = Array.isArray(rawJob.queue)
-            ? rawJob.queue.map(message => String(message || '').trim()).filter(Boolean)
-            : [];
-        const currentMessage = String(rawJob.currentMessage || '').trim() || null;
+            const tabId = Number(rawJob.tabId);
+            const queue = Array.isArray(rawJob.queue)
+                ? rawJob.queue.map(message => String(message || '').trim()).filter(Boolean)
+                : [];
+            const currentMessage = String(rawJob.currentMessage || '').trim() || null;
 
-        const eligible = globalThis.CpoQueueEngine?.numeric('cpo_restore_eligible', [tabId, queue.length, Number(!!currentMessage), Number(rawJob.isStopped === true)]);
-        if (eligible == null ? (!Number.isSafeInteger(tabId) || tabId <= 0 || rawJob.isStopped === true || (!currentMessage && queue.length === 0)) : eligible === 0) continue;
+            const eligible = globalThis.CpoQueueEngine?.numeric('cpo_restore_eligible', [tabId, queue.length, Number(!!currentMessage), Number(rawJob.isStopped === true)]);
+            if (eligible == null ? (!Number.isSafeInteger(tabId) || tabId <= 0 || rawJob.isStopped === true || (!currentMessage && queue.length === 0)) : eligible === 0) continue;
+            if (jobs.has(tabId)) continue;
+
+            const provider = rawJob.provider || 'chatgpt';
+            const conversationId = rawJob.conversationId || null;
+            const conversationType = rawJob.conversationType || (conversationId ? 'existing' : (rawJob.targetKey === 'chatgpt:new' ? 'new' : 'unknown'));
+            const targetKey = rawJob.targetKey || (conversationId ? `${provider}:c:${conversationId}` : `${provider}:${conversationType}`);
+
+            job = {
+                tabId,
+                provider,
+                conversationId,
+                conversationType,
+                targetKey,
+                queue,
+                currentMessage,
+                isRunning: rawJob.isRunning !== false && rawJob.isPaused !== true,
+                isPaused: rawJob.isPaused === true,
+                isStopped: false,
+                pausedReason: rawJob.pausedReason || '',
+                lastError: rawJob.lastError || '',
+                runId: rawJob.runId || createRunId(),
+                totalMessages: Number(rawJob.totalMessages || 0),
+                completedCount: Number(rawJob.completedCount || 0),
+                currentCommandNumber: Number(rawJob.currentCommandNumber || 0),
+                currentPhase: rawJob.currentPhase || (rawJob.waitForIdleBeforeSend ? 'waiting-for-idle' : (currentMessage ? 'waiting' : 'queued')),
+                waitForIdleBeforeSend: rawJob.waitForIdleBeforeSend === true,
+                deliveryTimeoutAttempts: Number(rawJob.deliveryTimeoutAttempts || 0),
+                retryAttemptCount: Number(rawJob.retryAttemptCount || 0),
+                lastRetryableReason: String(rawJob.lastRetryableReason || ''),
+                retryClass: String(rawJob.retryClass || ''),
+                retryMode: rawJob.retryMode === 'unlimited' ? 'unlimited' : (rawJob.retryMode === 'finite' ? 'finite' : ''),
+                nextRetryDelayMs: Number(rawJob.nextRetryDelayMs || 0),
+                nextRetryAt: Number(rawJob.nextRetryAt || 0),
+                retryExhausted: rawJob.retryExhausted === true,
+                waitStartedAt: Number(rawJob.waitStartedAt || 0),
+                lastResearchProgressAt: Number(rawJob.lastResearchProgressAt || 0),
+                sawDeepResearch: rawJob.sawDeepResearch === true,
+                sawGenerating: rawJob.sawGenerating === true,
+                deliveryState: rawJob.deliveryState || '',
+                commandId: rawJob.commandId || '',
+                commandFingerprint: rawJob.commandFingerprint || '',
+                submittedUserTurnId: rawJob.submittedUserTurnId || null,
+                assistantTurnId: rawJob.assistantTurnId || null,
+                submissionAckSource: rawJob.submissionAckSource || '',
+                terminalAckSource: rawJob.terminalAckSource || '',
+                lastResponsePhase: rawJob.lastResponsePhase || '',
+                ...copyRolloverFields(rawJob),
+                startedAt: Number(rawJob.startedAt || Date.now()),
+                updatedAt: Number(rawJob.updatedAt || Date.now())
+            };
+
+        }
+        const tabId = job.tabId;
         if (jobs.has(tabId)) continue;
-
-        const provider = rawJob.provider || 'chatgpt';
-        const conversationId = rawJob.conversationId || null;
-        const conversationType = rawJob.conversationType || (conversationId ? 'existing' : (rawJob.targetKey === 'chatgpt:new' ? 'new' : 'unknown'));
-        const targetKey = rawJob.targetKey || (conversationId ? `${provider}:c:${conversationId}` : `${provider}:${conversationType}`);
-
-        const job = {
-            tabId,
-            provider,
-            conversationId,
-            conversationType,
-            targetKey,
-            queue,
-            currentMessage,
-            isRunning: rawJob.isRunning !== false && rawJob.isPaused !== true,
-            isPaused: rawJob.isPaused === true,
-            isStopped: false,
-            pausedReason: rawJob.pausedReason || '',
-            lastError: rawJob.lastError || '',
-            runId: rawJob.runId || createRunId(),
-            totalMessages: Number(rawJob.totalMessages || 0),
-            completedCount: Number(rawJob.completedCount || 0),
-            currentCommandNumber: Number(rawJob.currentCommandNumber || 0),
-            currentPhase: rawJob.currentPhase || (rawJob.waitForIdleBeforeSend ? 'waiting-for-idle' : (currentMessage ? 'waiting' : 'queued')),
-            waitForIdleBeforeSend: rawJob.waitForIdleBeforeSend === true,
-            deliveryTimeoutAttempts: Number(rawJob.deliveryTimeoutAttempts || 0),
-            retryAttemptCount: Number(rawJob.retryAttemptCount || 0),
-            lastRetryableReason: String(rawJob.lastRetryableReason || ''),
-            retryClass: String(rawJob.retryClass || ''),
-            retryMode: rawJob.retryMode === 'unlimited' ? 'unlimited' : (rawJob.retryMode === 'finite' ? 'finite' : ''),
-            nextRetryDelayMs: Number(rawJob.nextRetryDelayMs || 0),
-            nextRetryAt: Number(rawJob.nextRetryAt || 0),
-            retryExhausted: rawJob.retryExhausted === true,
-            waitStartedAt: Number(rawJob.waitStartedAt || 0),
-            lastResearchProgressAt: Number(rawJob.lastResearchProgressAt || 0),
-            sawDeepResearch: rawJob.sawDeepResearch === true,
-            sawGenerating: rawJob.sawGenerating === true,
-            deliveryState: rawJob.deliveryState || '',
-            commandId: rawJob.commandId || '',
-            commandFingerprint: rawJob.commandFingerprint || '',
-            submittedUserTurnId: rawJob.submittedUserTurnId || null,
-            assistantTurnId: rawJob.assistantTurnId || null,
-            submissionAckSource: rawJob.submissionAckSource || '',
-            terminalAckSource: rawJob.terminalAckSource || '',
-            lastResponsePhase: rawJob.lastResponsePhase || '',
-            ...copyRolloverFields(rawJob),
-            startedAt: Number(rawJob.startedAt || Date.now()),
-            updatedAt: Number(rawJob.updatedAt || Date.now())
-        };
 
         job.totalMessages = getTotalMessages(job);
 
@@ -4174,6 +4188,13 @@ function getDurableJobsState() {
     const state = {};
 
     for (const [tabId, job] of jobs.entries()) {
+        const projected = globalThis.CpoQueueEngine?.projectDurable(job);
+        if (projected?.ok) {
+            state[tabId] = projected.value;
+            continue;
+        }
+        // Preserve live jobs using the established projection on engine failure
+        // or unexpected in-memory values rather than dropping a checkpoint.
         const provider = job.provider || 'chatgpt';
         const conversationId = job.conversationId || null;
         const conversationType = job.conversationType || (conversationId ? 'existing' : 'unknown');
