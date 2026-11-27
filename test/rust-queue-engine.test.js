@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 21);
+    assert.equal(e.cpo_queue_abi(), 22);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -646,4 +646,26 @@ test('bulk queue operations commit one revision and use native dispatch',{skip},
     assert.equal(engine.confirmed(job),0);
     assert.throws(()=>job.queue.push('valid',123),/string/);
     assert.deepEqual([...job.queue],['a2','insert','b','c','d']);
+});
+
+
+test('native worker processing lease, response samples and checkpoint revisions',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    const jobs=engine.createLiveJobs();
+    jobs.set(1,{tabId:1,queue:['a','b'],isRunning:true});
+    const job=jobs.get(1),rev=jobs.revision();
+    assert.equal(jobs.processing(job,0),1);assert.equal(jobs.processing(job,0),0);
+    assert.equal(jobs.revision(),rev);assert.equal(jobs.processing(job,5),2);
+    assert.equal(jobs.processing(job,1),1);assert.equal(jobs.processing(job,4),1);
+    const e=instance.exports;
+    const cursor=e.cpo_background_wait_sample(0,3,2);
+    assert.equal(cursor>>>30,0);assert.equal(e.cpo_background_wait_sample(cursor,3,2)>>>30,1);
+    assert.equal(e.cpo_background_checkpoint_update(rev,0),3);
+    assert.equal(e.cpo_background_checkpoint_update(rev,1),2);
+    assert.equal(e.cpo_background_checkpoint(0,0),1);
+    assert.equal(e.cpo_background_checkpoint(1,rev),1);
+    assert.equal(e.cpo_background_checkpoint(3,rev),1);
+    assert.equal(e.cpo_background_checkpoint(4,rev),1);
+    assert.equal(e.cpo_background_checkpoint_update(rev,0),1);
 });

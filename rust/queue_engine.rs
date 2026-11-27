@@ -2,6 +2,8 @@
 
 mod browser_api;
 mod queue_schema;
+mod background_controller;
+pub use background_controller::*;
 use queue_schema::DURABLE_FIELDS;
 use browser_api::API_EVENTS;
 pub use browser_api::{cpo_api_mode,cpo_api_path,cpo_injection_route,cpo_async_transition};
@@ -1038,6 +1040,24 @@ mod live_state {
             self.changed(id);
             u32::try_from(self.output.len()).ok().and_then(|v|v.checked_add(1)).unwrap_or(0)
         }
+        fn processing(&mut self,id:u32,op:u32)->u32{
+            let Some(job)=self.jobs.get_mut(&id)else{return 0;};
+            let slot=super::DURABLE_FIELDS.len();
+            let active=job.truth("isRunning")&&!job.truth("isPaused")&&!job.truth("isStopped");
+            match op{
+                0 if active&&!job.fields[slot].as_deref().is_some_and(present)=>{
+                    job.fields[slot]=Some(TRUE.to_vec());1
+                },
+                1=>{job.fields[slot]=Some(FALSE.to_vec());1},
+                2=>active as u32,
+                3=>if job.truth("isStopped"){1}else if !job.truth("isPaused")&&job.remaining()==0{2}else{0},
+                4=>(active&&!job.fields[slot].as_deref().is_some_and(present)) as u32,
+                5=>job.remaining(),
+                6=>job.total(),
+                7=>if job.truth("isPaused"){1}else if job.truth("isRunning"){2}else if job.truth("isStopped"){3}else{0},
+                _=>0
+            }
+        }
         fn decision(&self,id:u32,kind:u32,confirmed:u32)->u32 {
             let Some(j)=self.jobs.get(&id) else{return u32::MAX;};
             match kind {
@@ -1239,6 +1259,10 @@ mod live_state {
     #[no_mangle]
     pub extern "C" fn cpo_live_decision(id:u32,kind:u32,confirmed:u32)->u32{
         STORE.with(|s|s.borrow().decision(id,kind,confirmed))
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_live_processing(id:u32,op:u32)->u32{
+        STORE.with(|s|s.borrow_mut().processing(id,op))
     }
     #[no_mangle]
     pub extern "C" fn cpo_live_transaction(id:u32,op:u32,arg:u32,now:f64)->u32{

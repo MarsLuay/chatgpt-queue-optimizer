@@ -35,3 +35,4 @@ node_modules/
 /content.js
 /popup.js
 /rust-browser-bridge.js
+/background.js

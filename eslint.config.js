@@ -115,6 +115,7 @@ module.exports = [
             'content.js',
             'popup.js',
             'rust-browser-bridge.js',
+            'background.js',
             'utils.js',
             'history-viewer.js',
             'history-store.js',
