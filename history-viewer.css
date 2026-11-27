@@ -1,0 +1,13 @@
+:root{color-scheme:light dark;font:16px/1.55 system-ui,sans-serif}
+body{margin:0}
+main{max-width:880px;margin:32px auto;padding:0 20px}
+h1{font-size:1.6rem}
+.actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:16px 0}
+button{font:inherit;padding:8px 12px;border:1px solid GrayText;border-radius:6px;cursor:pointer}
+button:disabled{cursor:default;opacity:.5}
+#status{min-height:2em;overflow-wrap:anywhere}
+#page{min-width:10em;text-align:center}
+.turn{border:1px solid GrayText;border-radius:8px;margin:12px 0;padding:16px}
+.turn h2{font-size:1rem;margin:0 0 8px}
+.turn p{white-space:pre-wrap;overflow-wrap:anywhere;margin:0}
+.turn .notice{font-size:.85rem;margin-top:8px;color:GrayText}
