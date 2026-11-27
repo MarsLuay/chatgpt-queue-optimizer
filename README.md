@@ -44,7 +44,7 @@ See [Installers/README.md](Installers/README.md) for installer details and gener
 
 ### Manual Chrome install
 
-1. Clone or download this repository.
+1. Clone or download this repository, then run `python Installers/build_optimizer.py` to generate the local Rust WASM module.
 2. Open `chrome://extensions`.
 3. Enable **Developer mode**.
 4. Click **Load unpacked**.
@@ -100,6 +100,10 @@ If you enable unlimited retry/wait, a queue can remain active for much longer du
 ## Optimizer
 
 The **Optimizer Tool** limits how much conversation UI stays loaded at once in long chats.
+
+The window policy is now implemented in dependency-free Rust (`rust/optimizer_core.rs`), compiled into local WebAssembly and lazily loaded on supported ChatGPT routes. The popup statistics identify Rust/WASM or the compatible JavaScript fallback. Only integer counts cross the boundary; the module does not retain conversation text or DOM objects. Actual browser DOM and React allocations remain browser-owned, so this initial migration does not establish a reduction in page RAM. The queue and browser integration still use JavaScript.
+
+Packaging automatically compiles the module using `rustc`; install Rust through rustup if needed. The build installs the `wasm32-unknown-unknown` target when missing.
 
 Settings auto-save:
 
