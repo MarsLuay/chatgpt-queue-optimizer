@@ -228,7 +228,7 @@ async function validateJobTargetConversation(tabId, job) {
     if(jobs.get(tabId)!==job)return {ok:false,reason:'Queue owner changed during conversation validation.',currentIdentity};
 
     if (!job.provider) {
-        job.provider = currentIdentity.provider || 'chatgpt';
+        jobs.transaction(job,0,0,{provider:currentIdentity.provider||'chatgpt'});
     }
 
     if (job.rolloverInProgress) {
@@ -239,11 +239,7 @@ async function validateJobTargetConversation(tabId, job) {
                 applyAuthorizedConversationRebind(job, currentIdentity);
                 await updateRunningJobsStorage({ force: true });
             } else if (job.conversationType === 'new' && currentIdentity.type === 'existing' && currentIdentity.conversationId) {
-                job.conversationId = currentIdentity.conversationId;
-                job.conversationType = 'existing';
-                job.targetKey = currentIdentity.key;
-                job.rolloverToConversationId = currentIdentity.conversationId;
-                job.updatedAt = Date.now();
+                jobs.transaction(job,0,0,{conversationId:currentIdentity.conversationId,conversationType:'existing',targetKey:currentIdentity.key,rolloverToConversationId:currentIdentity.conversationId});
                 await updateRunningJobsStorage({ force: true });
             }
             return { ok: true, currentIdentity, rolloverRebind: true };
@@ -396,19 +392,7 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
     }
 
     if (initialAction === 2) {
-        job.rolloverInProgress = true;
-        job.rolloverStage = 'detected';
-        job.rolloverReason = 'conversation-max-length';
-        job.rolloverFromConversationId = job.conversationId || job.rolloverFromConversationId || null;
-        job.rolloverToConversationId = null;
-        job.rolloverNavigationStarted = false;
-        job.rolloverRebindApplied = false;
-        job.handoffSubmitted = false;
-        job.handoffEstablished = false;
-        job.handoffFingerprint = '';
-        job.currentPhase = 'rollover-in-progress';
-        job.retryClass = 'conversation-max-length';
-        job.updatedAt = Date.now();
+        jobs.transaction(job,0,0,{rolloverInProgress:true,rolloverStage:'detected',rolloverReason:'conversation-max-length',rolloverFromConversationId:job.conversationId||job.rolloverFromConversationId||null,rolloverToConversationId:null,rolloverNavigationStarted:false,rolloverRebindApplied:false,handoffSubmitted:false,handoffEstablished:false,handoffFingerprint:'',currentPhase:'rollover-in-progress',retryClass:'conversation-max-length'});
         await updateRunningJobsStorage({ force: true });
         logQueueEvent(tabId, 'warn', 'Conversation capacity reached; starting automatic rollover.', {
             event: 'conversation-capacity-reached',
@@ -425,9 +409,7 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
         job.retryClass = 'conversation-max-length';
     }
 
-    resetCommandDeliveryState(job);
-    resetCommandRetryState(job);
-    resetWaitTracking(job);
+    jobs.transaction(job,1,7);
     await updateRunningJobsStorage({ force: true });
 
     const fromConversationId = job.rolloverFromConversationId || null;
@@ -543,8 +525,7 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
             job.handoffSubmitted = true;
             job.rolloverStage = 'handoff-waiting';
             job.updatedAt = Date.now();
-            resetCommandDeliveryState(job);
-            resetWaitTracking(job);
+            jobs.transaction(job,1,6);
             await updateRunningJobsStorage({ force: true });
         }
 
@@ -590,9 +571,7 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
         job.currentCommandNumber = 0;
     }
 
-    resetCommandDeliveryState(job);
-    resetCommandRetryState(job);
-    resetWaitTracking(job);
+    jobs.transaction(job,1,7);
     job.rolloverInProgress = false;
     job.rolloverStage = 'resumed';
     job.rolloverNavigationStarted = false;
@@ -963,7 +942,7 @@ function restoreDurableJobs(durableJobs) {
         if(!decoded.ok){console.warn('CPO: durable queue restore skipped:',decoded.error);continue;}
         const job=decoded.value;
         const tabId = job.tabId;
-        if (jobs.has(tabId)||restoredJobs.some(existing=>existing.tabId===tabId)) continue;
+        if (jobs.has(tabId)||restoredJobs.some(existing=>existing.job.tabId===tabId)) continue;
 
         job.totalMessages = getTotalMessages(job);
 
@@ -973,8 +952,7 @@ function restoreDurableJobs(durableJobs) {
         const restoreAction = globalThis.CpoQueueEngine?.restoreAction(job, confirmed);
         if(restoreAction==null)throw new Error('Native recovery classification unavailable.');
         if (restoreAction === 2) {
-            job.currentPhase = 'terminal';
-            job.deliveryState = 'terminal-awaiting-bookkeeping';
+            // The published native job applies this recovery transition.
         } else if (restoreAction === 1) {
             logQueueEvent(tabId, 'info', 'Recovered a command with confirmed submission; resuming wait instead of resending.', {
                 phase: job.currentPhase,
@@ -982,8 +960,6 @@ function restoreDurableJobs(durableJobs) {
                 totalMessages: getTotalMessages(job),
                 ...collectDeliveryDiagnostics(job)
             });
-            job.currentPhase = 'awaiting-response';
-            job.deliveryState = job.deliveryState === 'active-response' ? 'active-response' : 'confirmed-submission';
         } else if (restoreAction === 3) {
             logQueueEvent(tabId, 'warn', 'Recovered a command that was not confirmed submitted; retrying it.', {
                 phase: job.currentPhase,
@@ -991,22 +967,18 @@ function restoreDurableJobs(durableJobs) {
                 totalMessages: getTotalMessages(job),
                 ...collectDeliveryDiagnostics(job)
             });
-            job.queue.unshift(job.currentMessage);
-            job.currentMessage = null;
-            job.currentCommandNumber = 0;
-            job.currentPhase = 'queued';
-            resetWaitTracking(job);
-            resetCommandDeliveryState(job);
         }
 
-        restoredJobs.push(job);
+        restoredJobs.push({job,restoreAction});
     }
     // Publish the reconstructed jobs only after the entire decode succeeds.
     const published=[];
     try{
-        for(const job of restoredJobs){
+        for(const {job,restoreAction} of restoredJobs){
             jobs.set(job.tabId,job);
-            published.push(jobs.get(job.tabId));
+            const owner=jobs.get(job.tabId);
+            published.push(owner);
+            if(restoreAction)jobs.transaction(owner,11,restoreAction);
         }
     }catch(error){
         for(const job of published){
@@ -1873,12 +1845,7 @@ async function handleProcessSending(tabId, job) {
         return { action: 'return' };
     }
 
-    job.currentPhase = 'awaiting-response';
-    job.deliveryState = 'confirmed-submission';
-    job.submittedUserTurnId = sendResult.details?.userTurnId || job.submittedUserTurnId || null;
-    job.submissionAckSource = sendResult.details?.submissionAckSource || job.submissionAckSource || '';
-    job.commandFingerprint = sendResult.details?.commandFingerprint || job.commandFingerprint;
-    job.updatedAt = Date.now();
+    jobs.transaction(job,0,0,{currentPhase:'awaiting-response',deliveryState:'confirmed-submission',submittedUserTurnId:sendResult.details?.userTurnId||job.submittedUserTurnId||null,submissionAckSource:sendResult.details?.submissionAckSource||job.submissionAckSource||'',commandFingerprint:sendResult.details?.commandFingerprint||job.commandFingerprint});
     await updateRunningJobsStorage({ force: true });
 
     logQueueEvent(tabId, 'success', `Submitted command ${job.currentCommandNumber}/${totalMessages}.`, {
@@ -3803,12 +3770,13 @@ function createScheduledAlarm(item) {
 async function persistScheduledItem(nextItem) {
     return withScheduledStorageLock(async () => {
         const items = await readScheduledMessages();
-        const index = items.indexOf(findScheduledItem(items,nextItem.id));
-        if (index >= 0) {
-            items[index] = nextItem;
-        } else {
-            items.push(nextItem);
+        const previous=findScheduledItem(items,nextItem.id);
+        const index=items.indexOf(previous);
+        if(nextItem.status==='completed'||nextItem.status==='failed'){
+            if(!previous||previous.status!=='firing')throw new Error('Scheduled claim changed before settlement; no record overwritten.');
         }
+        if(index>=0)items[index]=nextItem;
+        else items.push(nextItem);
         await writeScheduledMessages(items);
         notifyRuntime({
             action: 'scheduledMessagesUpdated',

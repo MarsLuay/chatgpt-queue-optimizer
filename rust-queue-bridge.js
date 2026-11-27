@@ -218,6 +218,7 @@
     function createLiveJobs() {
         const handles = new Map();
         const ids = new WeakMap();
+        const ownerTabs=new WeakMap();
         let engine = null, broken = false;
         const encoder = new TextEncoder(), decoder = new TextDecoder();
         const NONE = 0xffffffff;
@@ -257,8 +258,8 @@
         }
         function transaction(job,op,arg=0,patch={},now=Date.now()){
             const id=ids.get(job);
-            if(!id||!Array.from(handles.values()).includes(job))throw new Error('Retired native job transaction');
-            return native(e=>{
+            if(!id||handles.get(ownerTabs.get(job))!==job)throw new Error('Retired native job transaction');
+            const accepted=native(e=>{
                 const entries=Object.entries(patch).map(([key,value])=>{
                     const field=fields.get(key);if(field===undefined||field===queueField)throw new Error('Invalid job patch field: '+key);
                     return [field,value===undefined?new Uint8Array(0):encoder.encode(JSON.stringify(value))];
@@ -268,9 +269,10 @@
                 const view=new DataView(e.memory.buffer,ptr,length);
                 const out=new Uint8Array(e.memory.buffer,ptr,length);let offset=0;
                 for(const [field,bytes] of entries){view.setUint32(offset,field,true);view.setUint32(offset+4,bytes.length,true);out.set(bytes,offset+8);offset+=8+bytes.length;}
-                if(e.cpo_live_transaction(id,op,arg,now)!==1)throw new Error('Native job transaction rejected');
-                return true;
+                return e.cpo_live_transaction(id,op,arg,now)===1;
             });
+            if(!accepted)throw new Error('Native job transaction rejected');
+            return true;
         }
         function makeJob(tabId, id, initial) {
             let handle;
@@ -317,6 +319,7 @@
                 has(_target,key){return active()&&fields.has(key);}
             });
             ids.set(handle,id);
+            ownerTabs.set(handle,tabId);
             // Populate before publication; failed initialization never replaces a live owner.
             for(const [key,value] of Object.entries(initial)){
                 if(key==='queue'){

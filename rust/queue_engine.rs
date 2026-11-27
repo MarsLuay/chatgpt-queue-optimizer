@@ -1015,7 +1015,22 @@ mod live_state {
                     "tabId"|"completedCount"|"currentCommandNumber"|"deliveryTimeoutAttempts"|"retryAttemptCount"|"nextRetryDelayMs"|"nextRetryAt"|"waitStartedAt"|"lastResearchProgressAt"|"conversationGeneration"|"startedAt"|"updatedAt"=>ZERO,
                     _=>EMPTY
                 };
-                emit(&mut out,n,if present(raw){raw}else{fallback});
+                if n=="targetKey"&&!present(raw){
+                    // Reconstruct the canonical key from already escaped JSON
+                    // string fragments, preserving Unicode and lone surrogates.
+                    let provider=self.get("provider");
+                    let provider=if present(provider){provider}else{b"\"chatgpt\""};
+                    let kind=self.get("conversationType");
+                    let kind=if present(kind){kind}else{if self.truth("conversationId"){b"\"existing\""}else{b"\"unknown\""}};
+                    let id=self.get("conversationId");
+                    let body=|v:&[u8]|if v.first()==Some(&b'"')&&v.last()==Some(&b'"')&&v.len()>=2{Some(1..v.len()-1)}else{None};
+                    let mut key=vec![b'"'];
+                    if let Some(range)=body(provider){key.extend_from_slice(&provider[range]);}
+                    key.push(b':');
+                    if present(id){key.extend_from_slice(b"c:");if let Some(range)=body(id){key.extend_from_slice(&id[range]);}}
+                    else if let Some(range)=body(kind){key.extend_from_slice(&kind[range]);}
+                    key.push(b'"');emit(&mut out,n,&key);
+                }else{emit(&mut out,n,if present(raw){raw}else{fallback});}
             }
             let status=if self.truth("isPaused"){"paused"}else if self.truth("isRunning"){"running"}else if self.truth("isStopped"){"stopped"}else{"idle"};
             emit(&mut out,"status",&quoted(status));
@@ -1154,6 +1169,12 @@ mod live_state {
                 9=>{ // authorized rollover rebind, generation advances once
                     if !job.truth("rolloverInProgress"){return false;}
                     for name in ["provider","conversationId","conversationType","targetKey"]{if value(name).is_none(){return false;}}
+                    let target_id=value("conversationId").unwrap();
+                    let kind=match value("conversationType").unwrap(){b"\"existing\""=>1,b"\"new\""=>2,_=>0};
+                    let flags=(value("provider")==Some(b"\"chatgpt\"".as_slice())) as u32
+                        |((present(target_id) as u32)<<1)|(((target_id!=job.get("rolloverFromConversationId")) as u32)<<2)
+                        |((job.truth("rolloverFromConversationId") as u32)<<3)|((job.truth("rolloverNavigationStarted") as u32)<<4);
+                    if super::cpo_rollover_fresh(kind,flags)!=1{return false;}
                     for name in ["provider","conversationId","conversationType","targetKey"]{job.set(name,value(name).unwrap());}
                     let id=job.get("conversationId").to_vec();job.set("rolloverToConversationId",&id);
                     if !job.truth("rolloverRebindApplied"){let n=job.num("conversationGeneration").saturating_add(1);job.set("conversationGeneration",n.to_string().as_bytes());job.set("rolloverRebindApplied",TRUE);}
@@ -1163,10 +1184,18 @@ mod live_state {
                     if job.confirmed()||!job.truth("currentMessage"){return false;}
                     job.requeue();job.set("currentPhase",b"\"queued\"");
                 },
+                11=>{ // reconcile decoded checkpoint after publication
+                    match arg{
+                        1 if job.confirmed()=>{job.set("currentPhase",b"\"awaiting-response\"");if job.get("deliveryState")!=b"\"active-response\""{job.set("deliveryState",b"\"confirmed-submission\"");}},
+                        2=>{job.set("currentPhase",b"\"terminal\"");job.set("deliveryState",b"\"terminal-awaiting-bookkeeping\"");},
+                        3 if !job.confirmed()&&job.truth("currentMessage")=>{job.requeue();job.set("currentPhase",b"\"queued\"");job.reset(6);},
+                        _=>return false
+                    }
+                },
                 _=>return false
             }
             if op==0{for (i,v) in fields{job.fields[i]=v;}}
-            if op!=1{job.set("updatedAt",time.as_bytes());}
+            if op!=1&&op!=11{job.set("updatedAt",time.as_bytes());}
             self.changed(id);true
         }
         fn read(&mut self, id: u32, field: u32, index: u32) -> u32 {

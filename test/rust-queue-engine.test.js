@@ -469,4 +469,44 @@ test('native sequence names, ordered variable collection, keyboard and date poli
     assert.equal(engine.timestampMath(4,0,1800000000000,60000),1800000060000);
 });
 
-// Native queue transaction regression coverage is exercised by the Rust test module and the WASM integration suite.
+
+test('native job transactions retain confirmed prompts, revisions and snapshot privacy',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    const jobs=engine.createLiveJobs();
+    jobs.set(1,{tabId:1,provider:'chatgpt',conversationType:'new',targetKey:'chatgpt:new',queue:['a🌍','b'],currentMessage:null,isRunning:true,isPaused:false,isStopped:false,totalMessages:2,completedCount:0,runId:'r'});
+    const job=jobs.get(1);
+    let epoch=jobs.revision();
+    jobs.transaction(job,2,0,{currentMessage:'secret'});
+    assert.equal(jobs.revision(),epoch+1);
+    assert.deepEqual([...job.queue],['secret','a🌍','b']);
+    assert.equal(job.totalMessages,3);
+    jobs.transaction(job,7,0,{currentMessage:'secret',commandId:'r:1',commandFingerprint:engine.fingerprint('secret')});
+    assert.equal(job.currentMessage,'secret');
+    const snapshot=jobs.runningSnapshot()[1];
+    assert.equal(snapshot.currentMessageLength,6);
+    assert.equal(snapshot.nextMessageLength,3);
+    assert.equal(snapshot.remaining,3);
+    assert.equal(Object.hasOwn(snapshot,'currentMessage'),false);
+    jobs.transaction(job,0,0,{deliveryState:'confirmed-submission',submittedUserTurnId:'turn-1'});
+    jobs.transaction(job,4,0,{pausedReason:'error'});
+    assert.equal(job.currentMessage,'secret');
+    assert.deepEqual([...job.queue],['a🌍','b']);
+    jobs.transaction(job,5);
+    assert.equal(job.currentPhase,'awaiting-response');
+    jobs.transaction(job,3);
+    assert.equal(job.completedCount,1);
+    assert.equal(job.currentMessage,null);
+    assert.equal(job.deliveryState,'');
+    assert.equal(job.queue.length,2);
+    assert.equal(engine.classifyFailure('wait','DELIVERY TIMEOUT',{}).class,'timeout');
+    assert.equal(engine.classifyFailure('send','queue was stopped',{}).retryable,false);
+    assert.equal(engine.bindingDecision({provider:'chatgpt',conversationType:'existing',conversationId:'a'},{provider:'chatgpt',type:'existing',conversationId:'b'}),5);
+    const scheduled={status:'pending',dueTs:1000};
+    assert.equal(engine.scheduledMutation(4,scheduled,999),false);
+    assert.equal(engine.scheduledMutation(4,scheduled,1000),true);
+    assert.equal(scheduled.status,'firing');
+    assert.equal(engine.scheduledMutation(7,scheduled,1001),true);
+    assert.equal(scheduled.completedAt,1001);
+});
+
