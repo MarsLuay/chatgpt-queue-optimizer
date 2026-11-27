@@ -62,7 +62,7 @@
       this.nativeMemoryBytes = 0;
       /** @type {ReturnType<ChatGPTOptimizer['sampleResources']> | null} */
       this.resourceSample = null;
-      /** @type {Promise<void> | null} */
+      /** @type {Promise<boolean> | null} */
       this.nativeCoreLoading = null;
 
       this.provider = this.resolveProvider();
@@ -113,18 +113,29 @@
 
       if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
         globalThis.CpoBrowserApi.listen(async(message,sender,sendResponse)=>{
-          const kinds={CHECK_GENERATION_STATE:1,GET_COMMAND_TURN_SNAPSHOT:1,GET_COMMAND_RESPONSE_STATE:1,
-            INSPECT_GENERATION_STATE:1,CLICK_RETRY_BUTTON:2,NATIVE_SUBMIT_PROMPT:2,
-            CPO_HISTORY_BATCH:3,CAN_DISCARD_INACTIVE_TAB:4};
-          const kind=kinds[message?.type];
+          const queue=globalThis.CpoQueueEngine;
+          const queueReady=await queue?.load();
+          const code=queueReady?queue.eventCode(0,message?.type):0;
+          if(!code){
+            // The only operation permitted without native routing is to
+            // reveal content and report that the engine is unavailable.
+            if(message?.type==='TOGGLE_OPTIMIZER'&&this.config.enabled){
+              this.config.enabled=false;this.unbindOptimizer();this.saveConfig();
+              sendResponse({success:true,enabled:false});return;
+            }
+            sendResponse({ok:false,safe:false,error:'Required Rust event router unavailable or unknown message.'});return;
+          }
+          const kind=queue.call('cpo_content_event_kind',[code]);
+          if(kind==null){sendResponse({ok:false,safe:false,error:'Native event classification failed.'});return;}
           if(kind){
-            const [browserReady,queueReady]=await Promise.all([this.loadRustBrowserEngine(),globalThis.CpoQueueEngine?.load()]);
+            const browserReady=await this.loadRustBrowserEngine();
             if(!browserReady||this.browserEngine?.eventReady(kind,queueReady)!==true){
               sendResponse({ok:false,safe:false,error:'Required Rust browser event engine unavailable.'});
               return;
             }
           }
-          this.handleMessage(message,sender,sendResponse);
+          this.handleMessage(message,sender,sendResponse,code);
+
         });
       }
     }
@@ -154,24 +165,20 @@
      * @param {chrome.runtime.MessageSender} sender
      * @param {(response?: ContentScriptResponse) => void} sendResponse
      */
-    handleMessage(message, sender, sendResponse) {
-      // Queue-only providers load browser execution only on demand.
-      if (['CHECK_GENERATION_STATE','GET_COMMAND_TURN_SNAPSHOT','GET_COMMAND_RESPONSE_STATE','INSPECT_GENERATION_STATE','CLICK_RETRY_BUTTON'].includes(message.type)) {
-        this.loadRustBrowserEngine();
-      }
-      switch (message.type) {
-        case 'GET_NATIVE_SUBMISSION_CAPABILITY':
+    handleMessage(message, sender, sendResponse, code = globalThis.CpoQueueEngine?.eventCode(0,message?.type)) {
+      switch (code) {
+        case 1:
           Promise.resolve(this.loadRustBrowserEngine()).then(ready =>
             sendResponse({ ok: !!ready && !!this.provider && !!this.browserEngine?.exports, nativeSubmission: !!ready && !!this.provider && !!this.browserEngine?.exports }),
             () => sendResponse({ ok: false, nativeSubmission: false }));
           break;
 
-        case 'NATIVE_SUBMIT_PROMPT':
+        case 2:
           this.performNativeSubmission(message).then(sendResponse, () =>
             sendResponse({ ok: false, error: 'Native submission failed.', details: { failureClass: 'submission-unconfirmed' } }));
           break;
 
-        case 'TOGGLE_OPTIMIZER':
+        case 3:
           if (!this.provider?.supportsOptimizer) {
             sendResponse({ success: false, enabled: false, unsupported: true, provider: this.provider?.id || null });
             break;
@@ -180,7 +187,7 @@
           sendResponse({ success: true, enabled: this.config.enabled });
           break;
 
-        case 'UPDATE_CONFIG': {
+        case 4: {
           if (['windowSize', 'adaptiveBudget', 'resourceBudget'].some(key =>
               Object.prototype.hasOwnProperty.call(message.config || {}, key) &&
               message.config[key] !== this.config[key])) {
@@ -208,16 +215,16 @@
           break;
         }
 
-        case 'CPO_HISTORY_BATCH':
+        case 5:
           try { sendResponse(this.captureHistoryBatch(message)); }
           catch { sendResponse({ ok: false, error: 'History capture failed.' }); }
           break;
 
-        case 'CAN_DISCARD_INACTIVE_TAB':
+        case 6:
           sendResponse({ safe: this.canDiscardInactiveTab() });
           break;
 
-        case 'GET_STATUS': {
+        case 7: {
           const messages = this.getMessageNodes();
 
           sendResponse({
@@ -242,7 +249,7 @@
           break;
         }
 
-        case 'GET_CONVERSATION_IDENTITY': {
+        case 8: {
           const locationOrUrl = typeof window !== 'undefined' ? window.location : (typeof location !== 'undefined' ? location : '');
           const identity = this.provider && typeof this.provider.getConversationIdentity === 'function'
             ? this.provider.getConversationIdentity(locationOrUrl)
@@ -251,7 +258,7 @@
           break;
         }
 
-        case 'CHECK_GENERATION_STATE': {
+        case 9: {
           const state = this.getGenerationState();
           let responseState = null;
           if (this.provider && typeof this.provider.getCommandResponseState === 'function') {
@@ -262,7 +269,7 @@
           break;
         }
 
-        case 'GET_COMMAND_TURN_SNAPSHOT': {
+        case 10: {
           if (this.provider && typeof this.provider.getCommandTurnSnapshot === 'function') {
             const snapshot = this.provider.getCommandTurnSnapshot(document, {
               expectedText: message.expectedText,
@@ -275,7 +282,7 @@
           break;
         }
 
-        case 'GET_COMMAND_RESPONSE_STATE': {
+        case 11: {
           if (this.provider && typeof this.provider.getCommandResponseState === 'function') {
             const responseState = this.provider.getCommandResponseState(document, message.commandBinding || {});
             sendResponse({ ok: true, responseState });
@@ -285,7 +292,7 @@
           break;
         }
 
-        case 'INSPECT_GENERATION_STATE': {
+        case 12: {
           const state = this.getGenerationState();
           const lastAssistant = this.provider && typeof this.provider.getLastAssistantTurn === 'function'
             ? this.provider.getLastAssistantTurn(document)
@@ -294,7 +301,7 @@
           break;
         }
 
-        case 'CLICK_RETRY_BUTTON': {
+        case 13: {
           const clicked = this.provider && typeof this.provider.clickRetryButton === 'function'
             ? this.provider.clickRetryButton(document)
             : false;
@@ -302,7 +309,7 @@
           break;
         }
 
-        case 'RELOAD_PAGE': {
+        case 14: {
           sendResponse({ ok: true });
           setTimeout(() => {
             try {
@@ -316,14 +323,14 @@
           break;
         }
 
-        case 'GET_ENTER_DIAGNOSTICS': {
+        case 15: {
           sendResponse({
             diagnostics: this.state.enterDiagnostics || []
           });
           break;
         }
 
-        case 'DEBUG_MESSAGES': {
+        case 16: {
           const debugMessages = this.getMessageNodes();
           const compatibility = this.getCompatibilityDiagnostics();
 
