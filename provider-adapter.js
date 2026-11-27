@@ -475,6 +475,8 @@
             // Checking all historical turns for every button/spinner is O(N*M).
             // Walk the node's ancestor chain and use a constant-time membership set.
             const members = turnSet || new Set(turns);
+            const native = this._nativeSelectorEngine?.activeSurface(node,members,latestTurn);
+            if (native != null) return native;
             for (let parent = node; parent; parent = parent.parentElement || parent.parentNode || null) {
                 if (parent === latestTurn) return true;
                 if (members.has(parent)) return false;
@@ -815,6 +817,13 @@
         }
 
         isComposerElement(element, { selector = '', source = 'document' } = {}) {
+            const weak = this.compatibilitySignals.weakComposerSelectors.includes(selector);
+            const flags = Number(super.isComposerElement(element)) |
+                (Number(!!element?.closest?.('#cpo-root'))<<1) |
+                (Number(!!element?.closest?.(this.compatibilitySignals.messageContext.join(',')))<<2) |
+                (Number(weak)<<3) | (Number(!!element?.closest?.(this.compatibilitySignals.composerContext.join(',')))<<4);
+            const native = this._nativeSelectorEngine?.candidate(0,flags);
+            if (native != null) return native;
             if (!super.isComposerElement(element)) return false;
             if (element.closest?.('#cpo-root')) return false;
 
@@ -833,6 +842,11 @@
         }
 
         isSendActionElement(element, { selector = '' } = {}) {
+            const flags=Number(super.isSendActionElement(element)) |
+                (Number(this.compatibilitySignals.weakSendButtonSelectors.includes(selector))<<3) |
+                (Number(!!element?.closest?.(this.compatibilitySignals.composerContext.join(',')))<<4);
+            const native=this._nativeSelectorEngine?.candidate(1,flags);
+            if(native!=null)return native;
             if (!super.isSendActionElement(element)) return false;
             if (!this.compatibilitySignals.weakSendButtonSelectors.includes(selector)) return true;
 
@@ -1460,6 +1474,8 @@
         }
 
         getComposerText(composer) {
+            const native=this._nativeSelectorEngine?.composerRead(1,composer);
+            if(native!=null)return native;
             if (!composer) return '';
 
             if (composer.tagName && composer.tagName.toLowerCase() === 'textarea') {
@@ -1475,6 +1491,7 @@
         }
 
         clearComposer(composer) {
+            if(this._nativeSelectorEngine?.composerWrite(1,composer,'',0)===true)return;
             if (!composer) return;
 
             if (typeof composer.focus === 'function') {
@@ -1746,6 +1763,8 @@
         clickRetryButton(doc = (typeof document !== 'undefined' ? document : null)) {
             const btn = this.getRetryButton(doc);
             if (!btn) return false;
+            const native=this._nativeSelectorEngine?.click(btn);
+            if(native!=null)return native;
             try {
                 btn.click();
                 return true;
@@ -2124,6 +2143,8 @@
         }
 
         getComposerText(composer) {
+            const native=this._nativeSelectorEngine?.composerRead(2,composer);
+            if(native!=null)return native;
             if (!composer) return '';
 
             if (composer.tagName && composer.tagName.toLowerCase() === 'textarea') {
@@ -2134,6 +2155,7 @@
         }
 
         clearComposer(composer) {
+            if(this._nativeSelectorEngine?.composerWrite(2,composer,'',0)===true)return;
             if (!composer) return;
 
             if (typeof composer.focus === 'function') {
@@ -2494,6 +2516,8 @@
         }
 
         getComposerText(composer) {
+            const native=this._nativeSelectorEngine?.composerRead(3,composer);
+            if(native!=null)return native;
             if (!composer) return '';
 
             if (composer.tagName && composer.tagName.toLowerCase() === 'textarea') {
@@ -2504,6 +2528,7 @@
         }
 
         clearComposer(composer) {
+            if(this._nativeSelectorEngine?.composerWrite(3,composer,'',0)===true)return;
             if (!composer) return;
 
             if (typeof composer.focus === 'function') {
