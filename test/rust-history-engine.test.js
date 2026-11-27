@@ -1,0 +1,101 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { CpoHistoryStore, fallbackNext } = require('../history-store.js');
+
+const wasmPath = path.join(__dirname, '..', 'optimizer_history.wasm');
+const skip = !fs.existsSync(wasmPath) && 'Build WASM first using Installers/build_optimizer.py';
+
+async function nativeStore() {
+    const store = new CpoHistoryStore(null);
+    const result = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
+    store.core = result.instance.exports;
+    assert.equal(store.core.cpo_history_abi(), 1);
+    return store;
+}
+
+test('Rust codec round-trips Unicode and rejects corrupt or out-of-order rows', { skip }, async () => {
+    const store = await nativeStore();
+    const row = {index: 7, role: 'assistant', text: '\uFEFFhello 🌍 café', truncated: true};
+    const result = store.prepareRow(row, 7, 0);
+    assert.ok(result.stored instanceof Uint8Array);
+    assert.deepEqual(store.decodeRow(result.stored, 7), row);
+    assert.throws(() => store.decodeRow(result.stored, 8), /Corrupt/);
+    const damaged = result.stored.slice();
+    damaged[0] = 0;
+    assert.throws(() => store.decodeRow(damaged, 7), /Corrupt/);
+    assert.equal(store.prepareRow(row, 7, 8 * 1024 * 1024), null);
+    assert.throws(() => store.prepareRow(row, 6, 0), /Invalid/);
+    const scratch = new Uint8Array(store.core.memory.buffer, store.core.cpo_history_buffer(),
+        store.core.cpo_history_capacity());
+    assert.ok(scratch.every(byte => byte === 0));
+    // JS fallback can read native rows and Rust can read legacy object rows.
+    const fallback = new CpoHistoryStore(null);
+    assert.deepEqual(fallback.decodeRow(result.stored, 7), row);
+    assert.deepEqual(store.decodeRow(row, 7), row);
+});
+
+test('Rust transaction sequencing agrees with the compatibility path', { skip }, async () => {
+    const store = await nativeStore();
+    for (let kind = 0; kind <= 5; kind++) {
+        for (let previous = 0; previous <= 7; previous++) {
+            for (const valid of [0, 1]) for (const remaining of [0, 1, 16]) {
+                assert.equal(store.core.cpo_history_next(kind, previous, valid, remaining),
+                    fallbackNext(kind, previous, valid, remaining));
+            }
+        }
+    }
+});
+
+function fakeRequest(value) {
+    const req = { result: value };
+    queueMicrotask(() => req.onsuccess());
+    return req;
+}
+
+// Test the host's ordered request execution; real IDB atomic commit/abort is
+// still provided by the browser and requires a browser integration test.
+test('history transport creates, appends, finalizes, pages and deletes via native commands', { skip }, async () => {
+    const store = await nativeStore();
+    const metadata = new Map();
+    const rows = new Map();
+    const meta = {
+        get: key => fakeRequest(metadata.get(key)),
+        put(value, key) { metadata.set(key, value); return fakeRequest(key); },
+        clear() { metadata.clear(); return fakeRequest(undefined); }
+    };
+    const turns = {
+        put(value, key) { rows.set(key, value); return fakeRequest(key); },
+        clear() { rows.clear(); return fakeRequest(undefined); },
+        getAll(range, count) { return fakeRequest([...rows.entries()]
+            .filter(([key]) => key >= range.lower && key <= range.upper)
+            .sort((a,b) => a[0] - b[0]).slice(0,count).map(([,value]) => value)); }
+    };
+    const oldRange = global.IDBKeyRange;
+    global.IDBKeyRange = { bound: (lower, upper) => ({lower, upper}) };
+    store.transaction = async (_mode, callback) => callback(meta, turns);
+    try {
+        const initial = { id: 'snapshot', count: 0, bytes: 0, complete: false };
+        await store.replace(initial);
+        const record = store.prepareRow({index:0,role:'user',text:'test',truncated:false},0,0);
+        const updated = {...initial,count:1,bytes:record.size};
+        await assert.rejects(store.append('wrong',[record],updated), /rejected/);
+        assert.equal(rows.size,0);
+        await store.append(initial.id,[record],updated);
+        await assert.rejects(store.append(initial.id,[record],updated), /rejected/);
+        assert.equal((await store.page(0)).records.length,0);
+        await store.finalize(initial.id,{...updated,complete:true});
+        const page = await store.page(100);
+        assert.equal(page.start,0);
+        assert.equal(page.records[0].text,'test');
+        assert.equal((await store.readMeta()).complete,true);
+        await assert.rejects(store.delete('wrong'), /rejected/);
+        await store.delete(initial.id);
+        assert.equal(await store.readMeta(),undefined);
+        assert.equal(rows.size,0);
+    } finally {
+        if (oldRange === undefined) delete global.IDBKeyRange;
+        else global.IDBKeyRange = oldRange;
+    }
+});
