@@ -23,7 +23,7 @@
                 const core = result.instance.exports;
                 if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 2 ||
                     !['cpo_collect_resources', 'cpo_discover_messages', 'cpo_execute_media',
-                        'cpo_apply_window', 'cpo_capture_history', 'cpo_process_mutations',
+                        'cpo_apply_window', 'cpo_window_visible', 'cpo_capture_history', 'cpo_process_mutations',
                         'cpo_cache_ttl', 'cpo_cache_valid', 'cpo_cache_nodes_valid', 'cpo_mutation_delay'].every(name => typeof core[name] === 'function')) {
                     throw new Error('Browser WASM ABI mismatch');
                 }
@@ -86,6 +86,11 @@
 
         media(root, mode) {
             return this.invoke({ root }, core => core.cpo_execute_media(mode) >>> 0);
+        }
+
+        windowVisible(total, target, manual, previous, allowShrink) {
+            return this.invoke({}, core => core.cpo_window_visible(total, target, manual,
+                previous, Number(!!allowShrink)) >>> 0);
         }
 
         applyWindow(messages, visible, offscreen, evictPlayback) {
