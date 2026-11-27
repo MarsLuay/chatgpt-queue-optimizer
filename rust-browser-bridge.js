@@ -21,11 +21,11 @@
                     cpo: { host: (op, a, b, c) => this.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
                 });
                 const core = result.instance.exports;
-                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 9 ||
+                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 10 ||
                     !['cpo_collect_resources', 'cpo_discover_messages', 'cpo_execute_media',
                         'cpo_apply_window', 'cpo_window_visible', 'cpo_capture_history', 'cpo_process_mutations',
                         'cpo_cache_ttl', 'cpo_cache_valid', 'cpo_cache_nodes_valid', 'cpo_mutation_delay', 'cpo_provider_selectors', 'cpo_dom_composer_write', 'cpo_dom_composer_read',
-                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool', 'cpo_ui_render', 'cpo_ui_sequence_edit', 'cpo_ui_next_limit', 'cpo_ui_sequence_select', 'cpo_ui_variables', 'cpo_ui_saved_sequence', 'cpo_sequence_import', 'cpo_sequence_substitute', 'cpo_event_ready','cpo_restore_window','cpo_restore_journal','cpo_intersection_transition','cpo_message_predicate','cpo_first_matching_selector'].every(name => typeof core[name] === 'function')) {
+                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool', 'cpo_ui_render', 'cpo_ui_sequence_edit', 'cpo_ui_next_limit', 'cpo_ui_sequence_select', 'cpo_ui_variables', 'cpo_ui_saved_sequence', 'cpo_sequence_import', 'cpo_sequence_substitute', 'cpo_event_ready','cpo_restore_window','cpo_restore_journal','cpo_intersection_transition','cpo_message_predicate','cpo_first_matching_selector','cpo_dom_event_ancestor','cpo_dom_normalize_turn','cpo_dom_last_assistant'].every(name => typeof core[name] === 'function')) {
                     throw new Error('Browser WASM ABI mismatch');
                 }
                 this.exports = core;
@@ -155,6 +155,25 @@
             });
         }
 
+        eventAncestor(target,selectors,exclude,predicate,signalKey){
+            const node=target?.nodeType===1?target:target?.parentElement;
+            if(!node)return null;
+            return this.invoke({node,selectors,exclude,predicate},(core,ctx)=>{
+                const index=core.cpo_dom_event_ancestor(selectors.length)>>>0;
+                return index?{element:ctx.node,selector:selectors[index-1],signalKey}:false;
+            });
+        }
+        normalizeTurn(node,root,selectors){
+            if(!node||!root)return null;
+            // May execute from a native message-discovery host callback.
+            const outer=this.context;
+            if(!this.exports)return null;
+            const ctx={node,root,selectors,normalized:null};
+            this.context=ctx;
+            try{const result=this.exports.cpo_dom_normalize_turn(selectors.length)>>>0;return result===0?null:result===1?node:ctx.normalized;}
+            finally{this.context=outer;}
+        }
+        lastAssistant(flags){return this.exports?this.exports.cpo_dom_last_assistant(flags)===1:null;}
         composerRead(provider, element) {
             const flags = Number(!!element) | (Number(element?.tagName?.toLowerCase()==='textarea')<<1);
             return this.invoke({ element, text: [] },(core,ctx)=>{
@@ -174,7 +193,14 @@
         submitStage(stage, flags) { return this.invoke({},core=>core.cpo_dom_submit_stage(stage,flags)>>>0); }
         activeSurface(node, members, latest) {
             if(!node)return false;
-            return this.invoke({node,members,latest},core=>core.cpo_dom_active_surface()===1);
+            // The selector walker may call this pure ancestry walker through
+            // its host predicate. Preserve the outer call-local context.
+            if(!this.exports)return null;
+            const outer=this.context;
+            this.context={node,members,latest};
+            try{return this.exports.cpo_dom_active_surface()===1;}
+            catch(error){this.fail(error);return null;}
+            finally{this.context=outer;}
         }
         nodeRole(flags) { return this.invoke({},core=>core.cpo_dom_role(flags)>>>0); }
         candidate(mode,flags) {
@@ -471,6 +497,19 @@
                 case 74: return Number(!!ctx.nodes[a] && ctx.nodes[a].isConnected !== false);
                 case 160:
                     try{return Number(!!ctx.node.matches?.(ctx.selectors[a]));}catch{return 0;}
+                case 161:return Number(!!ctx.node);
+                case 162:return Number(!!ctx.exclude&&!!ctx.node.closest?.(ctx.exclude));
+                case 163:{
+                    const selector=ctx.selectors[a];
+                    try{return Number(!!(ctx.node.matches?.(selector)||ctx.node.closest?.(selector)===ctx.node)&&(!ctx.predicate||ctx.predicate(ctx.node,selector)));}catch{return 0;}
+                }
+                case 164:ctx.node=ctx.node.parentElement;return 1;
+                case 165:return Number(!!ctx.node&&ctx.root.contains(ctx.node)&&!ctx.node.closest?.('#cpo-root')&&!ctx.node.classList?.contains('cpo-more-banner'));
+                case 166:{
+                    const candidate=ctx.node.closest?.(ctx.selectors[a]);
+                    if(candidate&&ctx.root.contains(candidate)){ctx.normalized=candidate;return 1;}
+                    return 0;
+                }
                 case 80: {
                     const selector = ctx.selectors[a];
                     try {
@@ -685,4 +724,1521 @@
 
     globalThis.CpoRustBrowserBridge = CpoRustBrowserBridge;
     if (typeof module !== 'undefined' && module.exports) module.exports = { CpoRustBrowserBridge };
+})();
+
+// Provider host bindings: DOM observations and browser object projection only.
+(() => {
+    'use strict';
+
+    const PROVIDER_CODES = { chatgpt: 1, gemini: 2, claude: 3 };
+    const nativeContains = (text, marker) => requireNative(globalThis.CpoQueueEngine?.contains(text,marker));
+    function nativeRoute(provider, pathname) {
+        const engine=globalThis.CpoQueueEngine;
+        const route=engine?.providerRoute(PROVIDER_CODES[provider],pathname);
+        if(!route)return null;
+        const key=engine.identityKey?.(provider,route.type,route.conversationId);
+        return {...route,key:requireNative(key)};
+    }
+    function nativeGeneration(stop, streaming, tool, error, retry, deep = false, capacity = false) {
+        const flags = Number(!!stop) | (Number(!!streaming)<<1) | (Number(!!tool)<<2) |
+            (Number(!!error)<<3) | (Number(!!retry)<<4) | (Number(!!deep)<<5) | (Number(!!capacity)<<6);
+        const result = globalThis.CpoQueueEngine?.call('cpo_generation_state', [flags]);
+        if (result == null) return null;
+        return { generating: !!(result&1), deepResearchActive: !!(result&2),
+            statusUnknown: !!(result&4), compatibilityState: result&24 ? 'error' : result&32 ? 'active' : 'unknown' };
+    }
+    function nativeResponse(generation, assistant, waiting = false, interrupted = false) {
+        const flags = [generation.conversationCapacityReached || generation.requiresNewConversation,
+            assistant?.hasErrorStop, generation.hasError, generation.hasDeliveryTimedOut,
+            generation.hasTryAgainButton, assistant?.errorSignal, waiting, interrupted,
+            assistant?.hasCompletedText, generation.generating, generation.deepResearchActive,
+            assistant?.streaming, assistant?.hasIncompleteToolTurn].reduce((mask,value,i) => mask | (Number(!!value)<<i),0);
+        return requireNative(globalThis.CpoQueueEngine?.call('cpo_response_class',[flags]));
+    }
+
+    function requireNative(value){
+        if(value==null)throw new Error('Required native provider policy unavailable.');
+        return value;
+    }
+    function catalogView(id) {
+        const current=()=>requireNative(globalThis.CpoQueueEngine?.providerCatalog?.(id));
+        return new Proxy({},{
+            get(_target,key){return current()[key];},
+            ownKeys(){return Reflect.ownKeys(current());},
+            getOwnPropertyDescriptor(_target,key){
+                if(Object.hasOwn(current(),key))return {configurable:true,enumerable:true,value:current()[key]};
+            },
+            has(_target,key){return key in current();}
+        });
+    }
+    function providerPredicate(provider,mode,flags) {
+        return globalThis.CpoQueueEngine?.call('cpo_provider_predicate',[PROVIDER_CODES[provider],mode,flags]);
+    }
+    const CHATGPT_COMPATIBILITY_SIGNALS = catalogView(4);
+    const CHATGPT_SELECTORS = catalogView(1);
+
+    function cloneCompatibilityValue(value) {
+        if (Array.isArray(value)) {
+            return value.map(cloneCompatibilityValue);
+        }
+        if (value && typeof value === 'object') {
+            return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, cloneCompatibilityValue(child)]));
+        }
+        return value;
+    }
+
+    function normalizeCommandText(text) {
+        const value=String(text||'');
+        // Large conversation text should not grow WASM linear memory merely
+        // to normalize a browser-owned string.
+        const native=value.length<=65536?globalThis.CpoQueueEngine?.textBatch?.(14,[value]):null;
+        return value.length>65536?value.replace(/\s+/g,' ').trim():requireNative(native);
+    }
+
+    function fingerprintCommandText(text) {
+        return requireNative(globalThis.CpoQueueEngine?.fingerprint(text));
+    }
+
+    function emptyCommandTurnSnapshot(adapter) {
+        return {
+            conversationId: null,
+            conversationKey: '',
+            userTurns: [],
+            assistantTurns: [],
+            latestUserTurnId: null,
+            latestAssistantTurnId: null,
+            matchedUserTurnId: null,
+            supportsCommandTurnAck: adapter?.supportsCommandTurnAck === true
+        };
+    }
+
+    function getNodeRole(node, engine = null) {
+        const attr = String(node?.getAttribute?.('data-message-author-role') || '').toLowerCase();
+        const flags=Number(attr==='user')|(Number(attr==='assistant')<<1)|
+            (Number(!!node?.querySelector?.('[data-message-author-role="user"]'))<<2)|
+            (Number(!!node?.querySelector?.('[data-message-author-role="assistant"]'))<<3);
+        const native=engine?.nodeRole(flags);
+        return ['','user','assistant'][requireNative(native)]||'';
+    }
+
+    function getNodeText(node) {
+        return normalizeCommandText(node?.innerText || node?.textContent || '');
+    }
+
+    const ASSISTANT_ERROR_STATUS_ATTRIBUTES = [
+        'data-message-status',
+        'data-message-state',
+        'data-stop-reason',
+        'data-finish-reason',
+        'data-status',
+        'data-state',
+        'data-error'
+    ];
+    const ASSISTANT_ERROR_STATUS_VALUES = new Set([
+        'error',
+        'failed',
+        'failure',
+        'assistant-error',
+        'assistant_error',
+        'error-stop',
+        'error_stop'
+    ]);
+
+    function hasAssistantErrorStop(node, engine = null) {
+        const native=engine?.assistantError(node,ASSISTANT_ERROR_STATUS_ATTRIBUTES,ASSISTANT_ERROR_STATUS_VALUES);
+        return requireNative(native);
+    }
+
+    const TOOL_TURN_SELECTORS = [
+        '[data-tool-call]',
+        '[data-tool-result]',
+        '[data-tool-state]',
+        '[data-tool-status]',
+        '[data-testid*="tool-call"]',
+        '[data-testid*="tool-result"]'
+    ];
+    const INCOMPLETE_TOOL_STATES = new Set(['active', 'incomplete', 'pending', 'running', 'waiting']);
+
+    function hasIncompleteToolTurn(node, engine = null) {
+        const native=engine?.incompleteTool(node,TOOL_TURN_SELECTORS,INCOMPLETE_TOOL_STATES,normalizeCommandText);
+        return requireNative(native);
+    }
+
+    function summarizeSelectorMatch(match) {
+        return {
+            matched: !!match?.element,
+            selector: match?.selector || null,
+            signalKey: match?.signalKey || null
+        };
+    }
+
+    class ProviderAdapter {
+        constructor(idOrOptions, maybeName, options = {}) {
+            if (idOrOptions && typeof idOrOptions === 'object') {
+                this.id = idOrOptions.id;
+                this.name = idOrOptions.name;
+                this.supportsOptimizer = !!idOrOptions.supportsOptimizer;
+                this.supportsCommandTurnAck = !!idOrOptions.supportsCommandTurnAck;
+                this.selectors = idOrOptions.selectors || {};
+            } else {
+                this.id = idOrOptions;
+                this.name = maybeName;
+                this.supportsOptimizer = !!options.supportsOptimizer;
+                this.supportsCommandTurnAck = !!options.supportsCommandTurnAck;
+                this.selectors = options.selectors || {};
+            }
+        }
+
+        setNativeSelectorEngine(engine) {
+            this._nativeSelectorEngine = engine || null;
+        }
+
+        normalizeCommandText(text) {
+            return normalizeCommandText(text);
+        }
+
+        fingerprintCommandText(text) {
+            return fingerprintCommandText(text);
+        }
+
+        getCompatibilityContract() {
+            return {
+                provider: this.id,
+                version: 1,
+                selectors: cloneCompatibilityValue(this.selectors),
+                signals: {}
+            };
+        }
+
+        /**
+         * @param {any} root
+         * @param {string} selectorKey
+         * @param {((element: any, selector: string) => boolean)|null} [predicate]
+         * @returns {SelectorMatch[]}
+         */
+        getSelectorNodes(root, selectorKey, predicate = null) {
+            const selectors = Array.isArray(this.selectors?.[selectorKey])
+                ? this.selectors[selectorKey]
+                : [];
+            if (!root || selectors.length === 0) return [];
+            const native = this._nativeSelectorEngine?.providerSelectors(root, selectors, selectorKey, predicate);
+            return requireNative(native);
+        }
+
+        getSelectorMatch(root, selectorKey, predicate = null) {
+            const selectors = Array.isArray(this.selectors?.[selectorKey]) ? this.selectors[selectorKey] : [];
+            const native = root && selectors.length ? this._nativeSelectorEngine?.providerSelectors(root, selectors, selectorKey, predicate, true) : null;
+            return (root && selectors.length ? requireNative(native) : [])[0] || {
+                element: null,
+                selector: '',
+                signalKey: selectorKey
+            };
+        }
+
+        nodeContains(ancestor, node) {
+            if (!ancestor || !node) {
+                return false;
+            }
+            if (ancestor === node) {
+                return true;
+            }
+            let current = node;
+            while (current) {
+                if (current === ancestor) {
+                    return true;
+                }
+                current = current.parentElement || current.parentNode || null;
+            }
+            return false;
+        }
+
+        isActiveResponseNode(node, turns, latestTurn, turnSet = null) {
+            if (!node) return false;
+            // Checking all historical turns for every button/spinner is O(N*M).
+            // Walk the node's ancestor chain and use a constant-time membership set.
+            const members = turnSet || new Set(turns);
+            const native = this._nativeSelectorEngine?.activeSurface(node,members,latestTurn);
+            return requireNative(native);
+        }
+
+        isComposerElement(element, _details = {}) {
+            const tagName = (element?.tagName || '').toLowerCase();
+            const flags=Number(tagName==='textarea') | (Number(element?.getAttribute?.('contenteditable')==='true')<<1);
+            const native=providerPredicate(this.id,0,flags);
+            return requireNative(native)===1;
+        }
+
+        getComposerMatch(doc = (typeof document !== 'undefined' ? document : null)) {
+            return this.getSelectorMatch(doc, 'composer', (element, selector) => this.isComposerElement(element, {
+                selector,
+                source: 'document'
+            }));
+        }
+
+        isSendActionElement(element, _details = {}) {
+            const tagName = (element?.tagName || '').toLowerCase();
+            const action=tagName==='button'||typeof element?.click==='function';
+            const native=providerPredicate(this.id,1,Number(action)<<2);
+            return requireNative(native)===1;
+        }
+
+        getSendActionMatch(doc = (typeof document !== 'undefined' ? document : null)) {
+            return this.getSelectorMatch(doc, 'sendButton', (element, selector) => this.isSendActionElement(element, {
+                selector,
+                source: 'document'
+            }));
+        }
+
+        getComposerMatchFromEventTarget(target, excludeSelector = '#cpo-root') {
+            const match=this._nativeSelectorEngine?.eventAncestor(target,this.selectors.composer||[],excludeSelector,(node,selector)=>this.isComposerElement(node,{selector,source:'event'}),'composer');
+            return match||null;
+        }
+
+        getComposerFromEventTarget(target, excludeSelector = '#cpo-root') {
+            return this.getComposerMatchFromEventTarget(target, excludeSelector)?.element || null;
+        }
+
+        getSendActionFromEventTarget(target) {
+            const match=this._nativeSelectorEngine?.eventAncestor(target,this.selectors.sendButton||[],'',(node,selector)=>this.isSendActionElement(node,{selector,source:'event'}),'sendButton');
+            return match||null;
+        }
+
+        getCompatibilityDiagnostics(doc = (typeof document !== 'undefined' ? document : null)) {
+            const root = this.getSelectorMatch(doc, 'mainRoot');
+            const composer = this.getComposerMatch(doc);
+            const sendAction = this.getSendActionMatch(doc);
+            return {
+                provider: this.id,
+                root: summarizeSelectorMatch({ ...root, signalKey: 'mainRoot' }),
+                composer: summarizeSelectorMatch({ ...composer, signalKey: 'composer' }),
+                sendAction: summarizeSelectorMatch({ ...sendAction, signalKey: 'sendButton' }),
+                messages: {
+                    matched: false,
+                    count: 0,
+                    selector: null,
+                    signalKey: 'messages',
+                    state: 'unsupported'
+                },
+                requiredFailures: []
+            };
+        }
+
+        isSupportedUrl(url) {
+            return false;
+        }
+
+        getConversationIdentity(locationOrUrl) {
+            return {
+                provider: this.id,
+                type: 'unsupported',
+                conversationId: null,
+                key: `${this.id}:unsupported`
+            };
+        }
+
+        getComposerText(composer) {
+            return '';
+        }
+
+        clearComposer(composer) {
+        }
+
+        /** @returns {GenerationState} */
+        getGenerationState(doc) {
+            return {
+                generating: false,
+                hasActiveStopButton: false,
+                hasResultStreaming: false,
+                hasActiveToolOrResearch: false,
+                deepResearchActive: false,
+                matchedResearchMarker: null,
+                researchStatusPreview: null,
+                hasError: false,
+                hasDeliveryTimedOut: false,
+                hasTryAgainButton: false,
+                errorSnippet: '',
+                matchedError: '',
+                conversationCapacityReached: false,
+                requiresNewConversation: false,
+                url: '',
+                title: ''
+            };
+        }
+
+        getNewConversationUrl() {
+            return '';
+        }
+
+        startNewConversation() {
+            const url = this.getNewConversationUrl();
+            return {
+                ok: !!url,
+                url,
+                method: url ? 'route' : 'unsupported'
+            };
+        }
+
+        isFreshConversationIdentity(identity, previousConversationId = null) {
+            return false;
+        }
+
+        matchConversationCapacity(text) {
+            return '';
+        }
+
+        buildContinuationHandoffMessage(context = {}) {
+            return '';
+        }
+
+        getRetryButton(doc) {
+            return null;
+        }
+
+        clickRetryButton(doc) {
+            return false;
+        }
+
+        getLastAssistantTurn(doc) {
+            return null;
+        }
+
+        getCommandTurnSnapshot(doc, options = {}) {
+            return emptyCommandTurnSnapshot(this);
+        }
+
+        /**
+         * @param {any} doc
+         * @param {{ userTurnId?: string|null, assistantTurnId?: string|null, commandFingerprint?: string, conversationId?: string|null }} [binding]
+         * @returns {{ phase: string, userTurnId: string|null, assistantTurnId: string|null, conversationId: string|null, generating: boolean, deepResearchActive: boolean, hasCompletedAssistant: boolean, toolTurnIncomplete?: boolean, source: string }}
+         */
+        getCommandResponseState(doc, binding = {}) {
+            const generation = this.getGenerationState(doc);
+            const native = nativeResponse(generation, null);
+            if ([1,2,3,4,5,6].includes(native)) {
+                return {
+                    phase: 'error',
+                    userTurnId: binding.userTurnId || null,
+                    assistantTurnId: null,
+                    conversationId: binding.conversationId || null,
+                    generating: false,
+                    deepResearchActive: !!generation.deepResearchActive,
+                    hasCompletedAssistant: false,
+                    source: generation.hasDeliveryTimedOut ? 'delivery-timeout' : (generation.hasTryAgainButton ? 'retry-visible' : 'generation-error')
+                };
+            }
+            if ([10,12].includes(native)) {
+                return {
+                    phase: 'active',
+                    userTurnId: binding.userTurnId || null,
+                    assistantTurnId: null,
+                    conversationId: binding.conversationId || null,
+                    generating: !!generation.generating,
+                    deepResearchActive: !!generation.deepResearchActive,
+                    hasCompletedAssistant: false,
+                    source: generation.deepResearchActive ? 'deep-research' : 'generating'
+                };
+            }
+            const lastAssistant = typeof this.getLastAssistantTurn === 'function'
+                ? this.getLastAssistantTurn(doc)
+                : null;
+            if (nativeResponse(generation, {hasCompletedText: !!(lastAssistant?.isAssistant && lastAssistant?.hasCompletedText)}) === 13) {
+                return {
+                    phase: 'terminal',
+                    userTurnId: binding.userTurnId || null,
+                    assistantTurnId: binding.assistantTurnId || null,
+                    conversationId: binding.conversationId || null,
+                    generating: false,
+                    deepResearchActive: false,
+                    hasCompletedAssistant: true,
+                    source: 'assistant-turn-completed'
+                };
+            }
+            return {
+                phase: 'transient-idle',
+                userTurnId: binding.userTurnId || null,
+                assistantTurnId: null,
+                conversationId: binding.conversationId || null,
+                generating: false,
+                deepResearchActive: false,
+                hasCompletedAssistant: false,
+                source: 'unknown-idle'
+            };
+        }
+
+        getMainRoot(doc) {
+            return null;
+        }
+
+        getMessageNodes(doc, mainRoot) {
+            return [];
+        }
+
+        normalizeMessageNode(node, mainRoot) {
+            return node;
+        }
+
+        isValidMessageNode(node, mainRoot) {
+            return false;
+        }
+
+        getFallbackMessages(doc, mainRoot) {
+            return [];
+        }
+
+        isValidFallbackNode(node, mainRoot) {
+            return false;
+        }
+    }
+
+    class ChatGPTAdapter extends ProviderAdapter {
+        constructor() {
+            super('chatgpt', 'ChatGPT', {
+                supportsOptimizer: true,
+                supportsCommandTurnAck: true,
+                selectors: CHATGPT_SELECTORS
+            });
+            this.compatibilitySignals = CHATGPT_COMPATIBILITY_SIGNALS;
+            this._turnScanCacheEnabled = false;
+            this._turnScanCache = new WeakMap();
+            this._turnListCache = null;
+            this._turnListCacheTimer = null;
+            this._nativeMessageDiscovery = null;
+            this._nativeLifecycle = null;
+        }
+
+        setNativeMessageDiscovery(discover) {
+            this._nativeMessageDiscovery = typeof discover === 'function' ? discover : null;
+        }
+
+        setNativeLifecycle(engine) {
+            this._nativeLifecycle = engine || null;
+        }
+
+        clearTurnListCache() {
+            clearTimeout(this._turnListCacheTimer);
+            this._turnListCacheTimer = null;
+            this._turnListCache = null;
+        }
+
+        setTurnScanCacheEnabled(enabled) {
+            this._turnScanCacheEnabled = enabled === true;
+            this._turnScanCache = new WeakMap();
+            this.clearTurnListCache();
+        }
+
+        invalidateTurnScanCache(mutations) {
+            if (!this._turnScanCacheEnabled) return;
+            const structural=requireNative(this._nativeLifecycle?.mutations(mutations,1,false,this));
+            if(structural)this.clearTurnListCache();
+        }
+
+        getCompatibilityContract() {
+            return {
+                provider: this.id,
+                version: 1,
+                selectors: cloneCompatibilityValue(this.selectors),
+                signals: cloneCompatibilityValue(this.compatibilitySignals),
+                requiredSignals: ['composer', 'sendButton']
+            };
+        }
+
+        isComposerElement(element, { selector = '', source = 'document' } = {}) {
+            const weak = this.compatibilitySignals.weakComposerSelectors.includes(selector);
+            const flags = Number(super.isComposerElement(element)) |
+                (Number(!!element?.closest?.('#cpo-root'))<<1) |
+                (Number(!!element?.closest?.(this.compatibilitySignals.messageContext.join(',')))<<2) |
+                (Number(weak)<<3) | (Number(!!element?.closest?.(this.compatibilitySignals.composerContext.join(',')))<<4);
+            const native = this._nativeSelectorEngine?.candidate(0,flags);
+            return requireNative(native);
+        }
+
+        isSendActionElement(element, { selector = '' } = {}) {
+            const flags=Number(super.isSendActionElement(element)) |
+                (Number(this.compatibilitySignals.weakSendButtonSelectors.includes(selector))<<3) |
+                (Number(!!element?.closest?.(this.compatibilitySignals.composerContext.join(',')))<<4);
+            const native=this._nativeSelectorEngine?.candidate(1,flags);
+            return requireNative(native);
+        }
+
+        getMessageDiscovery(doc = (typeof document !== 'undefined' ? document : null), mainRoot = null) {
+            if (!doc) {
+                return {
+                    nodes: [],
+                    selector: null,
+                    signalKey: 'messages',
+                    fallback: false
+                };
+            }
+
+            if (typeof this.shouldDiscoverConversationMessages === 'function' && !this.shouldDiscoverConversationMessages(doc)) {
+                return {
+                    nodes: [],
+                    selector: null,
+                    signalKey: 'messages',
+                    fallback: false
+                };
+            }
+
+            mainRoot = mainRoot || this.getMainRoot(doc);
+            if (!mainRoot) {
+                return {
+                    nodes: [],
+                    selector: null,
+                    signalKey: 'messages',
+                    fallback: false
+                };
+            }
+
+            return requireNative(this._nativeMessageDiscovery?.(this,doc,mainRoot));
+        }
+
+        /**
+         * @param {Document | Element | null} [doc]
+         * @returns {HTMLElement[]}
+         */
+        getConversationTurns(doc = (typeof document !== 'undefined' ? document : null)) {
+            const selectors = this.compatibilitySignals.turnContext || [];
+            if (!doc || selectors.length === 0) return [];
+            // Reconcile periodically as a safety net for DOM changes outside our
+            // observer. Only the cache-enabled optimizer uses this fast path.
+            const now = Date.now();
+            const cache = this._turnListCache;
+            if (this._turnScanCacheEnabled && cache?.doc === doc &&
+                requireNative(this._nativeLifecycle?.cacheNodesValid(1,cache.createdAt,cache.nodes,now))) {
+                return cache.nodes;
+            }
+            this.clearTurnListCache();
+            // One DOM-ordered query instead of a separate full traversal for
+            // every selector. Preserve the independent-selector fallback.
+            let nodes;
+            try {
+                nodes = /** @type {HTMLElement[]} */ (Array.from(doc.querySelectorAll(selectors.join(','))));
+            } catch {
+                nodes = [];
+                const seen = new Set();
+                for (const selector of selectors) {
+                    try {
+                        for (const element of Array.from(doc.querySelectorAll(selector))) {
+                            if (!seen.has(element)) {
+                                seen.add(element);
+                                nodes.push(/** @type {HTMLElement} */ (element));
+                            }
+                        }
+                    } catch {
+                        // An unsupported selector must not stop queue processing.
+                    }
+                }
+            }
+            if (this._turnScanCacheEnabled) {
+                this._turnListCache = { doc, nodes, createdAt: now };
+                this._turnListCacheTimer = setTimeout(() => this.clearTurnListCache(), requireNative(this._nativeLifecycle?.cacheTtl(1)));
+                if (typeof this._turnListCacheTimer?.unref === 'function') this._turnListCacheTimer.unref();
+            }
+            return nodes;
+        }
+
+        getAssistantTurnErrorSignal(text) {
+            // Prefix matching needs only the longest marker plus its boundary.
+            const markers=this.compatibilitySignals.errorMarkers||[];
+            const length=Math.max(0,...markers.map(marker=>marker.length))+1;
+            return requireNative(globalThis.CpoQueueEngine?.textBatch(22,[String(text||'').slice(0,length)]));
+        }
+
+        getCommandTurnSnapshot(doc = (typeof document !== 'undefined' ? document : null), options = {}) {
+            const snapshot = emptyCommandTurnSnapshot(this);
+            if (!doc) {
+                return snapshot;
+            }
+
+            const identity = typeof this.getConversationIdentity === 'function'
+                ? this.getConversationIdentity(doc.defaultView?.location || (typeof location !== 'undefined' ? location : ''))
+                : null;
+            snapshot.conversationId = identity?.conversationId || null;
+            snapshot.conversationKey = identity?.key || '';
+
+            const expectedText = normalizeCommandText(options.expectedText || '');
+            const expectedTextFingerprint = expectedText ? fingerprintCommandText(expectedText) : '';
+            const expectedFingerprint = options.expectedFingerprint || expectedTextFingerprint;
+            const turns = this.getConversationTurns(doc);
+            const rows=[];
+            for(let index=0;index<turns.length;index++){
+                const node=turns[index];
+                const role=getNodeRole(node,this._nativeSelectorEngine);
+                const cacheable=requireNative(globalThis.CpoQueueEngine?.call('cpo_turn_cache_eligible',[Number(this._turnScanCacheEnabled),index,turns.length]))===1;
+                const existing=cacheable?this._turnScanCache.get(node):null;
+                const memo=existing?.role===role?existing:null;
+                let text=null,fingerprint,hasText,errorSignal;
+                if(memo){({fingerprint,hasText,errorSignal}=memo);}
+                else{
+                    text=getNodeText(node);
+                    fingerprint=fingerprintCommandText(text);
+                    hasText=text.length>0;
+                    errorSignal=role==='assistant'?this.getAssistantTurnErrorSignal(text):'';
+                    if(cacheable)this._turnScanCache.set(node,{role,fingerprint,hasText,errorSignal});
+                }
+                const exact=!!expectedText&&fingerprint===expectedTextFingerprint&&(text===null?getNodeText(node):text)===expectedText;
+                const assistant=role==='assistant';
+                const streaming=assistant&&!!node.querySelector?.('[data-message-streaming="true"], [data-is-streaming="true"], .result-streaming');
+                const errorStop=assistant&&hasAssistantErrorStop(node,this._nativeSelectorEngine);
+                const incomplete=assistant&&hasIncompleteToolTurn(node,this._nativeSelectorEngine);
+                const flags=Number(exact)|(Number(streaming)<<1)|(Number(errorStop)<<2)|(Number(incomplete)<<3)|(Number(hasText)<<4);
+                rows.push([role==='user'?1:assistant?2:0,node?.getAttribute?.('data-message-id')||'',node?.getAttribute?.('data-testid')||'',fingerprint,flags,errorSignal]);
+            }
+            return {...snapshot,...requireNative(globalThis.CpoQueueEngine?.providerTurnSnapshot(rows,expectedFingerprint,!!expectedText))};
+        }
+
+        getCommandResponseState(doc = (typeof document !== 'undefined' ? document : null), binding = {}, generationState = null) {
+            const generation = generationState || this.getGenerationState(doc);
+            const snapshot = this.getCommandTurnSnapshot(doc, {
+                expectedFingerprint: binding.commandFingerprint || ''
+            });
+            return requireNative(globalThis.CpoQueueEngine?.providerBoundResponse(snapshot,binding,generation));
+        }
+
+        findMatchingSelector(node, selectorKey) {
+            const selectors = this.selectors?.[selectorKey] || [];
+            const native=this._nativeSelectorEngine?.firstMatchingSelector?.(node,selectors);
+            if(native!=null)return native||null;
+            return selectors.find((selector) => {
+                try {
+                    return node.matches?.(selector);
+                } catch {
+                    return false;
+                }
+            }) || null;
+        }
+
+        getCompatibilityDiagnostics(doc = (typeof document !== 'undefined' ? document : null)) {
+            const root = this.getSelectorMatch(doc, 'mainRoot');
+            const composer = this.getComposerMatch(doc);
+            const sendAction = this.getSendActionMatch(doc);
+            const discovery = this.getMessageDiscovery(doc, root.element);
+            const conversation = this.getConversationIdentity(
+                doc?.defaultView?.location || (typeof location !== 'undefined' ? location : '')
+            );
+            const flags=Number(!!root.element)|(Number(!!composer.element)<<1)|(Number(!!sendAction.element)<<2);
+            const [state,...requiredFailures]=requireNative(globalThis.CpoQueueEngine?.providerDiagnostics(flags,discovery.nodes.length,['new','existing'].includes(conversation.type)));
+
+            return {
+                provider: this.id,
+                root: summarizeSelectorMatch({ ...root, signalKey: 'mainRoot' }),
+                composer: summarizeSelectorMatch({ ...composer, signalKey: 'composer' }),
+                sendAction: summarizeSelectorMatch({ ...sendAction, signalKey: 'sendButton' }),
+                messages: {
+                    matched: discovery.nodes.length > 0,
+                    count: discovery.nodes.length,
+                    selector: discovery.selector,
+                    signalKey: discovery.signalKey,
+                    state
+                },
+                requiredFailures
+            };
+        }
+
+        isSupportedUrl(url) {
+            if (typeof url !== 'string') {
+                return false;
+            }
+
+            try {
+                const parsed = new URL(url);
+                if (parsed.protocol !== 'https:') return false;
+                const native = globalThis.CpoQueueEngine?.providerHost(parsed.hostname.toLowerCase());
+                return native === PROVIDER_CODES.chatgpt;
+            } catch {
+                return false;
+            }
+        }
+
+        classifyChatGPTSurface(locationOrUrl) {
+            const unsupported = {
+                provider: this.id,
+                type: 'unsupported',
+                conversationId: null,
+                key: `${this.id}:unsupported`,
+                surface: 'unsupported',
+                optimizerEligible: false,
+                allowFallbackDiscovery: false,
+                pathname: ''
+            };
+
+            const urlStr = typeof locationOrUrl === 'string'
+                ? locationOrUrl
+                : (locationOrUrl?.href || String(locationOrUrl || ''));
+
+            if (!urlStr || urlStr === 'undefined' || urlStr === 'null') {
+                return {
+                    provider: this.id,
+                    type: 'unsupported',
+                    conversationId: null,
+                    key: `${this.id}:unsupported`,
+                    surface: 'unclassified',
+                    optimizerEligible: true,
+                    allowFallbackDiscovery: false,
+                    pathname: ''
+                };
+            }
+
+            if (!this.isSupportedUrl(urlStr)) {
+                return unsupported;
+            }
+
+            try {
+                const parsed = new URL(urlStr);
+                const pathname = parsed.pathname || '/';
+                const native = nativeRoute(this.id, pathname);
+                if (native) {
+                    const existing = native.type === 'existing';
+                    const fresh = native.type === 'new';
+                    return { ...unsupported, ...native, key: native.key,
+                        surface: existing ? 'conversation' : fresh ? 'composer' : 'unsupported',
+                        optimizerEligible: existing || fresh, allowFallbackDiscovery: existing, pathname };
+                }
+                return unsupported;
+            } catch {
+                return unsupported;
+            }
+        }
+
+        getConversationIdentity(locationOrUrl) {
+            const surface = this.classifyChatGPTSurface(locationOrUrl);
+            return {
+                provider: surface.provider,
+                type: surface.type,
+                conversationId: surface.conversationId,
+                key: surface.key
+            };
+        }
+
+        getNewConversationUrl() {
+            return 'https://chatgpt.com/';
+        }
+
+        startNewConversation() {
+            return {
+                ok: true,
+                url: this.getNewConversationUrl(),
+                method: 'route'
+            };
+        }
+
+        isFreshConversationIdentity(identity, previousConversationId = null) {
+            const kind = identity?.type === 'existing' ? 1 : identity?.type === 'new' ? 2 : 0;
+            const flags = Number(identity?.provider === 'chatgpt') | (Number(!!identity?.conversationId)<<1) |
+                (Number(identity?.conversationId !== previousConversationId)<<2) | (Number(!!previousConversationId)<<3);
+            const native = globalThis.CpoQueueEngine?.call('cpo_rollover_fresh',[kind,flags]);
+            return requireNative(native)===1;
+        }
+
+        matchConversationCapacity(text) {
+            return requireNative(globalThis.CpoQueueEngine?.providerMarker(1,String(text||'')));
+        }
+
+        buildContinuationHandoffMessage(context = {}) {
+            return requireNative(globalThis.CpoQueueEngine?.continuationHandoff?.(context));
+        }
+
+        getCurrentSurface(doc = (typeof document !== 'undefined' ? document : null), locationOrUrl = null) {
+            const loc = locationOrUrl ||
+                doc?.defaultView?.location ||
+                (typeof location !== 'undefined' ? location : '');
+            return this.classifyChatGPTSurface(loc);
+        }
+
+        shouldDiscoverConversationMessages(doc = (typeof document !== 'undefined' ? document : null)) {
+            return this.getCurrentSurface(doc).optimizerEligible;
+        }
+
+        allowsFallbackMessageDiscovery(doc = (typeof document !== 'undefined' ? document : null)) {
+            return this.getCurrentSurface(doc).allowFallbackDiscovery;
+        }
+
+        getComposerFromEventTarget(target, excludeSelector = '#cpo-root') {
+            return this.getComposerMatchFromEventTarget(target, excludeSelector)?.element || null;
+        }
+
+        getComposerText(composer) {
+            return requireNative(this._nativeSelectorEngine?.composerRead(1,composer));
+        }
+
+        clearComposer(composer) {
+            if(this._nativeSelectorEngine?.composerWrite(1,composer,'',0)!==true)throw new Error('Native composer clear unavailable.');
+        }
+        getGenerationState(doc = (typeof document !== 'undefined' ? document : null)) {
+            const emptySignals = {
+                stopButton: null,
+                streaming: null,
+                status: null,
+                spinner: null,
+                research: null,
+                error: null,
+                retry: null,
+                scope: 'active-response',
+                compatibility: 'unknown'
+            };
+            if (!doc) {
+                return {
+                    generating: false,
+                    hasActiveStopButton: false,
+                    hasResultStreaming: false,
+                    hasActiveToolOrResearch: false,
+                    deepResearchActive: false,
+                    matchedResearchMarker: null,
+                    researchStatusPreview: null,
+                    hasError: false,
+                    hasDeliveryTimedOut: false,
+                    hasTryAgainButton: false,
+                    errorSnippet: '',
+                    matchedError: '',
+                    conversationCapacityReached: false,
+                    requiresNewConversation: false,
+                    statusUnknown: true,
+                    compatibilityState: 'unknown',
+                    matchedSignals: emptySignals,
+                    url: '',
+                    title: ''
+                };
+            }
+
+            const turns = this.getConversationTurns(doc);
+            const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
+            const assistantErrorStop = getNodeRole(latestTurn, this._nativeSelectorEngine) === 'assistant' && hasAssistantErrorStop(latestTurn, this._nativeSelectorEngine);
+            const turnSet = new Set(turns);
+            const inActiveSurface = (node) => this.isActiveResponseNode(node, turns, latestTurn, turnSet);
+
+            const buttons = Array.from(doc.querySelectorAll('button')).filter(inActiveSurface);
+            const stopSelectorMatch = this.getSelectorMatch(doc, 'stopButton', (button) => {
+                return inActiveSurface(button) && !button.disabled && button.getAttribute('aria-disabled') !== 'true';
+            });
+            const semanticStopButton=requireNative(globalThis.CpoQueueEngine?.providerButtons(1,0,buttons))[0];
+            const stopButton = stopSelectorMatch.element || semanticStopButton;
+            const hasActiveStopButton = !!stopButton;
+
+            const streamingMatches = this.getSelectorNodes(doc, 'streaming', inActiveSurface);
+            const streamingMatch = streamingMatches[0] || { element: null, selector: '' };
+            const hasResultStreaming = !!streamingMatch.element;
+
+            const statusMatches = this.getSelectorNodes(doc, 'status', (node) => {
+                return inActiveSurface(node) && node.getAttribute('aria-live') !== 'off';
+            });
+            const visibleActiveNodes = statusMatches
+                .map(match => match.element)
+                .filter(node => !node.hidden && node.getAttribute('aria-hidden') !== 'true');
+
+            const spinnerMatches = this.getSelectorNodes(doc, 'spinner', (node) => {
+                return inActiveSurface(node) && !node.hidden && node.getAttribute('aria-hidden') !== 'true';
+            });
+            const hasActiveSpinner = spinnerMatches.length > 0;
+
+            const statusRaw=visibleActiveNodes.map(node=>node.innerText||node.textContent||'').join(' ');
+            const alertMatches=this.getSelectorNodes(doc,'errorAlerts',inActiveSurface);
+            const alerts=alertMatches.map(match=>match.element.innerText||match.element.textContent||'').join(' ');
+            const observation=requireNative(globalThis.CpoQueueEngine?.providerGenerationText(1,statusRaw,alerts,assistantErrorStop));
+            const statusText=observation.statusText,matchedResearchMarker=observation.research;
+            const hasActiveToolOrResearch=!!matchedResearchMarker||hasActiveSpinner;
+            const isDeepResearch=observation.deep,hasDeliveryTimedOut=observation.timeout,conversationCapacityReached=observation.capacity;
+            const matchedError=observation.error,errorSnippet=observation.snippet;
+            const retryMatch=this.getRetryButtonMatch(doc);
+            const hasTryAgainButton=!conversationCapacityReached&&!!retryMatch.element;
+            const hasKnownError = !!matchedError || hasDeliveryTimedOut || conversationCapacityReached || assistantErrorStop;
+            const isWorking = hasActiveStopButton || hasResultStreaming || hasActiveToolOrResearch;
+            const native = nativeGeneration(hasActiveStopButton,hasResultStreaming,hasActiveToolOrResearch,hasKnownError,hasTryAgainButton,isDeepResearch,conversationCapacityReached);
+            const generating = requireNative(native).generating;
+            const deepResearchActive = native.deepResearchActive;
+            const statusUnknown = native.statusUnknown;
+            const compatibilityState = native.compatibilityState;
+
+            const url = typeof location !== 'undefined' ? location.href : (doc.defaultView?.location?.href || '');
+            const title = typeof document !== 'undefined' ? document.title : (doc.title || '');
+
+            return {
+                generating,
+                hasActiveStopButton,
+                hasResultStreaming,
+                hasActiveToolOrResearch,
+                deepResearchActive,
+                matchedResearchMarker: matchedResearchMarker || null,
+                researchStatusPreview: statusText || null,
+                hasError: hasKnownError,
+                hasDeliveryTimedOut,
+                hasTryAgainButton,
+                conversationCapacityReached,
+                requiresNewConversation: conversationCapacityReached,
+                errorSnippet,
+                matchedError,
+                statusUnknown,
+                compatibilityState,
+                matchedSignals: {
+                    stopButton: stopSelectorMatch.selector || (semanticStopButton ? 'stopButton.semantic' : null),
+                    streaming: streamingMatch.selector || null,
+                    status: statusMatches[0]?.selector || null,
+                    spinner: spinnerMatches[0]?.selector || null,
+                    research: matchedResearchMarker ? `researchMarkers:${matchedResearchMarker}` : null,
+                    error: conversationCapacityReached
+                        ? (alertMatches[0]?.selector || statusMatches[0]?.selector || 'conversationCapacityMarkers')
+                        : (assistantErrorStop
+                            ? 'assistant-error-stop'
+                            : (alertMatches[0]?.selector || (hasTryAgainButton ? retryMatch.selector || retryMatch.signalKey : null))),
+                    retry: hasTryAgainButton ? (retryMatch.selector || retryMatch.signalKey) : null,
+                    scope: 'active-response',
+                    compatibility: compatibilityState
+                },
+                url,
+                title
+            };
+        }
+
+        /** @param {Document | Element | null} [doc] */
+        getRetryButtonMatch(doc = (typeof document !== 'undefined' ? document : null)) {
+            const empty = {
+                element: null,
+                selector: '',
+                signalKey: 'retryButton'
+            };
+            if (!doc) return empty;
+
+            const matches=buttons=>requireNative(globalThis.CpoQueueEngine?.providerButtons(1,1,buttons));
+            const turns = this.getConversationTurns(doc);
+            const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
+
+            if (latestTurn) {
+                const turnButtons = Array.from(latestTurn.querySelectorAll('button'));
+                const foundInTurn = matches(turnButtons).at(-1);
+                if (foundInTurn) {
+                    return {
+                        element: foundInTurn,
+                        selector: 'retryButton.latestTurn',
+                        signalKey: 'retryButton'
+                    };
+                }
+            }
+
+            const alertMatches = this.getSelectorNodes(doc, 'errorAlerts');
+            for (const alertMatch of alertMatches) {
+                const alertButtons = Array.from(alertMatch.element.querySelectorAll('button'));
+                const foundInAlert = matches(alertButtons).at(-1);
+                if (foundInAlert) {
+                    return {
+                        element: foundInAlert,
+                        selector: alertMatch.selector,
+                        signalKey: 'retryButton'
+                    };
+                }
+            }
+
+            const allButtons = Array.from(doc.querySelectorAll('button'));
+            const fallback = matches(allButtons).reverse().find(btn=>this.isActiveResponseNode(btn,turns,latestTurn));
+            return fallback
+                ? { element: fallback, selector: 'retryButton.semantic', signalKey: 'retryButton' }
+                : empty;
+        }
+
+        /** @param {Document | Element | null} [doc] */
+        getRetryButton(doc = (typeof document !== 'undefined' ? document : null)) {
+            return this.getRetryButtonMatch(doc).element;
+        }
+
+        clickRetryButton(doc = (typeof document !== 'undefined' ? document : null)) {
+            const btn = this.getRetryButton(doc);
+            if (!btn) return false;
+            const native=this._nativeSelectorEngine?.click(btn);
+            return native===true;
+        }
+
+        getLastAssistantTurn(doc = (typeof document !== 'undefined' ? document : null)) {
+            if (!doc) return null;
+
+            const turns = this.getConversationTurns(doc);
+            if (turns.length === 0) return null;
+
+            const latestTurn = turns[turns.length - 1];
+            const flags=Number(!!latestTurn.querySelector('[data-message-author-role="assistant"]')||latestTurn.getAttribute('data-message-author-role')==='assistant')|
+                (Number(!!latestTurn.querySelector('[data-message-author-role="user"]')||latestTurn.getAttribute('data-message-author-role')==='user')<<1)|
+                (Number(!!latestTurn.querySelector(this.compatibilitySignals.assistantContentSelectors.join(',')))<<2)|(Number(turns.length>=2)<<3);
+            const isAssistant=requireNative(this._nativeSelectorEngine?.lastAssistant(flags));
+
+            if (!isAssistant) {
+                return {
+                    isAssistant: false,
+                    text: '',
+                    hasError: false,
+                    hasDeliveryTimeout: false,
+                    hasRetry: false,
+                    hasCompletedText: false
+                };
+            }
+
+            const text = (latestTurn.innerText || latestTurn.textContent || '').trim();
+            const alertMatches = this.getSelectorNodes(latestTurn, 'errorAlerts');
+            const alertText = alertMatches
+                .map(match => match.element.innerText || match.element.textContent || '')
+                .join(' ')
+                .toLowerCase()
+                .replace(/\s+/g, ' ')
+                .trim();
+
+            const hasDeliveryTimeout=!!requireNative(globalThis.CpoQueueEngine?.providerMarker(4,alertText));
+            const hasGeneralError=!!requireNative(globalThis.CpoQueueEngine?.providerMarker(5,alertText));
+            const hasErrorStop = hasAssistantErrorStop(latestTurn, this._nativeSelectorEngine);
+            const errorSignal = this.getAssistantTurnErrorSignal(text);
+            const hasError = hasDeliveryTimeout || hasGeneralError || hasErrorStop || !!errorSignal;
+
+            const retryBtn = this.getRetryButton(latestTurn);
+            const hasRetry = !!retryBtn;
+
+            return {
+                isAssistant: true,
+                text,
+                hasError,
+                hasErrorStop,
+                hasDeliveryTimeout,
+                hasRetry,
+                errorSignal,
+                hasCompletedText: isAssistant && !hasError && !hasRetry && text.length > 0
+            };
+        }
+
+        getMainRoot(doc = (typeof document !== 'undefined' ? document : null)) {
+            return this.getSelectorMatch(doc, 'mainRoot').element || null;
+        }
+
+        getMessageNodes(doc = (typeof document !== 'undefined' ? document : null), mainRoot = null) {
+            return this.getMessageDiscovery(doc, mainRoot).nodes;
+        }
+
+        normalizeMessageNode(node, mainRoot) {
+            return this._nativeSelectorEngine?.normalizeTurn(node,mainRoot,this.compatibilitySignals.turnContext||[])||null;
+        }
+
+        isValidMessageNode(node, mainRoot) {
+            if (!node || !mainRoot.contains(node)) return false;
+            const native=this._nativeSelectorEngine?.messagePredicate?.(0,node,mainRoot,this);
+            return requireNative(native);
+        }
+
+        getFallbackMessages(doc, mainRoot) {
+            const result=this.getMessageDiscovery(doc,mainRoot);
+            return result.fallback?result.nodes:[];
+        }
+
+        isValidFallbackNode(node, mainRoot) {
+            if (!node || !mainRoot.contains(node)) return false;
+            const native=this._nativeSelectorEngine?.messagePredicate?.(1,node,mainRoot,this);
+            return requireNative(native);
+        }
+
+    }
+
+    const GEMINI_SELECTORS = catalogView(2);
+
+    class GeminiAdapter extends ProviderAdapter {
+        constructor() {
+            super('gemini', 'Gemini', {
+                supportsOptimizer: false,
+                selectors: GEMINI_SELECTORS
+            });
+        }
+
+        isSupportedUrl(url) {
+            if (typeof url !== 'string') {
+                return false;
+            }
+
+            try {
+                const parsed = new URL(url);
+                if (parsed.protocol !== 'https:') return false;
+                const native = globalThis.CpoQueueEngine?.providerHost(parsed.hostname.toLowerCase());
+                return native === PROVIDER_CODES.gemini;
+            } catch {
+                return false;
+            }
+        }
+
+        getConversationIdentity(locationOrUrl) {
+            const urlStr = typeof locationOrUrl === 'string'
+                ? locationOrUrl
+                : (locationOrUrl?.href || String(locationOrUrl || ''));
+
+            if (!this.isSupportedUrl(urlStr)) {
+                return {
+                    provider: this.id,
+                    type: 'unsupported',
+                    conversationId: null,
+                    key: `${this.id}:unsupported`
+                };
+            }
+
+            try {
+                const parsed = new URL(urlStr);
+                const pathname = parsed.pathname || '/';
+
+                const native = nativeRoute(this.id, pathname);
+                if (native) return { provider: this.id, ...native,
+                    key: native.key };
+
+                return {provider:this.id,type:'unsupported',conversationId:null,key:this.id+':unsupported'};
+            } catch {
+                return {
+                    provider: this.id,
+                    type: 'unsupported',
+                    conversationId: null,
+                    key: `${this.id}:unsupported`
+                };
+            }
+        }
+
+        getComposerFromEventTarget(target, excludeSelector = '#cpo-root') {
+            const match=this._nativeSelectorEngine?.eventAncestor(target,this.selectors.composer,excludeSelector,null,'composer');
+            const composer=match?.element;
+            if(!composer)return null;
+
+            const flags=Number((composer.tagName||'').toLowerCase()==='textarea') |
+                (Number(composer.getAttribute('contenteditable')==='true')<<1) |
+                (Number(!!composer.classList?.contains?.('ql-editor'))<<3) |
+                (Number(false)<<4) |
+                (Number(!!composer.closest('model-response, .model-response, .response-container, message-content'))<<5);
+            const native=providerPredicate(this.id,2,flags);
+            if(requireNative(native)!==1)return null;
+
+            return composer;
+        }
+
+        getComposerText(composer) {
+            return requireNative(this._nativeSelectorEngine?.composerRead(2,composer));
+        }
+
+        clearComposer(composer) {
+            if(this._nativeSelectorEngine?.composerWrite(2,composer,'',0)!==true)throw new Error('Native composer clear unavailable.');
+        }
+        getGenerationState(doc = (typeof document !== 'undefined' ? document : null)) {
+            if (!doc) {
+                return {
+                    generating: false,
+                    hasActiveStopButton: false,
+                    hasResultStreaming: false,
+                    hasActiveToolOrResearch: false,
+                    deepResearchActive: false,
+                    matchedResearchMarker: null,
+                    researchStatusPreview: null,
+                    hasError: false,
+                    hasTryAgainButton: false,
+                    errorSnippet: '',
+                    matchedError: '',
+                    url: '',
+                    title: ''
+                };
+            }
+
+            const buttons = Array.from(doc.querySelectorAll('button') || []);
+            const stopButton=requireNative(globalThis.CpoQueueEngine?.providerButtons(2,0,buttons))[0];
+            const hasActiveStopButton = !!stopButton;
+
+            const streamingSelector = this.selectors.streaming.join(',');
+            let hasResultStreaming = false;
+            try {
+                hasResultStreaming = !!doc.querySelector(streamingSelector);
+            } catch {
+                hasResultStreaming = false;
+            }
+
+            const statusSelector = this.selectors.status.join(',');
+            let statusNodes = [];
+            try {
+                statusNodes = Array.from(doc.querySelectorAll(statusSelector))
+                    .filter(node => node.getAttribute?.('aria-live') !== 'off');
+            } catch {
+                statusNodes = [];
+            }
+
+            const visibleActiveNodes = statusNodes.filter(node => !node.hidden && node.getAttribute?.('aria-hidden') !== 'true');
+            const statusRaw=visibleActiveNodes.map(node=>node.innerText||node.textContent||'').join(' ');
+            const alertMatches=this.getSelectorNodes(doc,'errorAlerts');
+            const alertText=alertMatches.map(match=>match.element.innerText||match.element.textContent||'').join(' ');
+            const observation=requireNative(globalThis.CpoQueueEngine?.providerGenerationText(2,statusRaw,alertText));
+            const statusText=observation.statusText,matchedResearchMarker=observation.research;
+            const hasActiveToolOrResearch=!!matchedResearchMarker;
+            const matchedError=observation.error,errorSnippet=observation.snippet;
+            const hasTryAgainButton=requireNative(globalThis.CpoQueueEngine?.providerButtons(2,1,buttons)).length>0;
+            const hasKnownError = !!matchedError;
+            const isWorking = hasActiveStopButton || hasResultStreaming || hasActiveToolOrResearch;
+            const generating = requireNative(nativeGeneration(hasActiveStopButton,hasResultStreaming,hasActiveToolOrResearch,hasKnownError,hasTryAgainButton)).generating;
+
+            const url = typeof location !== 'undefined' ? location.href : (doc.defaultView?.location?.href || '');
+            const title = typeof document !== 'undefined' ? document.title : (doc.title || '');
+
+            return {
+                generating,
+                hasActiveStopButton,
+                hasResultStreaming,
+                hasActiveToolOrResearch,
+                deepResearchActive: false,
+                matchedResearchMarker,
+                researchStatusPreview: statusText,
+                hasError: hasKnownError,
+                hasTryAgainButton: !!hasTryAgainButton,
+                errorSnippet,
+                matchedError,
+                url,
+                title
+            };
+        }
+
+        getMainRoot() {
+            // Optimizer is unsupported on Gemini; fail closed.
+            return null;
+        }
+
+        getMessageNodes() {
+            return [];
+        }
+
+        getFallbackMessages() {
+            return [];
+        }
+    }
+
+    const CLAUDE_SELECTORS = catalogView(3);
+
+    class ClaudeAdapter extends ProviderAdapter {
+        constructor() {
+            super('claude', 'Claude', {
+                supportsOptimizer: false,
+                selectors: CLAUDE_SELECTORS
+            });
+        }
+
+        isSupportedUrl(url) {
+            if (typeof url !== 'string') {
+                return false;
+            }
+
+            try {
+                const parsed = new URL(url);
+                if (parsed.protocol !== 'https:') return false;
+                const native = globalThis.CpoQueueEngine?.providerHost(parsed.hostname.toLowerCase());
+                return native === PROVIDER_CODES.claude;
+            } catch {
+                return false;
+            }
+        }
+
+        getConversationIdentity(locationOrUrl) {
+            const urlStr = typeof locationOrUrl === 'string'
+                ? locationOrUrl
+                : (locationOrUrl?.href || String(locationOrUrl || ''));
+
+            if (!this.isSupportedUrl(urlStr)) {
+                return {
+                    provider: this.id,
+                    type: 'unsupported',
+                    conversationId: null,
+                    key: `${this.id}:unsupported`
+                };
+            }
+
+            try {
+                const parsed = new URL(urlStr);
+                const pathname = parsed.pathname || '/';
+
+                const native = nativeRoute(this.id, pathname);
+                if (native) return { provider: this.id, ...native,
+                    key: native.key };
+
+                return {provider:this.id,type:'unsupported',conversationId:null,key:this.id+':unsupported'};
+            } catch {
+                return {
+                    provider: this.id,
+                    type: 'unsupported',
+                    conversationId: null,
+                    key: `${this.id}:unsupported`
+                };
+            }
+        }
+
+        getComposerFromEventTarget(target, excludeSelector = '#cpo-root') {
+            const match=this._nativeSelectorEngine?.eventAncestor(target,this.selectors.composer,excludeSelector,null,'composer');
+            const composer=match?.element;
+            if(!composer)return null;
+
+            const flags=Number((composer.tagName||'').toLowerCase()==='textarea') |
+                (Number(composer.getAttribute('contenteditable')==='true')<<1) |
+                (Number(!!composer.classList?.contains?.('ProseMirror'))<<3) |
+                (Number(composer.getAttribute('data-testid') === 'chat-input')<<4) |
+                (Number(!!composer.closest('[data-testid="user-message"], .font-claude-response, .font-user-message'))<<5);
+            const native=providerPredicate(this.id,2,flags);
+            if(requireNative(native)!==1)return null;
+
+            return composer;
+        }
+
+        getComposerText(composer) {
+            return requireNative(this._nativeSelectorEngine?.composerRead(3,composer));
+        }
+
+        clearComposer(composer) {
+            if(this._nativeSelectorEngine?.composerWrite(3,composer,'',0)!==true)throw new Error('Native composer clear unavailable.');
+        }
+        getGenerationState(doc = (typeof document !== 'undefined' ? document : null)) {
+            if (!doc) {
+                return {
+                    generating: false,
+                    hasActiveStopButton: false,
+                    hasResultStreaming: false,
+                    hasActiveToolOrResearch: false,
+                    deepResearchActive: false,
+                    matchedResearchMarker: null,
+                    researchStatusPreview: null,
+                    hasError: false,
+                    hasTryAgainButton: false,
+                    errorSnippet: '',
+                    matchedError: '',
+                    url: '',
+                    title: ''
+                };
+            }
+
+            const buttons = Array.from(doc.querySelectorAll('button') || []);
+            const stopButton=requireNative(globalThis.CpoQueueEngine?.providerButtons(3,0,buttons))[0];
+            const hasActiveStopButton = !!stopButton;
+
+            const streamingSelector = this.selectors.streaming.join(',');
+            let hasResultStreaming = false;
+            try {
+                hasResultStreaming = !!doc.querySelector(streamingSelector);
+            } catch {
+                hasResultStreaming = false;
+            }
+
+            const statusSelector = this.selectors.status.join(',');
+            let statusNodes = [];
+            try {
+                statusNodes = Array.from(doc.querySelectorAll(statusSelector))
+                    .filter(node => node.getAttribute?.('aria-live') !== 'off');
+            } catch {
+                statusNodes = [];
+            }
+
+            const visibleActiveNodes = statusNodes.filter(node => !node.hidden && node.getAttribute?.('aria-hidden') !== 'true');
+            const statusRaw=visibleActiveNodes.map(node=>node.innerText||node.textContent||'').join(' ');
+            const alertMatches=this.getSelectorNodes(doc,'errorAlerts');
+            const alertText=alertMatches.map(match=>match.element.innerText||match.element.textContent||'').join(' ');
+            const observation=requireNative(globalThis.CpoQueueEngine?.providerGenerationText(3,statusRaw,alertText));
+            const statusText=observation.statusText,matchedResearchMarker=observation.research;
+            const hasActiveToolOrResearch=!!matchedResearchMarker;
+            const matchedError=observation.error,errorSnippet=observation.snippet;
+            const hasTryAgainButton=requireNative(globalThis.CpoQueueEngine?.providerButtons(3,1,buttons)).length>0;
+            const hasKnownError = !!matchedError;
+            const isWorking = hasActiveStopButton || hasResultStreaming || hasActiveToolOrResearch;
+            const generating = requireNative(nativeGeneration(hasActiveStopButton,hasResultStreaming,hasActiveToolOrResearch,hasKnownError,hasTryAgainButton)).generating;
+
+            const url = typeof location !== 'undefined' ? location.href : (doc.defaultView?.location?.href || '');
+            const title = typeof document !== 'undefined' ? document.title : (doc.title || '');
+
+            return {
+                generating,
+                hasActiveStopButton,
+                hasResultStreaming,
+                hasActiveToolOrResearch,
+                deepResearchActive: false,
+                matchedResearchMarker,
+                researchStatusPreview: statusText,
+                hasError: hasKnownError,
+                hasTryAgainButton: !!hasTryAgainButton,
+                errorSnippet,
+                matchedError,
+                url,
+                title
+            };
+        }
+
+        getMainRoot() {
+            // Optimizer is unsupported on Claude; fail closed.
+            return null;
+        }
+
+        getMessageNodes() {
+            return [];
+        }
+
+        getFallbackMessages() {
+            return [];
+        }
+    }
+
+    const chatGPTAdapterInstance = new ChatGPTAdapter();
+    const geminiAdapterInstance = new GeminiAdapter();
+    const claudeAdapterInstance = new ClaudeAdapter();
+
+    const PROVIDERS = {
+        chatgpt: chatGPTAdapterInstance,
+        gemini: geminiAdapterInstance,
+        claude: claudeAdapterInstance
+    };
+
+    function getProvider(id) {
+        return PROVIDERS[id] || null;
+    }
+
+    function getProviderForUrl(url) {
+        if (typeof url !== 'string' && (!url || typeof url.href !== 'string')) {
+            return null;
+        }
+        const urlStr = typeof url === 'string' ? url : url.href;
+        try {
+            const parsed = new URL(urlStr);
+            if (parsed.protocol !== 'https:') return null;
+            const native = globalThis.CpoQueueEngine?.providerHost(parsed.hostname.toLowerCase());
+            return PROVIDERS[['','chatgpt','gemini','claude'][native]] || null;
+        } catch { return null; }
+    }
+
+    function getConversationIdentity(locationOrUrl) {
+        const provider = getProviderForUrl(locationOrUrl);
+        if (provider) {
+            return provider.getConversationIdentity(locationOrUrl);
+        }
+        return {
+            provider: 'unknown',
+            type: 'unsupported',
+            conversationId: null,
+            key: 'unknown:unsupported'
+        };
+    }
+
+    const ProviderAdapterRegistry = {
+        ProviderAdapter,
+        ChatGPTAdapter,
+        GeminiAdapter,
+        ClaudeAdapter,
+        CHATGPT_SELECTORS,
+        GEMINI_SELECTORS,
+        CLAUDE_SELECTORS,
+        PROVIDERS,
+        getProvider,
+        getProviderForUrl,
+        getConversationIdentity,
+        normalizeCommandText,
+        fingerprintCommandText
+    };
+
+    if (typeof globalThis !== 'undefined') {
+        globalThis.ProviderAdapter = ProviderAdapter;
+        globalThis.ChatGPTAdapter = ChatGPTAdapter;
+        globalThis.GeminiAdapter = GeminiAdapter;
+        globalThis.ClaudeAdapter = ClaudeAdapter;
+        globalThis.CHATGPT_SELECTORS = CHATGPT_SELECTORS;
+        globalThis.GEMINI_SELECTORS = GEMINI_SELECTORS;
+        globalThis.CLAUDE_SELECTORS = CLAUDE_SELECTORS;
+        globalThis.ProviderAdapters = PROVIDERS;
+        globalThis.ProviderAdapterRegistry = ProviderAdapterRegistry;
+        globalThis.getProvider = getProvider;
+        globalThis.getProviderForUrl = getProviderForUrl;
+        globalThis.getConversationIdentity = getConversationIdentity;
+        globalThis.normalizeCommandText = normalizeCommandText;
+        globalThis.fingerprintCommandText = fingerprintCommandText;
+    }
+
+    if (typeof module !== 'undefined' && module.exports) {
+        Object.assign(module.exports,ProviderAdapterRegistry);
+    }
 })();

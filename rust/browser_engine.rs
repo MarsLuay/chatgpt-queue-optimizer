@@ -20,7 +20,7 @@ fn h(op: u32, a: u32, b: u32, c: u32) -> u32 {
 }
 
 #[no_mangle]
-pub extern "C" fn cpo_browser_abi() -> u32 { 9 }
+pub extern "C" fn cpo_browser_abi() -> u32 { 10 }
 
 #[cfg(target_arch = "wasm32")]
 mod sequence;
@@ -534,6 +534,33 @@ pub extern "C" fn cpo_dom_submit_stage(stage: u32, flags: u32) -> u32 {
     if flags & 8 == 0 { return 4; }
     if flags & 16 == 0 { return 5; }
     6
+}
+// Walk a browser-owned event target's ancestor chain. Host operations
+// expose only current-node facts and selector predicates, never policy.
+#[cfg(target_arch="wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_dom_event_ancestor(count:u32)->u32{
+    while h(161,0,0,0)!=0{
+        if h(162,0,0,0)!=0{return 0;}
+        for i in 0..count{
+            if h(163,i,0,0)!=0{return i+1;}
+        }
+        h(164,0,0,0);
+    }
+    0
+}
+#[cfg(target_arch="wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_dom_normalize_turn(count:u32)->u32{
+    if h(165,0,0,0)==0{return 0;}
+    for i in 0..count{
+        if h(166,i,0,0)!=0{return i+2;}
+    }
+    1
+}
+#[no_mangle]
+pub extern "C" fn cpo_dom_last_assistant(flags:u32)->u32{
+    (flags&1!=0||(flags&2==0&&flags&(4|8)!=0)) as u32
 }
 // Observe DOM ancestry without retaining an additional traversal list.
 // 100 reports current ancestor role: 0 outside, 1 latest, 2 historical,

@@ -77,7 +77,7 @@ global.chrome = {
 };
 
 const utils = require('../utils.js');
-const adapterModule = require('../provider-adapter.js');
+const adapterModule = require('../rust-browser-bridge.js');
 const { ChatGPTAdapter, ProviderAdapter, getProvider, getProviderForUrl } = adapterModule;
 const {
     validateJobTargetConversation,

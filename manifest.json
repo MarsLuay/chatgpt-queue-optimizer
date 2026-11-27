@@ -36,7 +36,6 @@
       "js": [
         "utils.js",
         "rust-queue-bridge.js",
-        "provider-adapter.js",
         "rust-browser-bridge.js",
         "content.js"
       ],

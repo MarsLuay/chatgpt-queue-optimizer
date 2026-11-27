@@ -26,7 +26,6 @@ REPO_FILES = [
     "rust-queue-bridge.js",
     "content.js",
     "rust-browser-bridge.js",
-    "provider-adapter.js",
     "utils.js",
     "popup.html",
     "popup.js",
@@ -131,7 +130,7 @@ def build_firefox_source(repo_dir, target_dir):
         "offline_enabled": base.get("offline_enabled", True),
         "browser_action": browser_action,
         "background": {
-            "scripts": ["utils.js", "rust-queue-bridge.js", "provider-adapter.js", "background.js"],
+            "scripts": ["utils.js", "rust-queue-bridge.js", "rust-browser-bridge.js", "background.js"],
             "persistent": True,
         },
         "options_ui": {

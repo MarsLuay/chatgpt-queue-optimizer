@@ -416,7 +416,7 @@ function setupTestEnv() {
   };
 
   require('../utils.js');
-  require('../provider-adapter.js');
+  require('../rust-browser-bridge.js');
   delete require.cache[require.resolve('../content.js')];
   const { ChatGPTOptimizer } = require('../content.js');
   const optimizer = dom.window.ChatGPTOptimizerInstance || new ChatGPTOptimizer();
@@ -472,10 +472,10 @@ function setupGeminiTestEnv() {
   };
 
   delete require.cache[require.resolve('../utils.js')];
-  delete require.cache[require.resolve('../provider-adapter.js')];
+  delete require.cache[require.resolve('../rust-browser-bridge.js')];
   delete require.cache[require.resolve('../content.js')];
   require('../utils.js');
-  require('../provider-adapter.js');
+  require('../rust-browser-bridge.js');
   const { ChatGPTOptimizer } = require('../content.js');
   // Force a fresh instance against the Gemini location
   delete dom.window.ChatGPTOptimizerInstance;
@@ -1113,10 +1113,10 @@ function setupClaudeTestEnv() {
   };
 
   delete require.cache[require.resolve('../utils.js')];
-  delete require.cache[require.resolve('../provider-adapter.js')];
+  delete require.cache[require.resolve('../rust-browser-bridge.js')];
   delete require.cache[require.resolve('../content.js')];
   require('../utils.js');
-  require('../provider-adapter.js');
+  require('../rust-browser-bridge.js');
   const { ChatGPTOptimizer } = require('../content.js');
   delete dom.window.ChatGPTOptimizerInstance;
   const optimizer = new ChatGPTOptimizer();
@@ -1343,7 +1343,7 @@ test('Load More preserves expanded window through repeated passes and resets on 
 });
 
 test('message deduplication is ancestor-based without reading large message strings', () => {
-  const provider = require('../provider-adapter.js').getProvider('chatgpt');
+  const provider = require('../rust-browser-bridge.js').getProvider('chatgpt');
   const parent = { parentElement: null };
   const child = { parentElement: parent };
   const other = { parentElement: null };

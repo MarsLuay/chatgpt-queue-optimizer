@@ -26,7 +26,7 @@ test('package.json exposes lint, typecheck, and combined check scripts', () => {
 
 test('static analysis config covers extension sources and checked JS', () => {
     const eslintConfig = read('eslint.config.js');
-    for (const name of ['background.js', 'content.js', 'popup.js', 'utils.js', 'provider-adapter.js']) {
+    for (const name of ['background.js', 'content.js', 'popup.js', 'utils.js', 'rust-browser-bridge.js']) {
         assert.match(eslintConfig, new RegExp(name.replace('.', '\\.')));
     }
     assert.match(eslintConfig, /test\/\*\*\/\*\.js|tests\/\*\*\/\*\.js/);

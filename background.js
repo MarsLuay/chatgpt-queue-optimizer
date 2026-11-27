@@ -161,7 +161,7 @@ function isIncompleteToolResponse(responseState = {}) {
 let scheduledStorageWrite = Promise.resolve();
 
 if (typeof importScripts === 'function') {
-    importScripts('utils.js', 'rust-queue-bridge.js', 'provider-adapter.js');
+    importScripts('utils.js', 'rust-queue-bridge.js', 'rust-browser-bridge.js');
 } else if(typeof require==='function'&&!globalThis.CpoBrowserApi) {
     require('./utils.js');
 }
@@ -172,7 +172,7 @@ const jobs = globalThis.CpoQueueEngine.createLiveJobs();
 let providerAdapterRegistry = typeof globalThis !== 'undefined' ? globalThis.ProviderAdapterRegistry : null;
 if (!providerAdapterRegistry && typeof require === 'function') {
     try {
-        providerAdapterRegistry = require('./provider-adapter.js');
+        providerAdapterRegistry = require('./rust-browser-bridge.js');
     } catch {}
 }
 

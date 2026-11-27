@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 14);
+    assert.equal(e.cpo_queue_abi(), 15);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -108,7 +108,7 @@ test('scheduler keeps full epoch precision and rejects early or duplicate claims
 
 test('native provider routing and marker matching preserve legacy identities', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
-    const registry = require('../provider-adapter.js');
+    const registry = require('../rust-browser-bridge.js');
     const urls = [
         'https://chatgpt.com/', 'https://chat.openai.com/c/abc-1',
         'https://chatgpt.com/g/tool/c/abc', 'https://chatgpt.com/g/my_gpt/',
@@ -529,4 +529,17 @@ test('native provider snapshots preserve exact-match safety and response associa
     assert.equal(engine.textBatch(22,['Something went wrongish']), '');
     assert.equal(engine.providerSemanticButton(1,[[0,'retry','',''],[1,'other','Try again','']]),1);
     assert.equal(engine.providerSemanticButton(0,[[1,'stop-generating','','']]),0);
+});
+
+test('native semantic observation spans all supported providers',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    const button=(label,disabled=false)=>({disabled,getAttribute:k=>k==='aria-label'?label:'',innerText:'',className:''});
+    const stop=button('Stop generating');
+    assert.deepEqual(engine.providerButtons(2,0,[button('Stop',true),stop,button('Submit')]),[stop]);
+    const observation=engine.providerGenerationText(1,'Deep research','maximum length for this conversation');
+    assert.equal(observation.capacity,true);
+    assert.equal(observation.deep,true);
+    assert.equal(observation.error,'conversation-max-length');
+    assert.deepEqual(engine.providerDiagnostics(7,0,true),['empty-conversation']);
 });

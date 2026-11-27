@@ -1,7 +1,7 @@
 //! Queue execution decisions and streaming legacy-compatible UTF-16 fingerprints.
 
 #[no_mangle]
-pub extern "C" fn cpo_queue_abi() -> u32 { 14 }
+pub extern "C" fn cpo_queue_abi() -> u32 { 15 }
 
 const OFFSET: u32 = 2166136261;
 const PRIME: u32 = 16777619;
@@ -1858,6 +1858,7 @@ mod presentation_batch {
         }
         Some(Vec::new())
     }
+    include!("provider_observation.rs");
     fn execute(op:u32,f:&[&[u16]])->Option<Vec<Vec<u16>>>{
         let single=|v:Vec<u16>|Some(vec![v]);
         match op{
@@ -1907,6 +1908,10 @@ mod presentation_batch {
             23=>turn_snapshot(f),
             24=>bound_response(f),
             25=>single(semantic_button(f)?),
+            26=>provider_marker(f),
+            27=>provider_buttons(f),
+            28=>provider_generation_text(f),
+            29=>provider_diagnostics(f),
             _=>None
         }
     }

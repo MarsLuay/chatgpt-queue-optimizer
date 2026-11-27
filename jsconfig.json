@@ -18,7 +18,6 @@
   "include": [
     "background.js",
     "content.js",
-    "provider-adapter.js",
     "utils.js",
     "types/extension.d.ts"
   ],

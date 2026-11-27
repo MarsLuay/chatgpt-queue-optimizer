@@ -77,7 +77,7 @@
       let registry = typeof globalThis !== 'undefined' ? globalThis.ProviderAdapterRegistry : null;
       if (!registry && typeof require === 'function') {
         try {
-          registry = require('./provider-adapter.js');
+          registry = require('./rust-browser-bridge.js');
         } catch {}
       }
 
