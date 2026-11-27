@@ -4,6 +4,10 @@
 #![cfg_attr(target_arch = "wasm32", no_std)]
 
 mod history_reader;
+mod history_storage;
+pub use history_storage::{cpo_history_tx_mode,cpo_history_tx_step,cpo_history_page_plan,cpo_history_legacy_row};
+#[cfg(target_arch="wasm32")]
+pub use history_storage::{cpo_history_write_row,cpo_history_read_row};
 pub use history_reader::cpo_reader_guard;
 #[cfg(target_arch="wasm32")]
 pub use history_reader::{cpo_reader_state,cpo_reader_capture};
@@ -22,7 +26,7 @@ const MAX_TURNS: u32 = 4096;
 const PAGE: u32 = 16;
 
 #[no_mangle]
-pub extern "C" fn cpo_history_abi() -> u32 { 4 }
+pub extern "C" fn cpo_history_abi() -> u32 { 5 }
 
 // Snapshot row framing: magic, index, role, truncation flag, reserved bytes,
 // UTF-8 length, UTF-8 text. UTF-8 is validated on both encode and decode.

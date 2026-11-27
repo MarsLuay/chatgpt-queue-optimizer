@@ -30,3 +30,4 @@ node_modules/
 # Rust-generated browser API interoperability (not a handwritten source).
 /utils.js
 /history-viewer.js
+/history-store.js

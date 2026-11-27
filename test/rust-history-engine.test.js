@@ -11,7 +11,7 @@ async function nativeStore() {
     const store = new CpoHistoryStore(null);
     const result = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     store.core = result.instance.exports;
-    assert.equal(store.core.cpo_history_abi(), 4);
+    assert.equal(store.core.cpo_history_abi(), 5);
     return store;
 }
 
@@ -125,4 +125,14 @@ test('native reader application controls and capture transitions', {skip}, async
     assert.equal(e.cpo_reader_batch(0,20,4,4,1),0);
     assert.equal(e.cpo_reader_continue(4096,5000,16,16),0);
     assert.equal(e.cpo_reader_partial(4096,5000,0),1);
+});
+
+test('native transaction cursors remain independent and legacy validation is fail closed', {skip}, async()=>{
+    const store=await nativeStore(), e=store.core;
+    const start=e.cpo_history_tx_step(2,0,0);
+    const a=e.cpo_history_tx_step(2,start,32|2), b=e.cpo_history_tx_step(2,start,32|1);
+    assert.equal(e.cpo_history_tx_step(2,a,0)&7,3);
+    assert.equal(e.cpo_history_tx_step(2,b,0)&7,4);
+    assert.throws(()=>store.decodeRow({index:0,role:'bad',text:'x'},0),/Invalid/);
+    assert.throws(()=>new CpoHistoryStore(null).decodeRow({index:0,role:'user',text:'x'},0),/Required Rust/);
 });
