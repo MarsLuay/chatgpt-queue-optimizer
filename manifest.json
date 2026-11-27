@@ -36,6 +36,7 @@
       "js": [
         "utils.js",
         "rust-queue-bridge.js",
+        "rust-browser-bindings.js",
         "rust-browser-bridge.js",
         "content.js"
       ],

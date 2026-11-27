@@ -161,7 +161,7 @@ function isIncompleteToolResponse(responseState = {}) {
 let scheduledStorageWrite = Promise.resolve();
 
 if (typeof importScripts === 'function') {
-    importScripts('utils.js', 'rust-queue-bridge.js', 'rust-browser-bridge.js');
+    importScripts('utils.js', 'rust-queue-bridge.js', 'rust-browser-bindings.js', 'rust-browser-bridge.js');
 } else if(typeof require==='function'&&!globalThis.CpoBrowserApi) {
     require('./utils.js');
 }

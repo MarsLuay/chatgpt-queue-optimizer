@@ -23,3 +23,6 @@ node_modules/
 
 # Native Mach-O launcher is produced locally on macOS; never track a generated executable.
 /upload.app/Contents/MacOS/upload
+
+# Generated browser WASM ABI loader (produced alongside the WASM binary).
+/rust-browser-bindings.js

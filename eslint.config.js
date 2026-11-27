@@ -110,6 +110,7 @@ module.exports = [
     {
         ignores: [
             'build/**',
+            'rust-browser-bindings.js',
             'node_modules/**',
             'chatgpt-queue-optimizer.crx',
             'chatgpt-queue-optimizer.pem'

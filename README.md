@@ -330,3 +330,7 @@ Gemini and Claude share a single browser projection; supported providers share n
 ### Native generic response projection and asynchronous content fixtures (queue ABI 20)
 
 Generic-provider response settlement and the decision to inspect the last assistant now execute in Rust. Content integration fixtures load actual generated WASM from a local extension-resource transport and await production initialization and initial optimizer binding. DOM fixtures expose the text walker and ordering primitives used by native discovery. No live browser or Rust compiler verification has been completed.
+
+### Generated browser WASM bindings
+
+The Rust build and package commands now generate `rust-browser-bindings.js` directly from the compiled `optimizer_browser.wasm` type, import, function and export sections. The generated loader validates the native host import, exported function arities and shared ABI version; the build fails if the handwritten DOM bridge references a missing native export. Generated output is ignored by Git and packaged with its matching WASM binary. Run the normal native build before loading an unpacked checkout. Browser DOM primitives still require JavaScript host code; this change removes the handwritten loader and export allowlist, not the remaining host callbacks. No new dependencies are required.

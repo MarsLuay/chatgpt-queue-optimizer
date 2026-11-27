@@ -1,6 +1,7 @@
 #[cfg(windows)]
 mod windows_ui;
 mod secrets;
+mod wasm_bindings;
 #[cfg(test)]
 mod release_tests;
 use serde_json::{json, Value};
@@ -8,7 +9,7 @@ use std::{env, fs, io::{self, Write, BufRead, BufReader}, path::{Path, PathBuf},
 use zip::{ZipWriter, write::FileOptions};
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const ID: &str = "chatgpt-queue-optimizer@marsluay.local";
-const FILES: &[&str] = &["manifest.json","background.js","rust-queue-bridge.js","content.js","rust-browser-bridge.js","utils.js","popup.html","popup.js","options.html","history-viewer.html","history-viewer.js","history-store.js","history-viewer.css","styles.css","icon_16.png","icon_48.png","icon_128.png","optimizer_core.wasm","optimizer_browser.wasm","optimizer_history.wasm","optimizer_queue.wasm"];
+const FILES: &[&str] = &["manifest.json","background.js","rust-queue-bridge.js","content.js","rust-browser-bindings.js","rust-browser-bridge.js","utils.js","popup.html","popup.js","options.html","history-viewer.html","history-viewer.js","history-store.js","history-viewer.css","styles.css","icon_16.png","icon_48.png","icon_128.png","optimizer_core.wasm","optimizer_browser.wasm","optimizer_history.wasm","optimizer_queue.wasm"];
 const MODULES: &[(&str,&str)] = &[("optimizer_core","optimizer_core.rs"),("optimizer_browser","browser_engine.rs"),("optimizer_history","history_engine.rs"),("optimizer_queue","queue_engine.rs")];
 fn err(message: impl Into<String>) -> Box<dyn std::error::Error> { io::Error::new(io::ErrorKind::Other,message.into()).into() }
 fn stamp()->u128 {SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()}
@@ -40,6 +41,7 @@ fn build_wasm(repo:&Path, stage:&Path)->Result<()> {
         if !bytes.starts_with(b"\0asm\x01\0\0\0"){return Err(err("Invalid generated WASM module"));}
         println!("Built {} ({} bytes)",name,bytes.len());
     }
+    wasm_bindings::generate(repo,stage)?;
     Ok(())
 }
 fn firefox_manifest(base:&Value)->Result<Value>{
@@ -53,7 +55,7 @@ fn firefox_manifest(base:&Value)->Result<Value>{
         "manifest_version":2,"name":base["name"],"description":base["description"],"version":base["version"],
         "offline_enabled":base["offline_enabled"].as_bool().unwrap_or(true),
         "browser_action":base["action"],
-        "background":{"scripts":["utils.js","rust-queue-bridge.js","rust-browser-bridge.js","background.js"],"persistent":true},
+        "background":{"scripts":["utils.js","rust-queue-bridge.js","rust-browser-bindings.js","rust-browser-bridge.js","background.js"],"persistent":true},
         "options_ui":{"page":"options.html","open_in_tab":true},
         "commands":base["commands"],"content_scripts":base["content_scripts"],"permissions":permissions,"icons":base["icons"],
         "content_security_policy":"script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",
@@ -109,7 +111,7 @@ fn package(repo:&Path)->Result<String>{
     for name in ["chrome-src","firefox-src"]{
         let dest=stage.join(name);fs::create_dir(&dest)?;
         for asset in FILES{
-            let src=if asset.ends_with(".wasm"){stage.join(asset)}else{repo.join(asset)};
+            let src=if asset.ends_with(".wasm")||*asset==wasm_bindings::OUTPUT{stage.join(asset)}else{repo.join(asset)};
             if !fs::symlink_metadata(&src)?.file_type().is_file(){return Err(err(format!("Not a regular file: {asset}")));}
             fs::copy(src,dest.join(asset))?;
         }
@@ -121,6 +123,7 @@ fn package(repo:&Path)->Result<String>{
     archive(&stage.join("chrome-src"),&stage.join(chrome))?;
     archive(&stage.join("firefox-src"),&stage.join(firefox))?;
     for &(name,_) in MODULES{let file=format!("{name}.wasm");publish_path(&stage.join(&file),&repo.join(&file))?;}
+    publish_path(&stage.join(wasm_bindings::OUTPUT),&repo.join(wasm_bindings::OUTPUT))?;
     for file in ["chrome-src","firefox-src",chrome,firefox]{publish_path(&stage.join(file),&build.join(file))?;}
     println!("Packaged v{version}: build/{chrome}, build/{firefox}");
     Ok(version)
@@ -334,6 +337,7 @@ fn build_only(repo:&Path)->Result<()>{
     fs::create_dir(&stage)?;let _cleanup=Cleanup(stage.clone());
     build_wasm(repo,&stage)?;
     for &(name,_) in MODULES{let file=format!("{name}.wasm");publish_path(&stage.join(&file),&repo.join(&file))?;}
+    publish_path(&stage.join(wasm_bindings::OUTPUT),&repo.join(wasm_bindings::OUTPUT))?;
     Ok(())
 }
 

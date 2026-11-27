@@ -233,3 +233,5 @@ The removed Python build/packaging and managed-release scripts and the PowerShel
 The tracked-file signing-key scanner and release regression tests are now native Rust. Run `cargo test --manifest-path Installers/native/Cargo.toml` and `cargo run --release --manifest-path Installers/native/Cargo.toml -- check-secrets --repo-root .`. The release tests use local disposable Git repositories and simulated submission, never a live AMO upload. Python release-test discovery is no longer required.
 
 Native release tests cover credential handling, local-only versus managed submission outcomes, preflight failure, version preservation, and Git commit/push failure recovery.
+
+The Rust build generates `rust-browser-bindings.js` next to `optimizer_browser.wasm`; both the native package command and legacy installer include it. Do not edit or commit the generated loader. Build before loading the checkout directly in a browser.

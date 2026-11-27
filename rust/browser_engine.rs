@@ -20,7 +20,9 @@ fn h(op: u32, a: u32, b: u32, c: u32) -> u32 {
 }
 
 #[no_mangle]
-pub extern "C" fn cpo_browser_abi() -> u32 { 15 }
+pub extern "C" fn cpo_browser_abi() -> u32 { browser_abi::VERSION }
+#[path="browser_abi.rs"]
+mod browser_abi;
 
 #[cfg(target_arch = "wasm32")]
 mod sequence;

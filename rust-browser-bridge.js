@@ -17,17 +17,9 @@
             try {
                 const response = await fetch(chrome.runtime.getURL('optimizer_browser.wasm'));
                 if (!response.ok) throw new Error('Browser WASM resource unavailable');
-                const result = await WebAssembly.instantiate(await response.arrayBuffer(), {
-                    cpo: { host: (op, a, b, c) => this.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
-                });
-                const core = result.instance.exports;
-                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 15 ||
-                    !['cpo_collect_resources', 'cpo_discover_messages', 'cpo_execute_media',
-                        'cpo_apply_window', 'cpo_window_visible', 'cpo_capture_history', 'cpo_process_mutations',
-                        'cpo_cache_ttl', 'cpo_cache_valid', 'cpo_cache_nodes_valid', 'cpo_mutation_delay', 'cpo_provider_selectors', 'cpo_dom_composer_write', 'cpo_dom_composer_read',
-                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool', 'cpo_ui_render', 'cpo_ui_sequence_edit', 'cpo_ui_next_limit', 'cpo_ui_sequence_select', 'cpo_ui_variables', 'cpo_ui_saved_sequence', 'cpo_sequence_import', 'cpo_sequence_substitute', 'cpo_event_ready','cpo_restore_window','cpo_restore_journal','cpo_intersection_transition','cpo_message_predicate','cpo_first_matching_selector','cpo_dom_event_ancestor','cpo_dom_normalize_turn','cpo_dom_last_assistant','cpo_provider_turns','cpo_provider_exact_text','cpo_provider_scan_turns','cpo_provider_observe_generation','cpo_provider_retry','cpo_provider_diagnostics','cpo_provider_deduplicate'].every(name => typeof core[name] === 'function')) {
-                    throw new Error('Browser WASM ABI mismatch');
-                }
+                const bindings=globalThis.CpoBrowserWasmBindings||(typeof require==='function'?require('./rust-browser-bindings.js'):null);
+                if(!bindings)throw new Error('Generated browser WASM bindings unavailable; rebuild the extension.');
+                const core=await bindings.instantiate(await response.arrayBuffer(),(op,a,b,c)=>this.host(op,a,b,c));
                 this.exports = core;
                 this.memoryBytes = core.memory instanceof WebAssembly.Memory ? core.memory.buffer.byteLength : 0;
                 this.status = 'Rust/WASM';

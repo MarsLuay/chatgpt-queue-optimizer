@@ -19,11 +19,9 @@ function owner() {
 
 async function engine(optimizer = owner()) {
     const bridge = new CpoRustBrowserBridge(optimizer);
-    const result = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {
-        cpo: { host: (op, a, b, c) => bridge.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
-    });
-    bridge.exports = result.instance.exports;
-    assert.equal(bridge.exports.cpo_browser_abi(), 15);
+    const bindings=require('../rust-browser-bindings.js');
+    bridge.exports=await bindings.instantiate(fs.readFileSync(wasmPath),(op,a,b,c)=>bridge.host(op,a,b,c));
+    assert.equal(bridge.exports.cpo_browser_abi(),bindings.abi);
     return bridge;
 }
 
@@ -453,4 +451,15 @@ test('native deduplication retains canonical descendants and avoids text extract
     assert.deepEqual(bridge.deduplicateTurns([parent,child,parent,other]),[child,other]);
     const generic={tagName:'DIV',parentElement:parent,getAttribute:()=>null};
     assert.deepEqual(bridge.deduplicateTurns([generic,parent,generic,other]),[parent,other]);
+});
+
+test('generated browser bindings match the compiled native export contract',{skip},async()=>{
+    const bindings=require('../rust-browser-bindings.js');
+    const module=new WebAssembly.Module(fs.readFileSync(wasmPath));
+    const names=WebAssembly.Module.exports(module).filter(x=>x.name.startsWith('cpo_')).map(x=>x.name).sort();
+    assert.deepEqual(bindings.signatures.map(([name])=>name),names);
+    const core=bindings.instantiateModule(module,()=>0);
+    for(const [name,arity] of bindings.signatures)assert.equal(core[name].length,arity);
+    assert.throws(()=>bindings.instantiateModule(new WebAssembly.Module(Uint8Array.of(0,97,115,109,1,0,0,0)),()=>0),/import mismatch/);
+    assert.equal(core.cpo_browser_abi(),bindings.abi);
 });
