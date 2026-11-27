@@ -5,7 +5,7 @@
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! { core::arch::wasm32::unreachable() }
 
 #[no_mangle]
-pub extern "C" fn cpo_queue_abi() -> u32 { 5 }
+pub extern "C" fn cpo_queue_abi() -> u32 { 6 }
 
 const OFFSET: u32 = 2166136261;
 const PRIME: u32 = 16777619;
@@ -641,9 +641,82 @@ pub extern "C" fn cpo_durable_trim(len: u32) -> u32 {
     (start as u32) | ((end as u32)<<11)
 }
 
+// Application policy, shared across popup, content and background realms.
+// Settings 0 window, 1 batch, 2 resource budget, 3 inactive minutes.
+#[no_mangle]
+pub extern "C" fn cpo_setting_number(kind: u32, value: f64) -> u32 {
+    match kind {
+        0 => if value.is_finite() && value > 0.0 { (value as u32).clamp(10,500) } else { 50 },
+        1 => if value.is_finite() && value > 0.0 { (value as u32).clamp(5,100) } else { 25 },
+        2 => if value.is_finite() && value > 0.0 { (value as u32).clamp(1000,1000000) } else { 8000 },
+        3 => if value == 15.0 || value == 30.0 || value == 60.0 { value as u32 } else { 0 },
+        _ => 0,
+    }
+}
+// tri-state: missing/invalid=0, false=1, true=2.
+#[no_mangle]
+pub extern "C" fn cpo_setting_bool(default: u32, value: u32) -> u32 {
+    match value { 1 => 0, 2 => 1, _ => (default != 0) as u32 }
+}
+// Priority order of popup statuses, lower bit wins.
+#[no_mangle]
+pub extern "C" fn cpo_popup_status(flags: u32) -> u32 {
+    if flags == 0 { 10 } else { flags.trailing_zeros().min(10) }
+}
+#[no_mangle]
+pub extern "C" fn cpo_popup_remaining(sum: f64, value: f64) -> f64 {
+    let valid = |n:f64| if n.is_finite() && n >= 0.0 && n <= 9007199254740991.0 { n } else { 0.0 };
+    (valid(sum)+valid(value)).min(9007199254740991.0)
+}
+#[no_mangle]
+pub extern "C" fn cpo_log_duplicate(same: u32, elapsed: f64, interval: f64) -> u32 {
+    (same != 0 && elapsed.is_finite() && elapsed >= 0.0 && elapsed < interval) as u32
+}
+#[no_mangle]
+pub extern "C" fn cpo_log_keep_start(old: u32, added: u32, limit: u32) -> u32 {
+    old.saturating_add(added).saturating_sub(limit)
+}
+#[no_mangle]
+pub extern "C" fn cpo_log_limit(kind: u32, depth: u32, length: u32) -> u32 {
+    match kind { 0 => if length > 700 { 697 } else { length },
+        1 => if depth >= 2 { 0 } else { length.min(12) },
+        2 => if depth >= 3 { 0 } else { length.min(30) }, _ => 0 }
+}
+fn sensitive_key(s: &[u16]) -> bool {
+    const EXACT: &[&[u8]] = &[b"currentmessage",b"text",b"prompt",b"composertext",b"lastqueuedtext",
+        b"errorsnippet",b"researchstatuspreview",b"recoveredturnpreview",b"assistantpreview",b"handofftext",
+        b"handoff",b"title",b"url",b"href",b"location",b"conversationid",b"conversationkey",
+        b"arguments",b"tool",b"tools",b"toolargs",b"token"];
+    const PART: &[&[u8]] = &[b"preview",b"snippet",b"handofftext",b"path",b"filename",
+        b"conversationcontent",b"conversationtext",b"transcript",b"assistanttext",b"usertext",
+        b"toolargument",b"toolcall",b"toolinput",b"tooloutput",b"functionargument",b"secret",
+        b"password",b"credential",b"authorization",b"cookie",b"apikey",b"privatekey"];
+    EXACT.iter().any(|v| ascii_eq(s,v)) ||
+        PART.iter().any(|v| s.windows(v.len()).any(|p| ascii_eq(p,v))) ||
+        (s.len() >= 5 && ascii_eq(&s[s.len()-5..],b"token"))
+}
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_log_sensitive(len:u32)->u32 {
+    if len as usize > CHUNK { return 1; }
+    sensitive_key(unsafe {core::slice::from_raw_parts(cpo_fingerprint_buffer() as *const u16,len as usize)}) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn application_policies() {
+        assert_eq!(cpo_setting_number(0,900.0),500);
+        assert_eq!(cpo_setting_number(1,f64::NAN),25);
+        assert_eq!(cpo_setting_number(3,16.0),0);
+        assert_eq!(cpo_popup_status(1|4),0);
+        assert_eq!(cpo_popup_status(0),10);
+        assert_eq!(cpo_log_keep_start(299,10,300),9);
+        assert_eq!(cpo_log_limit(0,0,701),697);
+        assert!(sensitive_key(&"accesstoken".encode_utf16().collect::<Vec<_>>()));
+        assert!(!sensitive_key(&"commandnumber".encode_utf16().collect::<Vec<_>>()));
+    }
     #[test]
     fn durable_schema_and_defaults() {
         assert_eq!(cpo_durable_field_count(),51);
