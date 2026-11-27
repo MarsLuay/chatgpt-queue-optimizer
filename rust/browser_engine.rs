@@ -20,7 +20,7 @@ fn h(op: u32, a: u32, b: u32, c: u32) -> u32 {
 }
 
 #[no_mangle]
-pub extern "C" fn cpo_browser_abi() -> u32 { 3 }
+pub extern "C" fn cpo_browser_abi() -> u32 { 4 }
 
 const MAX_TURNS: u32 = 32;
 const MAX_NODES: u32 = 512;
@@ -381,9 +381,103 @@ pub extern "C" fn cpo_provider_selectors(count: u32, first_only: u32) -> u32 {
     accepted
 }
 
+// Provider DOM interaction: browser primitives are synchronous host imports.
+// Rust controls the ordering, including input events after mutation.
+// provider: 1 ChatGPT, 2 Gemini, 3 Claude. mode: 0 clear, 1 queued write.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_dom_composer_write(provider: u32, mode: u32, flags: u32) -> u32 {
+    if !(1..=3).contains(&provider) || mode > 1 || flags & 1 == 0 { return 0; }
+    h(90,0,0,0); // focus if available
+    if flags & 2 != 0 { h(91,0,0,0); } // textarea value
+    else {
+        if mode == 1 || provider == 1 { h(92,0,0,0); } // replace children
+        h(93, (mode == 1 || provider == 1) as u32,0,0); // clear text
+        if mode == 1 {
+            h(94,0,0,0); // remove ql-blank
+            if flags & 4 != 0 { h(95,0,0,0); } // insert paragraph
+        } else if provider == 2 { h(94,1,0,0); } // Gemini empty editor
+    }
+    h(96,0,0,0); // dispatch input
+    1
+}
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_dom_composer_read(provider: u32, flags: u32) -> u32 {
+    if flags & 1 == 0 { return 0; }
+    if flags & 2 != 0 { h(97,0,0,0); return 1; }
+    if h(97,1,0,0) != 0 { return 1; }
+    if provider == 1 {
+        let count = h(98,0,0,0);
+        for child in 0..count { h(97,2,child,0); }
+    }
+    1
+}
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_dom_click(flags: u32) -> u32 {
+    if flags & 7 != 7 { return 0; } // exists, enabled, connected
+    h(99,0,0,0)
+}
+// Submission stage: flags: composer=1, pending draft=2, unchanged text=4,
+// button present=8, enabled=16, identity valid=32, connected=64.
+// 0 missing composer, 1 preserve draft, 2 write, 3 changed draft,
+// 4 missing button, 5 disabled button, 6 click, 7 invalid target,
+// 8 restore only if text still belongs to this attempt.
+#[no_mangle]
+pub extern "C" fn cpo_dom_submit_stage(stage: u32, flags: u32) -> u32 {
+    if stage == 2 { return if flags & (4|32|64) == (4|32|64) { 8 } else { 3 }; }
+    if flags & 32 == 0 { return 7; }
+    if flags & (1|64) != (1|64) { return 0; }
+    if stage == 0 { return if flags & 2 != 0 { 1 } else { 2 }; }
+    if flags & 4 == 0 { return 3; }
+    if flags & 8 == 0 { return 4; }
+    if flags & 16 == 0 { return 5; }
+    6
+}
+// Observe DOM ancestry without retaining an additional traversal list.
+// 100 reports current ancestor role: 0 outside, 1 latest, 2 historical,
+// 3 unrelated ancestor; 101 advances.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_dom_active_surface() -> u32 {
+    loop {
+        match h(100,0,0,0) {
+            0|1 => return 1,
+            2 => return 0,
+            _ => { h(101,0,0,0); }
+        }
+    }
+}
+#[no_mangle]
+pub extern "C" fn cpo_dom_role(flags: u32) -> u32 {
+    if flags & 1 != 0 { 1 } else if flags & 2 != 0 { 2 }
+    else if flags & 4 != 0 { 1 } else if flags & 8 != 0 { 2 } else { 0 }
+}
+// Composer/send candidate flags: editable/action=1, extension UI=2,
+// message body=4, weak selector=8, canonical composer context=16.
+#[no_mangle]
+pub extern "C" fn cpo_dom_candidate(mode: u32, flags: u32) -> u32 {
+    if flags & 1 == 0 { return 0; }
+    if mode == 0 && flags & 6 != 0 { return 0; }
+    (flags & 8 == 0 || flags & 16 != 0) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn provider_interaction_policy() {
+        assert_eq!(cpo_dom_submit_stage(0,1|32|64),2);
+        assert_eq!(cpo_dom_submit_stage(0,1|2|32|64),1);
+        assert_eq!(cpo_dom_submit_stage(1,1|4|8|16|32|64),6);
+        assert_eq!(cpo_dom_submit_stage(1,1|8|16|32|64),3);
+        assert_eq!(cpo_dom_submit_stage(2,4|32|64),8);
+        assert_eq!(cpo_dom_submit_stage(2,4|64),3);
+        assert_eq!(cpo_dom_candidate(0,1|8),0);
+        assert_eq!(cpo_dom_candidate(0,1|8|16),1);
+        assert_eq!(cpo_dom_candidate(0,1|4|16),0);
+    }
     #[test]
     fn window_and_cache_policy() {
         assert_eq!(cpo_window_visible(100, 8, 33, 50, 1), 33);
