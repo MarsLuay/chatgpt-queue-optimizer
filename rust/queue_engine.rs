@@ -658,6 +658,12 @@ pub extern "C" fn cpo_setting_number(kind: u32, value: f64) -> u32 {
 pub extern "C" fn cpo_setting_bool(default: u32, value: u32) -> u32 {
     match value { 1 => 0, 2 => 1, _ => (default != 0) as u32 }
 }
+// Scheduled popup controls: cancel=1, retry=2, delete=4. Status codes
+// match the scheduler's pending/firing/completed/failed/cancelled mapping.
+#[no_mangle]
+pub extern "C" fn cpo_popup_schedule_actions(state:u32)->u32 {
+    match state {1=>5,2=>0,4|5=>6,_=>4}
+}
 // Priority order of popup statuses, lower bit wins.
 #[no_mangle]
 pub extern "C" fn cpo_popup_status(flags: u32) -> u32 {
