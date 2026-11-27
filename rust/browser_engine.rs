@@ -463,6 +463,33 @@ pub extern "C" fn cpo_dom_candidate(mode: u32, flags: u32) -> u32 {
     (flags & 8 == 0 || flags & 16 != 0) as u32
 }
 
+// Assistant/tool observation. Rust walks candidate attributes, recognizes
+// explicit errors/incomplete states and only requests text when needed.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_dom_error_stop(count: u32, attrs: u32) -> u32 {
+    for node in 0..count {
+        for attr in 0..attrs {
+            let value = h(102,node,attr,0);
+            if value & 1 != 0 || value & 6 == 6 { return 1; }
+        }
+    }
+    0
+}
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_dom_incomplete_tool(count: u32) -> u32 {
+    let mut tool = u32::MAX;
+    for node in 0..count {
+        if h(103,node,0,0) != 0 { tool = node; break; }
+    }
+    if tool == u32::MAX { return 0; }
+    for node in 0..count {
+        if h(104,node,0,0) != 0 { return 1; }
+    }
+    h(105,tool,0,0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
