@@ -386,38 +386,7 @@
       }
       const native = this.browserEngine?.captureHistory(messages, offset);
       if (native != null) return native.ok ? { ...native, identity, total } : native;
-      const end = Math.min(total, offset + 16);
-      const records = [];
-      for (let index = offset; index < end; index++) {
-        const node = messages[index];
-        if (!node?.isConnected) return { ok: false, error: 'Conversation DOM changed during capture.' };
-        const roleNode = node.matches?.('[data-message-author-role]') ? node :
-          node.querySelector?.('[data-message-author-role]');
-        const rawRole = roleNode?.getAttribute('data-message-author-role');
-        const role = rawRole === 'user' || rawRole === 'assistant' ? rawRole : 'message';
-        // Walk text nodes, never serialize a full subtree or allocate its
-        // complete textContent. Skip controls, hidden tool markup and scripts.
-        const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
-        const parts = [];
-        let chars = 0;
-        let visited = 0;
-        let textNode;
-        let truncated = false;
-        while ((textNode = walker.nextNode())) {
-          if (++visited > 4096 || chars >= 32768) { truncated = true; break; }
-          if (textNode.parentElement?.closest('button,script,style,noscript,textarea,input,select,[aria-hidden="true"],[contenteditable="true"]')) continue;
-          const text = /** @type {Text} */ (textNode);
-          const remaining = 32768 - chars;
-          const take = Math.min(text.length, remaining);
-          if (take) {
-            parts.push(text.substringData(0, take));
-            chars += take;
-          }
-          if (take < text.length) { truncated = true; break; }
-        }
-        records.push({ index, role, text: parts.join(' '), truncated });
-      }
-      return { ok: true, identity, total, next: end, records };
+      return {ok:false,error:'Required Rust snapshot capture engine unavailable.'};
     }
 
     canDiscardInactiveTab() {
@@ -529,11 +498,13 @@
     // Only scalar counts cross the WASM boundary. Never pass DOM nodes or
     // conversation text into linear memory, and never run WASM for queue-only sites.
     loadRustCore() {
-      if (this.nativeCore || this.nativeCoreLoading || this.nativeCoreState === 'unavailable') return;
+      if (this.nativeCore) return Promise.resolve(true);
+      if (this.nativeCoreLoading) return this.nativeCoreLoading;
+      if (this.nativeCoreState === 'unavailable') return Promise.resolve(false);
       if (typeof WebAssembly === 'undefined' || typeof chrome === 'undefined' ||
           typeof chrome.runtime?.getURL !== 'function' || typeof fetch !== 'function') {
         this.nativeCoreState = 'unavailable';
-        return;
+        return Promise.resolve(false);
       }
       this.nativeCoreState = 'loading';
       this.nativeCoreLoading = (async () => {
@@ -555,13 +526,16 @@
           this.nativeMemoryBytes = memory instanceof WebAssembly.Memory ? memory.buffer.byteLength : 0;
           this.nativeCore = core;
           this.nativeCoreState = 'Rust/WASM';
+          return true;
         } catch (error) {
           this.nativeCoreState = 'unavailable';
-          console.warn('CPO: Rust optimizer unavailable; using compatible JS policy.', error);
+          console.warn('CPO: Required Rust optimizer unavailable.', error);
+          return false;
         } finally {
           this.nativeCoreLoading = null;
         }
       })();
+      return this.nativeCoreLoading;
     }
 
     policyCount(value, fallback = 0) {
@@ -790,7 +764,7 @@
       } finally { this.nativeSubmissionActive=false; }
     }
 
-    bindOptimizer() {
+    async bindOptimizer() {
       if (!this.provider?.supportsOptimizer) return;
       const surface = this.getCurrentSurface();
       if (!surface.optimizerEligible || !this.config.enabled) {
@@ -798,8 +772,13 @@
         return;
       }
 
-      this.loadRustCore();
-      this.loadRustBrowserEngine();
+      const ready=await Promise.all([this.loadRustCore(),this.loadRustBrowserEngine()]);
+      if(!ready.every(Boolean)||!this.nativeCore||!this.browserEngine?.exports){
+        this.unbindOptimizer();
+        console.warn('CPO: Optimizer disabled because required Rust engines are unavailable.');
+        return;
+      }
+      if(!this.config.enabled||!this.getCurrentSurface().optimizerEligible)return;
       this.setupContainer();
       this.markConversationRoot();
       this.provider?.setTurnScanCacheEnabled?.(true);
@@ -1583,26 +1562,20 @@
       }
       const startIndex = this.policyCall('cpo_hidden_count', [totalMessages, targetVisible],
         () => Math.max(0, totalMessages - targetVisible));
-      const offscreenEnd = this.policyCall('cpo_offscreen_end', [totalMessages],
-        () => Math.max(0, totalMessages - 8));
+
 
       this.state.hiddenCount = startIndex;
       this.state.visibleCount = targetVisible;
 
       const executed = this.browserEngine?.applyWindow(messages, targetVisible,
         this.config.offscreenRendering, this.config.evictPausedMedia);
-      if (executed !== true) messages.forEach((message, index) => {
-        if (index < startIndex) {
-          this.hideMessage(message);
-        } else {
-          this.showMessage(message);
-        }
-        if (this.config.offscreenRendering && index >= startIndex && index < offscreenEnd) {
-          message.classList.add('cpo-offscreen');
-        } else {
-          message.classList.remove('cpo-offscreen');
-        }
-      });
+      if(executed!==true){
+        // Restore any prior hidden/evicted content; never continue applying
+        // new optimizations through an unverified alternate implementation.
+        this.unbindOptimizer();
+        console.warn('CPO: Native window execution failed; restored the conversation.');
+        return;
+      }
       this.state.perf.lastWindowMs = Math.round(((typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()) - started) * 10) / 10;
 
       this.ensureBanner(messages);
