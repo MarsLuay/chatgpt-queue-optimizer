@@ -190,6 +190,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const optimizerBatchSize = document.getElementById('optimizer-batch-size');
     const optimizerAutoScroll = document.getElementById('optimizer-auto-scroll');
     const optimizerOffscreen = document.getElementById('optimizer-offscreen');
+    const optimizerEvictMedia = document.getElementById('optimizer-evict-media');
     const optimizerAdaptive = document.getElementById('optimizer-adaptive-budget');
     const optimizerResourceBudget = document.getElementById('optimizer-resource-budget');
     const optimizerIdleMinutes = document.getElementById('optimizer-idle-minutes');
@@ -2235,6 +2236,7 @@ The sequence should do the following: `;
                 offscreenRendering: false,
                 adaptiveBudget: false,
                 resourceBudget: 8000,
+                evictPausedMedia: false,
                 inactiveTabMinutes: 0
             },
             async function (config) {
@@ -2243,6 +2245,7 @@ The sequence should do the following: `;
                 optimizerAutoScroll.checked = config.autoScroll;
                 if (optimizerOffscreen) optimizerOffscreen.checked = config.offscreenRendering === true;
                 if (optimizerAdaptive) optimizerAdaptive.checked = config.adaptiveBudget === true;
+                if (optimizerEvictMedia) optimizerEvictMedia.checked = config.evictPausedMedia === true;
                 if (optimizerResourceBudget) optimizerResourceBudget.value = String(config.resourceBudget || 8000);
                 if (optimizerIdleMinutes) optimizerIdleMinutes.value = String(config.inactiveTabMinutes || 0);
 
@@ -2280,6 +2283,7 @@ The sequence should do the following: `;
                 autoScroll: optimizerAutoScroll.checked,
                 offscreenRendering: optimizerOffscreen?.checked === true,
                 adaptiveBudget: optimizerAdaptive?.checked === true,
+                evictPausedMedia: optimizerEvictMedia?.checked === true,
                 resourceBudget: Math.max(1000, Math.min(1000000, Number(optimizerResourceBudget?.value) || 8000)),
                 inactiveTabMinutes: Number(optimizerIdleMinutes?.value || 0)
             };
@@ -2445,6 +2449,10 @@ The sequence should do the following: `;
                 `Adaptive budget: ${resources.adaptiveEnabled ? resources.budget + ' units; target ' + resources.adaptiveTarget + ' turns' : 'Off'}`,
                 `Manual history expansion: ${resources.manuallyExpanded ? 'Yes' : 'No'}`,
                 `Extension cached message references: ${resources.cachedMessageRefs}`,
+                `Image eviction actions: ${resources.mediaEviction?.imagesEvicted ?? 0}`,
+                `Paused playback eviction actions: ${resources.mediaEviction?.playbackEvicted ?? 0}`,
+                `Source restoration actions: ${resources.mediaEviction?.restored ?? 0}`,
+                `Estimated image surface bytes targeted (cumulative): ${mib(resources.mediaEviction?.estimatedImageBytes)}`,
                 `WASM linear memory: ${mib(resources.wasmLinearBytes)}`,
                 `Browser JS heap (not tab RAM): ${mib(resources.usedJsHeapBytes)}`
             );
@@ -2459,6 +2467,7 @@ The sequence should do the following: `;
 
     if (optimizerIdleMinutes) optimizerIdleMinutes.addEventListener('change', scheduleOptimizerAutoSave);
     if (optimizerOffscreen) optimizerOffscreen.addEventListener('change', scheduleOptimizerAutoSave);
+    if (optimizerEvictMedia) optimizerEvictMedia.addEventListener('change', scheduleOptimizerAutoSave);
     if (optimizerAdaptive) optimizerAdaptive.addEventListener('change', scheduleOptimizerAutoSave);
     if (optimizerResourceBudget) optimizerResourceBudget.addEventListener('change', scheduleOptimizerAutoSave);
 
