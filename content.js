@@ -1399,27 +1399,8 @@
 
       // A normal streaming token changes the contents of an existing turn,
       // but not the number or order of turns. Do not rescan the entire chat.
-      const turnSelector = '[data-testid^="conversation-turn"], [data-message-author-role]';
-      const nativeStructural = this.browserEngine?.mutations(mutations, 0, this.state.lastMessageCount === 0);
-      let structuralChange = nativeStructural ?? false;
-      if (nativeStructural == null) for (const mutation of mutations) {
-        if (mutation.type === 'attributes' && ['data-testid', 'data-message-author-role', 'data-message-id'].includes(mutation.attributeName)) {
-          structuralChange = true;
-          break;
-        }
-        if (!mutation.addedNodes?.length && !mutation.removedNodes?.length) continue;
-        const nodes = [...mutation.addedNodes, ...mutation.removedNodes];
-        const bannerOnly = nodes.every(node => node?.nodeType === 1 &&
-          (node.classList?.contains('cpo-more-banner') || node.closest?.('.cpo-more-banner')));
-        if (bannerOnly) continue;
-        const changedTurns = nodes.some(node => node?.nodeType === 1 &&
-          (node.matches?.(turnSelector) || node.querySelector?.(turnSelector)));
-        if (changedTurns || !mutation.target?.closest?.(turnSelector) ||
-            this.state.lastMessageCount === 0) {
-          structuralChange = true;
-          break;
-        }
-      }
+      const structuralChange=this.browserEngine?.mutations(mutations,0,this.state.lastMessageCount===0);
+      if(structuralChange==null){this.unbindOptimizer();return;}
 
       if (!structuralChange) {
         this.state.perf.mutationSkips++;
@@ -1498,6 +1479,7 @@
     }
 
     showOlderMessages() {
+      if(!this.nativeCore||!this.browserEngine?.exports){this.unbindOptimizer();return;}
       const messages = this.getMessageNodes();
 
       const currentVisible = this.state.visibleCount;
@@ -1792,7 +1774,11 @@
     }
 
     refresh() {
-      if (!this.config.enabled || !this.nativeCore || !this.browserEngine?.exports) return;
+      if (!this.config.enabled) return;
+      if (!this.nativeCore || !this.browserEngine?.exports) {
+        if(this.state.optimizerBound)this.unbindOptimizer();
+        return;
+      }
       if (this._isRefreshing) return;
       if (this.provider?.supportsOptimizer && !this.getCurrentSurface().optimizerEligible) {
         this.unbindOptimizer();
