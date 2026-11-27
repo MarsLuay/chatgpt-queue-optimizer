@@ -137,9 +137,12 @@ def build_store_packages(repo_root: Path) -> tuple[str, Path, Path]:
     if not version:
         raise RuntimeError("manifest.json is missing its extension version.")
 
-    package_script = repo_root / "Installers" / "package_for_stores.py"
+    cargo = shutil.which("cargo")
+    if not cargo:
+        raise RuntimeError("Rust/Cargo is required for packaging.")
     result = subprocess.run(
-        [sys.executable, str(package_script), "--repo-dir", str(repo_root)],
+        [cargo, "run", "--release", "--manifest-path",
+         str(repo_root / "Installers/native/Cargo.toml"), "--", "package", "--repo-dir", str(repo_root)],
         cwd=repo_root,
         check=False,
     )

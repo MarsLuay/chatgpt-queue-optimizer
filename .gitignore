@@ -19,3 +19,7 @@ node_modules/
 # Native release helper build output and generated lock until toolchain verification.
 /Installers/native/target/
 /Installers/native/Cargo.lock
+
+
+# Native Mach-O launcher is produced locally on macOS; never track a generated executable.
+/upload.app/Contents/MacOS/upload

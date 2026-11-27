@@ -54,28 +54,23 @@ class UploadWorkflowTests(unittest.TestCase):
         self.assertNotIn("--firefox-profile", command)
         self.assertNotIn("--keep-profile-changes", command)
 
-    def test_platform_launchers_reference_the_upload_helper(self):
+    def test_platform_launchers_use_native_release_utility(self):
         repo_root = Path(__file__).resolve().parents[1]
         batch_text = (repo_root / "upload.bat").read_text(encoding="utf-8")
-        app_script = repo_root / "upload.app" / "Contents" / "MacOS" / "upload"
+        native_source = (repo_root / "Installers/native/src/main.rs").read_text(encoding="utf-8")
         app_info = plistlib.loads(
             (repo_root / "upload.app" / "Contents" / "Info.plist").read_bytes()
         )
-
-        self.assertIn("Installers\\publish_firefox.py", batch_text)
-        # Windows command-line parsing treats a trailing backslash before a
-        # closing quote as an escaped quote. %%~dp0 ends with a backslash.
-        self.assertEqual(batch_text.count('--repo-dir "%REPO_ROOT%."'), 2)
-        self.assertNotIn('--repo-dir "%REPO_ROOT%"', batch_text)
-        # Double-clicking the batch file must keep error output visible.
+        self.assertIn("managed-publish", batch_text)
+        self.assertIn(' --repo-dir "%REPO_ROOT%."', batch_text)
         self.assertIn("pause >nul", batch_text.lower())
         self.assertIn('type "%UPLOAD_LOG%"', batch_text)
-        self.assertIn("[ERROR] Firefox publishing failed. Exit code:", batch_text)
-        self.assertIn("[ERROR] Python 3 was not found.", batch_text)
         self.assertIn("exit /b %UPLOAD_EXIT%", batch_text)
-        self.assertIn("Installers/upload_extension.py", app_script.read_text(encoding="utf-8"))
         self.assertEqual(app_info["CFBundleExecutable"], "upload")
-        self.assertTrue(app_script.is_file())
+        self.assertIn("install-upload-launcher", native_source)
+        self.assertIn("macos_upload_launcher", native_source)
+        self.assertIn("/upload.app/Contents/MacOS/upload", (repo_root / ".gitignore").read_text())
+        self.assertFalse((repo_root / "Installers/publish_firefox.py").exists())
 
     def test_amo_credentials_are_passed_only_in_the_child_environment(self):
         credentials = ("issuer-id", "secret-value")

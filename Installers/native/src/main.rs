@@ -196,7 +196,7 @@ fn publish(repo:&Path,local_only:bool,configured:Option<(String,String)>)->Resul
     println!("Started isolated Firefox test for v{version}; see build/logs/upload-firefox-test.log.");
     if local_only{return Ok(());}
     // Never expose signing secrets on a command line or in raw logs.
-    let (key,secret)=configured.unwrap_or_else(||(env::var("WEB_EXT_API_KEY").unwrap_or_default(),env::var("WEB_EXT_API_SECRET").unwrap_or_default()));
+    let (key,secret)=match configured{Some(values)=>values,None=>credentials()?};
     if key.trim().is_empty()||secret.trim().is_empty(){return Err(err("Set WEB_EXT_API_KEY and WEB_EXT_API_SECRET before explicit publishing."));}
     let result=npm().current_dir(repo).args(["exec","--yes","--package=web-ext@10.7.0","--","web-ext","sign","--source-dir"]).arg(&source)
         .arg("--artifacts-dir").arg(&artifacts).args(["--channel","listed","--approval-timeout","0","--no-input","--no-config-discovery"])
@@ -240,6 +240,7 @@ fn managed_publish(repo:&Path)->Result<()>{
     package(repo)?;
     checked(npm().current_dir(repo).args(["ci","--ignore-scripts","--no-audit","--no-fund"]))?;
     checked(npm().current_dir(repo).args(["run","check"]))?;
+    checked(Command::new("cargo").current_dir(repo).args(["test","--manifest-path","Installers/native/Cargo.toml"]))?;
     for (_,source) in MODULES{
         let executable=repo.join("build").join(format!("release-test-{}{}",source.trim_end_matches(".rs"),env::consts::EXE_SUFFIX));
         checked(Command::new("rustc").current_dir(repo).args(["--edition=2021","--test"]).arg(repo.join("rust").join(source)).arg("-o").arg(&executable))?;
@@ -251,9 +252,7 @@ fn managed_publish(repo:&Path)->Result<()>{
     let original=fs::read_to_string(&path)?;
     let mut base:Value=serde_json::from_str(&original)?;
     let version=base["version"].as_str().ok_or_else(||err("Missing version"))?;
-    let parts=version.split('.').map(str::parse::<u32>).collect::<std::result::Result<Vec<_>,_>>()?;
-    if parts.len()!=3{return Err(err("Expected three-part version"));}
-    let next=format!("{}.{}.{}",parts[0],parts[1],parts[2].checked_add(1).ok_or_else(||err("Version overflow"))?);
+    let next=next_patch_version(version)?;
     base["version"]=json!(next);
     fs::write(&path,serde_json::to_string_pretty(&base)?+"\n")?;
     let submission=publish(repo,false,Some((key,secret)));
@@ -276,8 +275,58 @@ fn build_only(repo:&Path)->Result<()>{
     for &(name,_) in MODULES{let file=format!("{name}.wasm");publish_path(&stage.join(&file),&repo.join(&file))?;}
     Ok(())
 }
+
+fn next_patch_version(version:&str)->Result<String>{
+    let parts=version.split('.').map(str::parse::<u32>).collect::<std::result::Result<Vec<_>,_>>()?;
+    if parts.len()!=3{return Err(err("Expected three-part version"));}
+    Ok(format!("{}.{}.{}",parts[0],parts[1],parts[2].checked_add(1).ok_or_else(||err("Version overflow"))?))
+}
+
+#[cfg(target_os="macos")]
+fn install_upload_launcher(repo:&Path)->Result<()>{
+    use std::os::unix::fs::PermissionsExt;
+    let dir=repo.join("upload.app/Contents/MacOS");
+    fs::create_dir_all(&dir)?;
+    let target=dir.join("upload");
+    let temp=dir.join(format!(".upload-{}-{}",std::process::id(),stamp()));
+    fs::copy(env::current_exe()?,&temp)?;
+    fs::set_permissions(&temp,fs::Permissions::from_mode(0o755))?;
+    if let Err(error)=publish_path(&temp,&target){let _=fs::remove_file(&temp);return Err(error);}
+    println!("Native macOS publisher ready: {}",repo.join("upload.app").display());
+    Ok(())
+}
+#[cfg(not(target_os="macos"))]
+fn install_upload_launcher(_repo:&Path)->Result<()>{
+    Err(err("Build the macOS publisher on macOS"))
+}
+
+#[cfg(target_os="macos")]
+fn macos_upload_launcher(executable:&Path)->Result<()>{
+    let repo=executable.ancestors().nth(4).ok_or_else(||err("Invalid upload.app path"))?.canonicalize()?;
+    if !repo.join("manifest.json").is_file(){return Err(err("Keep upload.app in the extension checkout"));}
+    // Finder launches without a TTY and often without the user's PATH.
+    // Terminal provides interactive hidden credential prompts. Pass paths
+    // as osascript arguments and quote them inside AppleScript.
+    let script=r#"on run argv
+set executablePath to item 1 of argv
+set repoPath to item 2 of argv
+tell application "Terminal"
+activate
+do script "cd " & quoted form of repoPath & " && " & quoted form of executablePath & " publish --repo-dir " & quoted form of repoPath
+end tell
+end run"#;
+    checked(Command::new("/usr/bin/osascript").arg("-e").arg(script).arg(executable).arg(repo))
+}
+
 fn run()->Result<()>{
     let mut args=env::args().skip(1);
+    #[cfg(target_os="macos")]
+    {
+        let executable=env::current_exe()?;
+        if executable.file_name().and_then(|v|v.to_str())==Some("upload")&&env::args().skip(1).all(|v|v.starts_with("-psn_")){
+            return macos_upload_launcher(&executable);
+        }
+    }
     let action=args.next().unwrap_or_else(||"package".into());
     let mut repo=None;let mut browser=String::new();let mut paths=[None,None,None];let mut local_only=false;let mut legacy_ui=false;
     while let Some(arg)=args.next(){match arg.as_str(){
@@ -299,7 +348,7 @@ fn run()->Result<()>{
             }
             #[cfg(not(windows))]{return Err(err("Native Windows UI Automation requires Windows"));}
         },
-        "publish"=>publish(&repo,local_only,None)?, "managed-publish"=>managed_publish(&repo)?,_=>return Err(err("Expected build, package, install, native-ui, publish or managed-publish"))}
+        "publish"=>publish(&repo,local_only,None)?, "managed-publish"=>managed_publish(&repo)?, "install-upload-launcher"=>install_upload_launcher(&repo)?,_=>return Err(err("Expected build, package, install, native-ui, publish, managed-publish or install-upload-launcher"))}
     Ok(())
 }
 fn main(){if let Err(error)=run(){eprintln!("[ERROR] {error}");std::process::exit(1);}}
@@ -307,6 +356,14 @@ fn main(){if let Err(error)=run(){eprintln!("[ERROR] {error}");std::process::exi
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]fn patch_version_validation(){
+        assert_eq!(next_patch_version("1.0.7").unwrap(),"1.0.8");
+        assert_eq!(next_patch_version("0.9.99").unwrap(),"0.9.100");
+        for invalid in ["1.0","1.0.0.1","1.0.beta","1.0.4294967295",""]{assert!(next_patch_version(invalid).is_err());}
+        let mut manifest=json!({"name":"Demo","version":"1.0.7","other":true});
+        manifest["version"]=json!(next_patch_version(manifest["version"].as_str().unwrap()).unwrap());
+        assert_eq!(manifest,json!({"name":"Demo","version":"1.0.8","other":true}));
+    }
     #[test]fn manifest_conversion(){
         let base=json!({"manifest_version":3,"name":"test","description":"test","version":"1.0","action":{},
             "permissions":["storage","alarms"],"host_permissions":["storage"],"commands":{},"content_scripts":[],"icons":{}});

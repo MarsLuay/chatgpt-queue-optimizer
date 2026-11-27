@@ -14,10 +14,6 @@ import zipfile
 from struct import unpack_from
 from pathlib import Path
 
-try:
-    from .build_optimizer import build_optimizer
-except ImportError:
-    from build_optimizer import build_optimizer
 
 
 ADDON_ID = "chatgpt-queue-optimizer@marsluay.local"
@@ -93,7 +89,14 @@ def ensure_repo(repo_dir, repo_url, update_repo=False):
 
 
 def copy_source(repo_dir, target_dir):
-    wasm = build_optimizer(Path(repo_dir).resolve())
+    repo_dir = Path(repo_dir).resolve()
+    cargo = shutil.which("cargo")
+    if not cargo:
+        raise RuntimeError("Rust/Cargo is required to build the extension.")
+    subprocess.run([cargo, "run", "--release", "--manifest-path",
+                    str(repo_dir / "Installers/native/Cargo.toml"),
+                    "--", "build", "--repo-dir", str(repo_dir)], check=True)
+    wasm = repo_dir / "optimizer_core.wasm"
     if target_dir.exists():
         shutil.rmtree(target_dir)
     target_dir.mkdir(parents=True)

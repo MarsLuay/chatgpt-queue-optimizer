@@ -44,7 +44,7 @@ See [Installers/README.md](Installers/README.md) for installer details and gener
 
 ### Manual Chrome install
 
-1. Clone or download this repository, then run `python Installers/build_optimizer.py` to generate the local Rust WASM module.
+1. Clone or download this repository, then run `cargo run --release --manifest-path Installers/native/Cargo.toml -- build` to generate the local Rust WASM module.
 2. Open `chrome://extensions`.
 3. Enable **Developer mode**.
 4. Click **Load unpacked**.
@@ -56,7 +56,7 @@ See [Installers/README.md](Installers/README.md) for installer details and gener
 The repository root is the Chrome Manifest V3 source. Build the Firefox-compatible source first:
 
 ```bash
-python Installers/package_for_stores.py
+cargo run --release --manifest-path Installers/native/Cargo.toml -- package
 ```
 
 Then:
@@ -167,7 +167,7 @@ The Windows launcher can locate or install Python, Chrome, Firefox, and Node.js 
 Build upload-ready archives without installing or launching a browser:
 
 ```bash
-python Installers/package_for_stores.py
+cargo run --release --manifest-path Installers/native/Cargo.toml -- package
 ```
 
 Outputs:
@@ -181,11 +181,11 @@ The Firefox package declares a minimum Firefox version of 140.0.
 
 ### Submit and test a Firefox update
 
-On Windows, run `upload.bat` from a **clean `main` checkout**. It now automates the complete release sequence: `git pull --ff-only origin main`, `npm ci`, `npm run check`, Python release tests, a patch-version bump in `manifest.json`, Firefox package generation, AMO submission, and a version-only Git commit pushed to `origin/main`. You need Git push authorization and AMO API credentials. The script does not overwrite local edits, force-push, or continue after failed checks. If submission or pushing fails, inspect `git status` and the upload log before retrying; the bumped manifest or local release commit may remain because Mozilla could already have accepted the version.
+On Windows, run `upload.bat` from a **clean `main` checkout**. It now automates the complete release sequence: `git pull --ff-only origin main`, `npm ci`, `npm run check`, Rust release and engine tests, a patch-version bump in `manifest.json`, Firefox package generation, AMO submission, and a version-only Git commit pushed to `origin/main`. You need Git push authorization and AMO API credentials. The script does not overwrite local edits, force-push, or continue after failed checks. If submission or pushing fails, inspect `git status` and the upload log before retrying; the bumped manifest or local release commit may remain because Mozilla could already have accepted the version.
 
 On Windows, the `upload.bat` console now stays open after success or failure until you press a key. On failure it prints the exit code and contents of `build/logs/upload.log` when available; the original error output remains visible above.
 
-On macOS, `upload.app` retains the original package-and-submit behavior (without Git synchronization/version bump). Both platforms launch a separate Firefox test profile and submit to the existing AMO listing without waiting for Mozilla review approval. The public listing continues serving its approved version until Mozilla approves the new one.
+On macOS, build the native publisher once with `cargo run --release --manifest-path Installers/native/Cargo.toml -- install-upload-launcher`, then run `open upload.app`. The generated Mach-O executable is not tracked and the launcher retains package-and-submit behavior without Git synchronization/version bump. Both platforms launch a separate Firefox test profile and submit to the existing AMO listing without waiting for Mozilla review approval. The public listing continues serving its approved version until Mozilla approves the new one.
 
 The launcher asks for an AMO API key and a hidden API secret (not your AMO account password). Create those credentials at [AMO API credentials](https://addons.mozilla.org/developers/addon/api/key/). They are passed to the submission process without being saved to the repository. Alternatively, set `WEB_EXT_API_KEY` and `WEB_EXT_API_SECRET` in the local environment.
 
@@ -194,12 +194,12 @@ The local test runs in a separate temporary Firefox profile, does not change you
 To launch only the local test without an AMO submission, run:
 
 ```bash
-python Installers/upload_extension.py --local-only
+cargo run --release --manifest-path Installers/native/Cargo.toml -- publish --local-only
 ```
 
 ### Local signing keys
 
-`package_for_stores.py` creates store archives and does not require a private signing key. The installer’s local Chrome CRX path may reuse `build/chrome-key.pem`, which is generated or supplied only in the ignored build directory. Keep the reusable source key in a secure location outside the checkout, copy it into that local build path only when needed, and never restore a key file to the repository root.
+the Rust `package` command creates store archives and does not require a private signing key. The installer’s local Chrome CRX path may reuse `build/chrome-key.pem`, which is generated or supplied only in the ignored build directory. Keep the reusable source key in a secure location outside the checkout, copy it into that local build path only when needed, and never restore a key file to the repository root.
 
 Repository metadata confirms that a signing key was previously tracked and that a CRX artifact exists, but it cannot establish whether that key was used for a distributed build or update channel. Verify any historical distribution use with the relevant store or release records before changing a signing identity.
 

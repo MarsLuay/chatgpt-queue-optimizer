@@ -21,7 +21,7 @@ npm install
 Build the local Rust module before loading the unpacked extension or running the WASM integration tests:
 
 ```bash
-python Installers/build_optimizer.py
+cargo run --release --manifest-path Installers/native/Cargo.toml -- build
 ```
 
 The extension loads unpacked from the repository root after this build. JavaScript does not require transpilation. Browser packages compile the Rust module automatically.
@@ -68,7 +68,7 @@ Do not disable correctness rules globally. If a suppression is required, keep it
 The checked-in root manifest is the Chrome Manifest V3 source. Generate the Firefox-compatible source with:
 
 ```bash
-python Installers/package_for_stores.py
+cargo run --release --manifest-path Installers/native/Cargo.toml -- package
 ```
 
 Then open `about:debugging#/runtime/this-firefox`, choose **Load Temporary Add-on**, and select `build/firefox-src/manifest.json`.
@@ -82,7 +82,7 @@ The generated Firefox package requires Firefox 140 or newer. Temporary add-ons a
 - `background.test.js` - Node tests for background behavior.
 - `content.js` - ChatGPT page integration, DOM interaction and WASM bridge.
 - `rust/optimizer_core.rs` - dependency-free Rust window policy and native unit tests.
-- `Installers/build_optimizer.py` - reproducible local WASM build.
+- `Installers/native/src/main.rs` - reproducible local WASM build and release utility.
 - `utils.js` - shared extension utilities.
 - `popup.html` / `popup.js` - queue, settings, logging, and optimizer UI.
 - `options.html` - extension options/about page.
@@ -112,7 +112,7 @@ Document any validation you could not perform in the pull request description.
 Build upload-ready archives without launching or modifying a browser:
 
 ```bash
-python Installers/package_for_stores.py
+cargo run --release --manifest-path Installers/native/Cargo.toml -- package
 ```
 
 This produces:
