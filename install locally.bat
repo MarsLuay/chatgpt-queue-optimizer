@@ -4,7 +4,7 @@ set "REPO_ROOT=%~dp0"
 echo ChatGPT Queue + Optimizer - local browser installation
 echo.
 set "RESULT=1"
-powershell.exe -NoProfile -STA -ExecutionPolicy RemoteSigned -File "%REPO_ROOT%Installers\install_locally.ps1" %*
+cargo run --release --manifest-path "%REPO_ROOT%Installers\native\Cargo.toml" -- install --repo-dir "%REPO_ROOT%." %*
 set "RESULT=%ERRORLEVEL%"
 echo.
 if "%RESULT%"=="0" (
