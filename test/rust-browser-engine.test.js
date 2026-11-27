@@ -23,7 +23,7 @@ async function engine(optimizer = owner()) {
         cpo: { host: (op, a, b, c) => bridge.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
     });
     bridge.exports = result.instance.exports;
-    assert.equal(bridge.exports.cpo_browser_abi(), 4);
+    assert.equal(bridge.exports.cpo_browser_abi(), 5);
     return bridge;
 }
 
@@ -254,5 +254,42 @@ test('native composer operations and submission stages preserve draft and route 
     const latest={},old={},child={parentElement:old};
     assert.equal(bridge.activeSurface(child,new Set([old,latest]),latest),false);
     assert.equal(bridge.activeSurface({parentElement:latest},new Set([old,latest]),latest),true);
+    assert.equal(bridge.context,null);
+});
+
+test('native UI builds detached history and prompt trees with safe text and native edit actions', {skip}, async()=>{
+    const bridge=await engine();
+    function element(tag){
+        return {tag,children:[],style:{},className:'',textContent:'',
+            classList:{add(){}},
+            appendChild(child){this.children.push(child);return child;},
+            replaceChildren(child){this.children=child.children.slice();},
+            addEventListener(name,fn){this[name]=fn;}};
+    }
+    const doc={createElement:element,createDocumentFragment:()=>element('fragment')};
+    const root=element('root');root.ownerDocument=doc;
+    assert.equal(bridge.renderUI(6,root,[{fields:['1. assistant','<img src=x onerror=bad()>'],flags:1}]),true);
+    assert.equal(root.children[0].tag,'article');
+    assert.equal(root.children[0].children[1].textContent,'<img src=x onerror=bad()>');
+    assert.equal(root.children[0].children[2].className,'notice');
+    const actions=[];
+    assert.equal(bridge.renderUI(0,root,[{fields:['1: prompt']},{fields:['','Show more']}],1,(a,i)=>actions.push([a,i])),true);
+    assert.equal(root.children.length,2);
+    root.children[0].children[1].children[0].click();
+    root.children[1].click();
+    assert.deepEqual(actions,[[1,0],[3,1]]);
+    const messages=['first'];
+    assert.equal(bridge.sequenceEdit(messages,1,0,'edited'),true);
+    assert.equal(bridge.sequenceEdit(messages,0,0,'next'),true);
+    assert.equal(bridge.sequenceEdit(messages,2,1),true);
+    assert.deepEqual(messages,['edited']);
+    assert.equal(bridge.sequenceEdit(messages,1,2,'invalid'),false);
+    const saved={};
+    assert.equal(bridge.savedSequence(0,saved,'test',messages).ok,true);
+    assert.deepEqual(bridge.savedSequence(1,saved,'test',[]).messages,['edited']);
+    assert.equal(bridge.savedSequence(0,saved,'__proto__',messages).ok,false);
+    assert.equal(bridge.savedSequence(2,saved,'test',[]).ok,true);
+    assert.deepEqual(saved,{});
+    assert.deepEqual(bridge.variables('a {{name}} b {{other}}'),[[4,8],[15,20]]);
     assert.equal(bridge.context,null);
 });
