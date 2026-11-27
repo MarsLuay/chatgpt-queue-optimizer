@@ -37,7 +37,7 @@
   "content_scripts": [
     {
       "css": ["styles.css"],
-      "js": ["utils.js", "provider-adapter.js", "content.js"],
+      "js": ["utils.js", "provider-adapter.js", "rust-browser-bridge.js", "content.js"],
       "matches": [
         "https://chatgpt.com/*",
         "https://chat.openai.com/*",
@@ -73,6 +73,7 @@
     {
       "resources": [
         "optimizer_core.wasm",
+        "optimizer_browser.wasm",
         "icon_16.png",
         "icon_48.png",
         "icon_128.png"
