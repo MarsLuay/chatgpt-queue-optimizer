@@ -21,11 +21,11 @@
                     cpo: { host: (op, a, b, c) => this.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
                 });
                 const core = result.instance.exports;
-                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 7 ||
+                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 8 ||
                     !['cpo_collect_resources', 'cpo_discover_messages', 'cpo_execute_media',
                         'cpo_apply_window', 'cpo_window_visible', 'cpo_capture_history', 'cpo_process_mutations',
                         'cpo_cache_ttl', 'cpo_cache_valid', 'cpo_cache_nodes_valid', 'cpo_mutation_delay', 'cpo_provider_selectors', 'cpo_dom_composer_write', 'cpo_dom_composer_read',
-                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool', 'cpo_ui_render', 'cpo_ui_sequence_edit', 'cpo_ui_next_limit', 'cpo_ui_sequence_select', 'cpo_ui_variables', 'cpo_ui_saved_sequence', 'cpo_sequence_import', 'cpo_sequence_substitute', 'cpo_event_ready','cpo_restore_window','cpo_restore_journal'].every(name => typeof core[name] === 'function')) {
+                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool', 'cpo_ui_render', 'cpo_ui_sequence_edit', 'cpo_ui_next_limit', 'cpo_ui_sequence_select', 'cpo_ui_variables', 'cpo_ui_saved_sequence', 'cpo_sequence_import', 'cpo_sequence_substitute', 'cpo_event_ready','cpo_restore_window','cpo_restore_journal','cpo_intersection_transition'].every(name => typeof core[name] === 'function')) {
                     throw new Error('Browser WASM ABI mismatch');
                 }
                 this.exports = core;
@@ -264,31 +264,8 @@
             return flags;
         }
 
-        textLength(node, limit) {
-            // Stop once the existing trimmed-text threshold is proven.
-            // No full message textContent copy on normal browser paths.
-            const doc = this.context.doc;
-            if (typeof doc.createTreeWalker !== 'function') return Math.min(limit, (node.textContent || '').trim().length);
-            const walker = doc.createTreeWalker(node, 4);
-            let count = 0;
-            let pending = 0;
-            let started = false;
-            for (let text = walker.nextNode(); text; text = walker.nextNode()) {
-                for (let offset = 0; offset < text.length; offset += 256) {
-                    const chunk = text.substringData(offset, Math.min(256, text.length - offset));
-                    for (let i = 0; i < chunk.length; i++) {
-                        if (/\s/.test(chunk[i])) {
-                            if (started) pending = Math.min(limit, pending + 1);
-                        } else {
-                            started = true;
-                            count = Math.min(limit, count + pending + 1);
-                            pending = 0;
-                            if (count >= limit) return limit;
-                        }
-                    }
-                }
-            }
-            return count;
+        intersection(flags) {
+            return this.invoke({},core=>core.cpo_intersection_transition(flags)>>>0);
         }
 
         host(op, a, b, c) {
@@ -332,7 +309,6 @@
                     return turn && ctx.root.contains(turn) ? this.handle(turn) : 0;
                 }
                 case 13: return this.nodeFlags(a);
-                case 14: return this.textLength(ctx.handles[a], b);
                 case 15:
                     if (!ctx.acceptedSet.has(a)) {
                         ctx.order.set(a, ctx.accepted.length);
@@ -343,12 +319,6 @@
                     return 1;
                 case 16: return ctx.accepted.length;
                 case 17: return ctx.accepted[a] || 0;
-                case 18:
-                    for (let parent = ctx.handles[a].parentElement; parent; parent = parent.parentElement) {
-                        const id = ctx.ids.get(parent);
-                        if (id && ctx.acceptedSet.has(id)) return id;
-                    }
-                    return 0;
                 case 19: {
                     const node = ctx.handles[a];
                     return Number(node.tagName?.toLowerCase() === 'article' ||
@@ -664,6 +634,31 @@
                     if(b)owner.restoreSources(ctx.journalNode);
                     else owner.forgetSources(ctx.journalNode);
                     ctx.journalNode=null;return 1;
+                }
+                case 152: {
+                    ctx.textWalker=ctx.doc.createTreeWalker(ctx.handles[a],4);
+                    ctx.textNode=null;ctx.textOffset=0;return 1;
+                }
+                case 153: {
+                    // Only marshal a bounded slice of the current text node.
+                    while(!ctx.textNode||ctx.textOffset>=ctx.textNode.length){
+                        ctx.textNode=ctx.textWalker.nextNode();ctx.textOffset=0;
+                        if(!ctx.textNode)return 0;
+                    }
+                    const len=Math.min(b,ctx.textNode.length-ctx.textOffset);
+                    const chunk=ctx.textNode.substringData(ctx.textOffset,len);
+                    const target=new Uint16Array(this.exports.memory.buffer,a,len);
+                    for(let i=0;i<len;i++)target[i]=chunk.charCodeAt(i);
+                    ctx.textOffset+=len;return len;
+                }
+                case 154: ctx.textWalker=null;ctx.textNode=null;ctx.textOffset=0;return 1;
+                case 155: ctx.parentCursor=ctx.handles[a].parentElement;return 1;
+                case 156: {
+                    const parent=ctx.parentCursor;
+                    if(!parent)return 0;
+                    ctx.parentCursor=parent.parentElement;
+                    const id=ctx.ids.get(parent);
+                    return id&&ctx.acceptedSet.has(id)?id:0xffffffff;
                 }
                 default: throw new Error('Unknown Rust browser host operation: ' + op);
             }
