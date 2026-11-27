@@ -21,8 +21,10 @@
                     cpo: { host: (op, a, b, c) => this.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
                 });
                 const core = result.instance.exports;
-                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 1 ||
-                    !['cpo_collect_resources', 'cpo_discover_messages', 'cpo_execute_media'].every(name => typeof core[name] === 'function')) {
+                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 2 ||
+                    !['cpo_collect_resources', 'cpo_discover_messages', 'cpo_execute_media',
+                        'cpo_apply_window', 'cpo_capture_history', 'cpo_process_mutations',
+                        'cpo_cache_ttl', 'cpo_cache_valid', 'cpo_mutation_delay'].every(name => typeof core[name] === 'function')) {
                     throw new Error('Browser WASM ABI mismatch');
                 }
                 this.exports = core;
@@ -86,6 +88,41 @@
             return this.invoke({ root }, core => core.cpo_execute_media(mode) >>> 0);
         }
 
+        applyWindow(messages, visible, offscreen, evictPlayback) {
+            return this.invoke({ messages }, core =>
+                core.cpo_apply_window(messages.length, visible, Number(!!offscreen) | (Number(!!evictPlayback) << 1)) === 1);
+        }
+
+        captureHistory(messages, offset) {
+            if (typeof document === 'undefined' || typeof document.createTreeWalker !== 'function') return null;
+            return this.invoke({ messages, records: [] }, (core, ctx) => {
+                if (core.cpo_capture_history(messages.length, offset) !== 1) {
+                    return { ok: false, error: 'Conversation DOM changed during capture.' };
+                }
+                return { ok: true, records: ctx.records, next: offset + ctx.records.length };
+            });
+        }
+
+        cacheTtl(kind) {
+            return this.invoke({}, core => core.cpo_cache_ttl(kind) >>> 0);
+        }
+
+        cacheValid(kind, created, present, connected, now = Date.now()) {
+            const elapsed = now - created;
+            const age = Number.isFinite(elapsed) && elapsed >= 0 ? Math.min(0xffffffff, Math.floor(elapsed)) : 0xffffffff;
+            return this.invoke({}, core => core.cpo_cache_valid(kind, age,
+                Number(!!present) | (Number(!!connected) << 1)) === 1);
+        }
+
+        mutationDelay() {
+            return this.invoke({}, core => core.cpo_mutation_delay() >>> 0);
+        }
+
+        mutations(mutations, mode, empty = false, adapter = null) {
+            return this.invoke({ mutations, adapter, dirty: new WeakSet() }, core =>
+                core.cpo_process_mutations(mutations.length, mode, Number(!!empty)) === 1);
+        }
+
         handle(node) {
             if (!node) return 0;
             const ctx = this.context;
@@ -145,7 +182,7 @@
             return count;
         }
 
-        host(op, a, b) {
+        host(op, a, b, c) {
             const ctx = this.context;
             if (!ctx) throw new Error('Browser operation outside scoped call');
             const owner = this.owner;
@@ -265,6 +302,73 @@
                         if (original && !img.hasAttribute('src') && !img.hasAttribute('srcset')) img.setAttribute('src', original);
                         img.removeAttribute('data-cpo-original-src');
                     }
+                    return 1;
+                }
+                case 50: {
+                    ctx.root = ctx.messages[a];
+                    return Number(ctx.root.classList.contains('cpo-hidden'));
+                }
+                case 51: {
+                    const classes = ctx.root.classList;
+                    if (a === 1) classes.add('cpo-hidden');
+                    else classes.remove('cpo-hidden');
+                    if (a === 2) classes.add('cpo-offscreen');
+                    else classes.remove('cpo-offscreen');
+                    return 1;
+                }
+                case 52: ctx.lazyImages = ctx.root.querySelectorAll('img'); return ctx.lazyImages.length;
+                case 53: {
+                    const image = ctx.lazyImages[a];
+                    if (!image.hasAttribute('loading')) image.setAttribute('loading', 'lazy');
+                    return 1;
+                }
+                case 60: {
+                    const node = ctx.messages[a];
+                    if (!node?.isConnected) return 0;
+                    const roleNode = node.matches?.('[data-message-author-role]') ? node :
+                        node.querySelector?.('[data-message-author-role]');
+                    const role = roleNode?.getAttribute('data-message-author-role');
+                    ctx.walker = document.createTreeWalker(node, 4);
+                    ctx.parts = [];
+                    return role === 'user' ? 1 : role === 'assistant' ? 2 : 3;
+                }
+                case 61: ctx.node = ctx.walker.nextNode(); return Number(!!ctx.node);
+                case 62: return Number(!!ctx.node.parentElement?.closest(
+                    'button,script,style,noscript,textarea,input,select,[aria-hidden="true"],[contenteditable="true"]'));
+                case 63: return Math.min(0xffffffff, ctx.node.length || 0);
+                case 64: ctx.parts.push(ctx.node.substringData(0, a)); return 1;
+                case 65:
+                    ctx.records.push({ index: a, role: ['','user','assistant','message'][b],
+                        text: ctx.parts.join(' '), truncated: c === 1 });
+                    ctx.parts = null;
+                    return 1;
+                case 70: {
+                    const mutation = ctx.mutations[a];
+                    ctx.added = mutation.addedNodes || [];
+                    ctx.removed = mutation.removedNodes || [];
+                    ctx.dirtyNode = mutation.target?.nodeType === 3 ? mutation.target.parentElement : mutation.target;
+                    const selector = b === 1
+                        ? '[data-testid*="conversation-turn"], [data-message-author-role], [data-message-id], article'
+                        : '[data-testid^="conversation-turn"], [data-message-author-role]';
+                    ctx.turnSelector = selector;
+                    return (mutation.type === 'attributes' &&
+                        ['data-testid','data-message-author-role','data-message-id'].includes(mutation.attributeName) ? 1 : 0) |
+                        (mutation.target?.closest?.(selector) ? 2 : 0) |
+                        (ctx.added.length || ctx.removed.length ? 4 : 0);
+                }
+                case 71: return ctx.added.length + ctx.removed.length;
+                case 72: {
+                    const node = a < ctx.added.length ? ctx.added[a] : ctx.removed[a - ctx.added.length];
+                    if (node?.nodeType !== 1) return 0;
+                    return ((node.classList?.contains('cpo-more-banner') || node.closest?.('.cpo-more-banner')) ? 1 : 0) |
+                        ((node.matches?.(ctx.turnSelector) || node.querySelector?.(ctx.turnSelector)) ? 2 : 0);
+                }
+                case 73: {
+                    const node = ctx.dirtyNode;
+                    if (!node || ctx.dirty.has(node)) return 0;
+                    ctx.dirty.add(node);
+                    ctx.adapter._turnScanCache.delete(node);
+                    ctx.dirtyNode = node.parentElement;
                     return 1;
                 }
                 default: throw new Error('Unknown Rust browser host operation: ' + op);
