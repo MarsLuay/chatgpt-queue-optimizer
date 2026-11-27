@@ -13,7 +13,7 @@ const DEFAULT_WINDOW: u32 = 50;
 const DEFAULT_BATCH: u32 = 25;
 
 #[no_mangle]
-pub extern "C" fn cpo_abi_version() -> u32 { 3 }
+pub extern "C" fn cpo_abi_version() -> u32 { 4 }
 
 /// Retain the configured window and any explicitly expanded history.
 /// Preserve the preexisting optimizer's behavior while moving policy to Rust.
@@ -86,6 +86,18 @@ pub extern "C" fn cpo_can_evict_playback(paused: u32, at_start: u32,
     (paused == 1 && at_start == 1 && has_stream == 0 && has_protected_source == 0) as u32
 }
 
+/// Bound the read-only history viewer's rendered window and disk reads.
+#[no_mangle]
+pub extern "C" fn cpo_history_page_count(total: u32, offset: u32, requested: u32) -> u32 {
+    total.saturating_sub(offset).min(requested.clamp(1, 32))
+}
+
+/// Limit local snapshot payloads to 8 MiB of UTF-8 text and row overhead.
+#[no_mangle]
+pub extern "C" fn cpo_history_accept_bytes(used: u32, next: u32) -> u32 {
+    (used <= 8_388_608 && next <= 8_388_608 - used) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,6 +120,15 @@ mod tests {
         assert_eq!(cpo_adaptive_window(500, 50, 0, 0, 4000), 50);
         assert_eq!(cpo_adaptive_window(500, 50, 20, 4000, 100000), 50);
         assert_eq!(cpo_adaptive_window(u32::MAX, u32::MAX, u32::MAX, 1, u32::MAX), u32::MAX);
+    }
+    #[test]
+    fn bounded_history_paging() {
+        assert_eq!(cpo_history_page_count(100, 0, 100), 32);
+        assert_eq!(cpo_history_page_count(100, 95, 16), 5);
+        assert_eq!(cpo_history_page_count(100, 101, 16), 0);
+        assert_eq!(cpo_history_accept_bytes(8_388_600, 8), 1);
+        assert_eq!(cpo_history_accept_bytes(8_388_600, 9), 0);
+        assert_eq!(cpo_history_accept_bytes(u32::MAX, 1), 0);
     }
     #[test]
     fn media_eviction_policy() {
