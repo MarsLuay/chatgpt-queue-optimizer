@@ -23,7 +23,7 @@ async function engine(optimizer = owner()) {
         cpo: { host: (op, a, b, c) => bridge.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
     });
     bridge.exports = result.instance.exports;
-    assert.equal(bridge.exports.cpo_browser_abi(), 5);
+    assert.equal(bridge.exports.cpo_browser_abi(), 6);
     return bridge;
 }
 
@@ -291,5 +291,24 @@ test('native UI builds detached history and prompt trees with safe text and nati
     assert.equal(bridge.savedSequence(2,saved,'test',[]).ok,true);
     assert.deepEqual(saved,{});
     assert.deepEqual(bridge.variables('a {{name}} b {{other}}'),[[4,8],[15,20]]);
+    assert.equal(bridge.context,null);
+});
+
+test('native sequence import and substitution preserve supported formats', {skip:skip||!fs.existsSync(path.join(__dirname,'..','optimizer_queue.wasm'))},async()=>{
+    const queue=require('../rust-queue-bridge.js');
+    const result=await WebAssembly.instantiate(fs.readFileSync(path.join(__dirname,'..','optimizer_queue.wasm')),{});
+    queue.install(result.instance.exports);
+    const bridge=await engine();
+    const imported=bridge.importSequence('  ```json\n{"name":"  sequence  ","messages":[" one ","two \\uD83D\\uDE00","\\t","a\\n b"]}\n```  ');
+    assert.deepEqual(imported,{name:'sequence',messages:['one','two 😀','a\n b']});
+    assert.deepEqual(bridge.importSequence('["one","two"]'),{name:'',messages:['one','two']});
+    assert.deepEqual(bridge.importSequence('[{"message":" a "},{"text":" b "},{"prompt":"c"}]'),{name:'',messages:['a','b','c']});
+    assert.deepEqual(bridge.importSequence('1. first\n- second\n• third'),{name:'',messages:['first','second','third']});
+    assert.equal(bridge.importSequence('   '),null);
+    assert.equal(bridge.substitute('a {{x}} {{x}} {{y}}','x','$&{{y}}'),'a $&{{y}} $&{{y}} {{y}}');
+    assert.equal(bridge.substitute('unchanged','x','v'),'unchanged');
+    assert.equal(bridge.substitute('{{x}}','x',''),'');
+    assert.equal(bridge.eventReady(1,true),true);
+    assert.equal(bridge.eventReady(2,false),false);
     assert.equal(bridge.context,null);
 });
