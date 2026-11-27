@@ -3,7 +3,8 @@ param(
     [ValidateSet('All','Firefox','Chromium','Chrome')][string]$Browser,
     [string]$FirefoxPath,
     [string]$ChromiumPath,
-    [string]$ChromePath
+    [string]$ChromePath,
+    [switch]$LegacyUI
 )
 $ErrorActionPreference='Stop'
 $repo=Split-Path -Parent $PSScriptRoot
@@ -17,5 +18,6 @@ if ($Browser) { $arguments+=@('--browser',$Browser) }
 if ($FirefoxPath) { $arguments+=@('--firefox-path',$FirefoxPath) }
 if ($ChromiumPath) { $arguments+=@('--chromium-path',$ChromiumPath) }
 if ($ChromePath) { $arguments+=@('--chrome-path',$ChromePath) }
+if ($LegacyUI) { $arguments+=@('--legacy-ui') }
 & cargo @arguments
 exit $LASTEXITCODE
