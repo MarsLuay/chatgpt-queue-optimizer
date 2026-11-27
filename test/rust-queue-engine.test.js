@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 27);
+    assert.equal(e.cpo_queue_abi(), 28);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -768,4 +768,23 @@ test('native restore and atomic live initialization preserve legacy behavior',{s
     const ptr=e.cpo_live_input(8);new DataView(e.memory.buffer,ptr,8).setUint32(0,0xffffffff,true);
     assert.equal(e.cpo_live_initialize(),0);assert.equal(e.cpo_live_epoch(),rev);
     assert.equal(engine.deserializeDurable({tabId:'8',queue:['x']},now,()=> 'legacy').value.tabId,8);
+});
+
+
+test('native scheduled transactions sort, mutate and claim records atomically',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    const items=[{id:'b',status:'pending',dueTs:20,createdAt:1,text:'keep',extra:{x:[1,2]}},{id:'a',status:'pending',dueTs:10,createdAt:1,text:'\ud800'}];
+    const tx=engine.scheduledTransaction;
+    assert.equal(tx(4,items,'a',9).code,4);
+    const claimed=tx(4,items,'a',10);assert.equal(claimed.code,1);assert.ok(claimed.claim);
+    assert.equal(claimed.items[0].status,'firing');assert.equal(claimed.items[0].text,'\ud800');
+    assert.equal(tx(4,items,'a',10).code,3);
+    const recovery=tx(5,claimed.items,'',11);assert.equal(recovery.changed,false);assert.deepEqual(recovery.effects,[0,2]);
+    assert.equal(engine.workerCollection(8,claimed.claim,['"a"']),1);
+    const abandoned=tx(5,claimed.items,'',12);assert.equal(abandoned.items[0].status,'failed');
+    const retried=tx(3,abandoned.items,'a',13,30);assert.equal(retried.items[1].id,'a');assert.equal(retried.items[1].status,'pending');
+    const cancelled=tx(1,retried.items,'b',14);assert.equal(cancelled.items[0].status,'cancelled');assert.deepEqual(cancelled.items[0].extra,{x:[1,2]});
+    const deleted=tx(2,cancelled.items,'b',15);assert.deepEqual(deleted.items.map(x=>x.id),['a']);assert.equal(deleted.clearDeleted,true);
+    assert.equal(tx(1,[...items,items[0]],'b',16).code,7);
 });

@@ -94,7 +94,7 @@ const HOST:&str=r####"(() => {
             try{
                 const result=e.cpo_worker_dispatch(op,token)>>>0;
                 if(result===0xffffffff)return null;
-                if(op!==1&&op!==10&&op!==12)return result;
+                if(op!==1&&op!==10&&op!==12&&op!==13)return result;
                 return JSON.parse(workerDecoder.decode(new Uint8Array(e.memory.buffer,e.cpo_worker_output()>>>0,result)));
             }finally{e.cpo_worker_wipe();}
         }catch(error){fail(error);return null;}
@@ -747,6 +747,12 @@ const HOST:&str=r####"(() => {
     const scheduledId=value=>typeof value==='string'?'s:'+value:'!';
     const scheduledState=item=>String(Math.max(0,['','pending','firing','completed','failed','cancelled'].indexOf(item?.status)));
     const scheduledRecordId=item=>typeof item?.id==='string'?JSON.stringify(item.id):'null';
+    function scheduledTransaction(op,items,id='',now=Date.now(),next=0){
+        if(!Array.isArray(items))return null;
+        return workerCollection(13,0,[String(op),JSON.stringify(String(id||'')),String(now),String(next),'',
+            ...items.flatMap(item=>[scheduledRecordId(item),scheduledState(item),String(Number(item?.dueTs||0)),
+                String(Number(item?.createdAt||0)),JSON.stringify(item)])]);
+    }
     function scheduledRecoveryPlan(items){
         return workerCollection(10,0,items.flatMap(item=>[scheduledRecordId(item),scheduledState(item)]));
     }
@@ -1116,7 +1122,7 @@ const HOST:&str=r####"(() => {
             (Number(!!job.waitForIdleBeforeSend) << 6);
         return call('cpo_queue_next', [flags, phase, job.queue.length]);
     }
-    const api = { scheduledRecoveryPlan, scheduledUpsertPlan, completedRunCount, workerCollection, backgroundWaitTimeout, genericProviderResponse, providerSurface, providerNavigation, providerTurnMetadata, invalidateProviderTurn, providerLastAssistant, providerGenerationState, providerMarker, providerButtons, providerGenerationText, providerDiagnostics, providerTurnSnapshot, providerBoundResponse, providerSemanticButton, classifyFailure, bindingDecision, scheduledMutation, sequenceName, validSequenceName, sequenceVariables, keyboardEvent, localDateParts, localDateMatches, localDateInput, timestampValid, timestampMath, batch, textBatch, scheduledSort, scheduledLookup, scheduledWithout, scheduledDue, identityKey, continuationHandoff, supportedTabs, popupStatus, popupRunningLabel, popupScheduledLabel, popupStats, providerCatalog, diagnosticText, diagnosticPick, sanitizeDiagnostic, createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
+    const api = { scheduledTransaction, scheduledRecoveryPlan, scheduledUpsertPlan, completedRunCount, workerCollection, backgroundWaitTimeout, genericProviderResponse, providerSurface, providerNavigation, providerTurnMetadata, invalidateProviderTurn, providerLastAssistant, providerGenerationState, providerMarker, providerButtons, providerGenerationText, providerDiagnostics, providerTurnSnapshot, providerBoundResponse, providerSemanticButton, classifyFailure, bindingDecision, scheduledMutation, sequenceName, validSequenceName, sequenceVariables, keyboardEvent, localDateParts, localDateMatches, localDateInput, timestampValid, timestampMath, batch, textBatch, scheduledSort, scheduledLookup, scheduledWithout, scheduledDue, identityKey, continuationHandoff, supportedTabs, popupStatus, popupRunningLabel, popupScheduledLabel, popupStats, providerCatalog, diagnosticText, diagnosticPick, sanitizeDiagnostic, createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
     globalThis.CpoQueueEngine = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();

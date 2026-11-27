@@ -7,6 +7,7 @@ pub use background_controller::*;
 mod background_runtime;
 mod background_schedule;
 mod worker_collections;
+mod scheduled_transaction;
 mod durable_projection;
 #[no_mangle]
 pub extern "C" fn cpo_completed_run_count(count:f64)->f64{

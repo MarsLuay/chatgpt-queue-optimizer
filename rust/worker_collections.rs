@@ -138,6 +138,10 @@ impl Worker{
                 let Some(restored)=super::durable_projection::restore(&f[2..n+2],&f[n+2..],now,f[1])else{return NONE;};
                 self.output=restored;u32::try_from(self.output.len()).unwrap_or(NONE)
             },
+            13=>{
+                let Some(result)=super::scheduled_transaction::transact(&f,token,&mut self.scheduled,&mut self.next)else{return NONE;};
+                self.output=result;u32::try_from(self.output.len()).unwrap_or(NONE)
+            },
             _=>NONE
         }
     }

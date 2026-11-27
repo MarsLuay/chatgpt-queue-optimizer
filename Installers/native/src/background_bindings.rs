@@ -3682,6 +3682,8 @@ async function persistScheduledItem(nextItem) {
         if(index===0)items.push(nextItem);
         else items[index-1]=nextItem;
         await writeScheduledMessages(items);
+        if(nextItem.status==='pending')createScheduledAlarm(nextItem);
+        else if(nextItem.status==='completed'||nextItem.status==='failed')clearScheduledAlarm(nextItem.id);
         notifyRuntime({
             action: 'scheduledMessagesUpdated',
             item: nextItem
@@ -3769,7 +3771,6 @@ async function createScheduledMessage({ text, dueTs, tabId, conversationIdentity
     };
 
     await persistScheduledItem(item);
-    createScheduledAlarm(item);
 
     logQueueEvent(normalizedTabId, 'info', 'Scheduled message created.', {
         scheduledId: item.id,
@@ -3781,98 +3782,70 @@ async function createScheduledMessage({ text, dueTs, tabId, conversationIdentity
     return { ok: true, item };
 }
 
+// All collection ordering, eligibility, state patches and claim allocation
+// run in Rust. Only browser storage, alarms and UI notifications are effects.
+function scheduledTransaction(op,items,id='',now=Date.now(),next=0){
+    const plan=globalThis.CpoQueueEngine?.scheduledTransaction(op,items,id,now,next);
+    if(!plan)throw new Error('Native scheduled transaction unavailable; stored items preserved.');
+    return plan;
+}
+function scheduledTransactionError(code,operation){
+    if(code===0)return 'Scheduled message not found.';
+    if(code===2)return 'Completed scheduled messages cannot be '+(operation==='cancel'?'cancelled.':'retried.');
+    if(code===3)return 'Scheduled message delivery is already in progress.';
+    if(code===6)return 'A valid due date/time is required to retry.';
+    return 'Scheduled transaction rejected; no record overwritten.';
+}
+async function commitScheduledPlan(plan,id=''){
+    if(plan.code!==1||!Array.isArray(plan.items)||!Array.isArray(plan.effects)||plan.effects.length!==plan.items.length)
+        throw new Error('Invalid native scheduled transaction plan.');
+    if(plan.changed)await writeLocalStorage({[SCHEDULED_MESSAGES_KEY]:plan.items});
+    if(plan.clearDeleted)clearScheduledAlarm(id);
+    for(let i=0;i<plan.items.length;i++){
+        if(plan.effects[i]===1)clearScheduledAlarm(plan.items[i].id);
+        else if(plan.effects[i]===2)createScheduledAlarm(plan.items[i]);
+    }
+}
 async function cancelScheduledMessage(id) {
-    const scheduledId = String(id || '');
-    return withScheduledStorageLock(async () => {
-        const items = await readScheduledMessages();
-        const item = findScheduledItem(items,scheduledId);
-
-        if (!item) {
-            return { ok: false, error: 'Scheduled message not found.' };
-        }
-
-        const action = scheduledAction(1, item);
-        if (action === 2) {
-            return { ok: false, error: 'Completed scheduled messages cannot be cancelled.' };
-        }
-
-        if (action === 3) {
-            return { ok: false, error: 'Scheduled message delivery is already in progress.' };
-        }
-
-        if(!globalThis.CpoQueueEngine.scheduledMutation(1,item))throw new Error('Native cancellation rejected.');
-        clearScheduledAlarm(item.id);
-        await writeScheduledMessages(items);
-        notifyRuntime({ action: 'scheduledMessagesUpdated', item });
-
-        return { ok: true, item };
+    const scheduledId=String(id||'');
+    return withScheduledStorageLock(async()=>{
+        const plan=scheduledTransaction(1,await readScheduledMessages(),scheduledId);
+        if(plan.code!==1)return {ok:false,error:scheduledTransactionError(plan.code,'cancel')};
+        await commitScheduledPlan(plan,scheduledId);
+        const item=plan.items[plan.index];
+        notifyRuntime({action:'scheduledMessagesUpdated',item});
+        return {ok:true,item};
     });
 }
 
 async function deleteScheduledMessage(id) {
-    const scheduledId = String(id || '');
-    return withScheduledStorageLock(async () => {
-        const items = await readScheduledMessages();
-        const item = findScheduledItem(items,scheduledId);
-
-        if (!item) {
-            return { ok: false, error: 'Scheduled message not found.' };
-        }
-
-        if (scheduledAction(2, item) === 3) {
-            return { ok: false, error: 'Scheduled message delivery is already in progress.' };
-        }
-
-        const nextItems = nativeScheduledCollection('scheduledWithout',items,scheduledId);
-        clearScheduledAlarm(scheduledId);
-        await writeScheduledMessages(nextItems);
-        notifyRuntime({ action: 'scheduledMessagesUpdated', deletedId: scheduledId });
-
-        return { ok: true, deletedId: scheduledId };
+    const scheduledId=String(id||'');
+    return withScheduledStorageLock(async()=>{
+        const plan=scheduledTransaction(2,await readScheduledMessages(),scheduledId);
+        if(plan.code!==1)return {ok:false,error:scheduledTransactionError(plan.code,'delete')};
+        await commitScheduledPlan(plan,scheduledId);
+        notifyRuntime({action:'scheduledMessagesUpdated',deletedId:scheduledId});
+        return {ok:true,deletedId:scheduledId};
     });
 }
 
-async function retryScheduledMessage(id, dueTs = null) {
-    const scheduledId = String(id || '');
-    const result = await withScheduledStorageLock(async () => {
-        const items = await readScheduledMessages();
-        const item = findScheduledItem(items,scheduledId);
-
-        if (!item) {
-            return { ok: false, error: 'Scheduled message not found.' };
-        }
-
-        const action = scheduledAction(3, item);
-        if (action === 2) {
-            return { ok: false, error: 'Completed scheduled messages cannot be retried.' };
-        }
-
-        if (action === 3) {
-            return { ok: false, error: 'Scheduled message delivery is already in progress.' };
-        }
-
-        const nextDueTs = dueTs == null ? Date.now() : Number(dueTs);
-        if (globalThis.CpoQueueEngine?.timestampValid?.(nextDueTs)!==true) {
-            return { ok: false, error: 'A valid due date/time is required to retry.' };
-        }
-
-        if(!globalThis.CpoQueueEngine.scheduledMutation(3,item,Date.now(),nextDueTs))throw new Error('Native retry rejected.');
-        await writeScheduledMessages(items);
-        createScheduledAlarm(item);
-        notifyRuntime({ action: 'scheduledMessagesUpdated', item });
-        return { ok: true, item };
+async function retryScheduledMessage(id, dueTs=null) {
+    const scheduledId=String(id||'');
+    const result=await withScheduledStorageLock(async()=>{
+        const now=Date.now(),next=dueTs==null?now:Number(dueTs);
+        const plan=scheduledTransaction(3,await readScheduledMessages(),scheduledId,now,Number.isFinite(next)?next:0);
+        if(plan.code!==1)return {ok:false,error:scheduledTransactionError(plan.code,'retry')};
+        await commitScheduledPlan(plan,scheduledId);
+        const item=plan.items[plan.index];
+        notifyRuntime({action:'scheduledMessagesUpdated',item});
+        return {ok:true,item};
     });
-
-    if (result.ok && scheduledAction(4, result.item) === 1) {
-        await processDueScheduledMessages('retry', result.item.id);
-    }
-
+    if(result.ok&&scheduledAction(4,result.item)===1)await processDueScheduledMessages('retry',result.item.id);
     return result;
 }
 
 async function markScheduledFailed(item, reason) {
     if(!globalThis.CpoQueueEngine.scheduledMutation(6,item,Date.now(),0,String(reason||'Scheduled delivery failed.')))throw new Error('Native scheduled failure rejected.');
-    clearScheduledAlarm(item.id);
     await persistScheduledItem(item);
     logQueueEvent(item.tabId, 'error', item.failureReason, {
         scheduledId: item.id,
@@ -3891,7 +3864,6 @@ async function markScheduledCompleted(item, enqueueResult = {}) {
         waitingForIdle: enqueueResult.waitingForIdle === true,
         remaining: enqueueResult.remaining
     };
-    clearScheduledAlarm(item.id);
     await persistScheduledItem(item);
     logQueueEvent(item.tabId, 'info', 'Scheduled message handed to queue.', {
         scheduledId: item.id,
@@ -3901,26 +3873,16 @@ async function markScheduledCompleted(item, enqueueResult = {}) {
     return item;
 }
 
-async function claimScheduledMessageForFire(id, now = Date.now()) {
-    return withScheduledStorageLock(async () => {
-        const items = await readScheduledMessages();
-        const item = findScheduledItem(items,id);
-
-        if (!item) {
-            return null;
-        }
-
-        if (scheduledAction(4, item, now) !== 1) return null;
-
-        const key=JSON.stringify(String(item.id));
-        const lease=workerCollection(7,0,[key]);
-        if(!lease)return null;
+async function claimScheduledMessageForFire(id, now=Date.now()) {
+    return withScheduledStorageLock(async()=>{
+        const scheduledId=String(id||'');
+        const plan=scheduledTransaction(4,await readScheduledMessages(),scheduledId,now);
+        if(plan.code!==1)return null;
+        const lease=plan.claim,key=JSON.stringify(scheduledId);
+        if(!lease)throw new Error('Native scheduled claim missing.');
         try{
-            if(!globalThis.CpoQueueEngine.scheduledMutation(4,item,now)){
-                workerCollection(8,lease,[key]);return null;
-            }
-            await writeScheduledMessages(items);
-            const claimed={...item};
+            await commitScheduledPlan(plan,scheduledId);
+            const claimed=plan.items[plan.index];
             Object.defineProperty(claimed,'__nativeClaim',{value:lease,enumerable:false});
             return claimed;
         }catch(error){workerCollection(8,lease,[key]);throw error;}
@@ -4035,25 +3997,10 @@ async function processDueScheduledMessages(source = 'manual', onlyId = null, now
     return fired;
 }
 
-async function recoverScheduledMessages(source = 'startup') {
-    await withScheduledStorageLock(async () => {
-        const items=await readScheduledMessages();
-        const plan=globalThis.CpoQueueEngine?.scheduledRecoveryPlan(items);
-        if(!Array.isArray(plan)||plan.length!==items.length)throw new Error('Native scheduled recovery plan unavailable.');
-        let changed=false;
-        for(let i=0;i<items.length;i++){
-            if(plan[i]!==5)continue;
-            const item=items[i];
-            if(!globalThis.CpoQueueEngine.scheduledMutation(5,item))throw new Error('Native scheduled recovery rejected.');
-            changed=true;
-        }
-        if(changed)await writeScheduledMessages(items);
-        // Re-arm only after the durable state is committed and before
-        // another storage transaction can cancel or replace the record.
-        for(let i=0;i<items.length;i++){
-            if(plan[i]===5)clearScheduledAlarm(items[i].id);
-            else if(plan[i]===4)createScheduledAlarm(items[i]);
-        }
+async function recoverScheduledMessages(source='startup') {
+    await withScheduledStorageLock(async()=>{
+        const plan=scheduledTransaction(5,await readScheduledMessages());
+        await commitScheduledPlan(plan);
     });
     return processDueScheduledMessages(source);
 }
