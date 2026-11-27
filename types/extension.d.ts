@@ -422,3 +422,6 @@ interface Window {
 
 // Browser DOM import bridge is loaded before content.js by the manifest.
 declare var CpoRustBrowserBridge: any;
+
+// Native queue policy and fingerprint bridge, shared across extension realms.
+declare var CpoQueueEngine: any;
