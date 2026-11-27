@@ -305,7 +305,7 @@ public static class QueueOptimizerFirefoxWindows {
             $FirefoxPath=$candidates | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -First 1
         }
     }
-    if (-not $FirefoxPath) { throw 'Firefox was not found. Install it or supply -FirefoxPath.' }
+    if (-not $FirefoxPath) { Write-Output 'Firefox executable not found.'; exit 2 }
     $browser=(Resolve-Path -LiteralPath $FirefoxPath).ProviderPath
     if (-not (Test-Path -LiteralPath $browser -PathType Leaf) -or
         [Diagnostics.FileVersionInfo]::GetVersionInfo($browser).ProductName -notmatch 'Firefox') { throw 'Selected Firefox executable was not verified.' }
