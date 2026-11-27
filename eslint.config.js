@@ -114,6 +114,7 @@ module.exports = [
             'rust-queue-bridge.js',
             'content.js',
             'popup.js',
+            'rust-browser-bridge.js',
             'utils.js',
             'history-viewer.js',
             'history-store.js',

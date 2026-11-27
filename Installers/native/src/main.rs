@@ -8,6 +8,7 @@ mod history_store_bindings;
 mod queue_bindings;
 mod content_bindings;
 mod popup_bindings;
+mod browser_bridge_bindings;
 #[cfg(test)]
 mod release_tests;
 use serde_json::{json, Value};
@@ -47,6 +48,7 @@ fn build_wasm(repo:&Path, stage:&Path)->Result<()> {
         if !bytes.starts_with(b"\0asm\x01\0\0\0"){return Err(err("Invalid generated WASM module"));}
         println!("Built {} ({} bytes)",name,bytes.len());
     }
+    browser_bridge_bindings::generate(stage)?;
     wasm_bindings::generate(repo,stage)?;
     browser_api_bindings::generate(stage)?;
     history_viewer_bindings::generate(stage)?;
@@ -123,7 +125,7 @@ fn package(repo:&Path)->Result<String>{
     for name in ["chrome-src","firefox-src"]{
         let dest=stage.join(name);fs::create_dir(&dest)?;
         for asset in FILES{
-            let src=if asset.ends_with(".wasm")||*asset==wasm_bindings::OUTPUT||*asset==browser_api_bindings::OUTPUT||*asset==history_viewer_bindings::OUTPUT||*asset==history_store_bindings::OUTPUT||*asset==queue_bindings::OUTPUT||*asset==content_bindings::OUTPUT||*asset==popup_bindings::OUTPUT{stage.join(asset)}else{repo.join(asset)};
+            let src=if asset.ends_with(".wasm")||*asset==wasm_bindings::OUTPUT||*asset==browser_api_bindings::OUTPUT||*asset==history_viewer_bindings::OUTPUT||*asset==history_store_bindings::OUTPUT||*asset==queue_bindings::OUTPUT||*asset==content_bindings::OUTPUT||*asset==popup_bindings::OUTPUT||*asset==browser_bridge_bindings::OUTPUT{stage.join(asset)}else{repo.join(asset)};
             if !fs::symlink_metadata(&src)?.file_type().is_file(){return Err(err(format!("Not a regular file: {asset}")));}
             fs::copy(src,dest.join(asset))?;
         }
@@ -142,6 +144,7 @@ fn package(repo:&Path)->Result<String>{
     publish_path(&stage.join(queue_bindings::OUTPUT),&repo.join(queue_bindings::OUTPUT))?;
     publish_path(&stage.join(content_bindings::OUTPUT),&repo.join(content_bindings::OUTPUT))?;
     publish_path(&stage.join(popup_bindings::OUTPUT),&repo.join(popup_bindings::OUTPUT))?;
+    publish_path(&stage.join(browser_bridge_bindings::OUTPUT),&repo.join(browser_bridge_bindings::OUTPUT))?;
     for file in ["chrome-src","firefox-src",chrome,firefox]{publish_path(&stage.join(file),&build.join(file))?;}
     println!("Packaged v{version}: build/{chrome}, build/{firefox}");
     Ok(version)
@@ -362,6 +365,7 @@ fn build_only(repo:&Path)->Result<()>{
     publish_path(&stage.join(queue_bindings::OUTPUT),&repo.join(queue_bindings::OUTPUT))?;
     publish_path(&stage.join(content_bindings::OUTPUT),&repo.join(content_bindings::OUTPUT))?;
     publish_path(&stage.join(popup_bindings::OUTPUT),&repo.join(popup_bindings::OUTPUT))?;
+    publish_path(&stage.join(browser_bridge_bindings::OUTPUT),&repo.join(browser_bridge_bindings::OUTPUT))?;
     Ok(())
 }
 

@@ -34,3 +34,4 @@ node_modules/
 /rust-queue-bridge.js
 /content.js
 /popup.js
+/rust-browser-bridge.js

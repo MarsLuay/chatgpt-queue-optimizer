@@ -25,6 +25,10 @@ pub extern "C" fn cpo_browser_abi() -> u32 { browser_abi::VERSION }
 mod browser_abi;
 mod content_controller;
 mod popup_controller;
+mod provider_bridge;
+pub use provider_bridge::{cpo_bridge_cache_plan,cpo_bridge_cache_delay,cpo_bridge_error_signal};
+#[cfg(target_arch="wasm32")]
+pub use provider_bridge::{cpo_bridge_cache_token,cpo_bridge_last_turn};
 pub use popup_controller::{cpo_popup_target,cpo_popup_schedule_guard,cpo_popup_send_action,cpo_popup_queue_view};
 #[cfg(target_arch="wasm32")]
 pub use popup_controller::cpo_popup_control;

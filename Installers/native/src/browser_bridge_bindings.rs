@@ -1,4 +1,15 @@
-(() => {
+//! Generate the browser DOM and provider interoperability adapter.
+//! Rust/WASM owns traversal and cache/observation policy; browser references
+//! and platform effects remain in the generated classic-script host.
+use super::Result;
+use std::{fs,path::Path};
+pub const OUTPUT:&str="rust-browser-bridge.js";
+pub fn generate(stage:&Path)->Result<()>{
+    fs::write(stage.join(OUTPUT),String::from("// @generated Rust browser bridge host. DO NOT EDIT.\n")+HOST)?;
+    println!("Generated {OUTPUT} from Rust browser bridge");
+    Ok(())
+}
+const HOST:&str=r####"(() => {
     'use strict';
 
     // This object is a browser binding, not an optimizer. The Rust module
@@ -217,6 +228,26 @@
             finally{this.context=outer;}
         }
         lastAssistant(flags){return this.exports?this.exports.cpo_dom_last_assistant(flags)===1:null;}
+        cacheToken(){
+            // Also called by the synchronous provider scan host callback.
+            return this.exports?this.exports.cpo_bridge_cache_token()>>>0:0;
+        }
+        providerCachePlan(enabled,sameDoc,present,created,now=Date.now()){
+            const elapsed=now-created;
+            const age=Number.isFinite(elapsed)&&elapsed>=0?Math.min(0xffffffff,Math.floor(elapsed)):0xffffffff;
+            return this.invoke({},core=>core.cpo_bridge_cache_plan(Number(enabled)|(Number(sameDoc)<<1)|(Number(present)<<2),age)>>>0);
+        }
+        providerCacheDelay(plan){return this.invoke({},core=>core.cpo_bridge_cache_delay(plan)>>>0);}
+        providerErrorSignal(flags){return this.invoke({},core=>core.cpo_bridge_error_signal(flags)>>>0);}
+        providerLastTurn(adapter,turns){
+            return this.invoke({adapter,turns,latest:null,text:'',alertText:'',hasErrorStop:false,hasRetry:false},(core,ctx)=>{
+                const result=core.cpo_bridge_last_turn(turns.length)>>>0;
+                if(result===0)return {turn:null};
+                if(result===1)return {turn:ctx.latest,isAssistant:false};
+                if(result!==2)throw new Error('Native assistant observation failed');
+                return {turn:ctx.latest,isAssistant:true,text:ctx.text,alertText:ctx.alertText,hasErrorStop:ctx.hasErrorStop,hasRetry:ctx.hasRetry};
+            });
+        }
         composerRead(provider, element) {
             const flags = Number(!!element) | (Number(element?.tagName?.toLowerCase()==='textarea')<<1);
             return this.invoke({ element, text: [] },(core,ctx)=>{
@@ -733,6 +764,27 @@
                                 const identity=adapter.getConversationIdentity(doc?.defaultView?.location||(typeof location!=='undefined'?location:''));
                                 return Number(identity.type==='new'||identity.type==='existing');
                             }
+                            default:return 0;
+                        }
+                    }finally{this.context=outer;}
+                }
+                case 190:{
+                    const node=ctx.latest=ctx.turns[a];
+                    if(!node)return 0;
+                    return Number(!!node.querySelector('[data-message-author-role="assistant"]')||node.getAttribute('data-message-author-role')==='assistant')|
+                        (Number(!!node.querySelector('[data-message-author-role="user"]')||node.getAttribute('data-message-author-role')==='user')<<1)|
+                        (Number(!!node.querySelector(ctx.adapter.compatibilitySignals.assistantContentSelectors.join(',')))<<2);
+                }
+                case 191:{
+                    const node=ctx.latest,adapter=ctx.adapter;
+                    if(!node)return 0;
+                    const outer=this.context;this.context=null;
+                    try{
+                        switch(a){
+                            case 0:ctx.text=(node.innerText||node.textContent||'').trim();return 1;
+                            case 1:ctx.alertText=adapter.getSelectorNodes(node,'errorAlerts').map(match=>match.element.innerText||match.element.textContent||'').join(' ');return 1;
+                            case 2:ctx.hasErrorStop=hasAssistantErrorStop(node,this);return 1;
+                            case 3:ctx.hasRetry=!!adapter.getRetryButton(node);return 1;
                             default:return 0;
                         }
                     }finally{this.context=outer;}
@@ -1330,7 +1382,6 @@
             this._turnScanCacheEnabled = false;
             this._turnCacheScope=nextTurnCacheScope++;
             this._turnCacheTokens=new WeakMap();
-            this._nextTurnCacheToken=1;
             this._turnListCache = null;
             this._turnListCacheTimer = null;
             this._nativeMessageDiscovery = null;
@@ -1342,13 +1393,16 @@
         }
 
         setNativeLifecycle(engine) {
+            if(this._nativeLifecycle!==engine){
+                this.clearTurnListCache();
+                this.clearNativeTurnMetadata();
+            }
             this._nativeLifecycle = engine || null;
         }
 
         clearNativeTurnMetadata(){
             if(this._turnCacheScope)globalThis.CpoQueueEngine?.invalidateProviderTurn(this._turnCacheScope);
             this._turnCacheTokens=new WeakMap();
-            this._nextTurnCacheToken=1;
         }
         invalidateNativeTurn(node){
             const token=this._turnCacheTokens.get(node);
@@ -1360,9 +1414,8 @@
         turnCacheToken(node){
             let token=this._turnCacheTokens.get(node);
             if(token)return token;
-            if(this._nextTurnCacheToken>0xffffffff)this.clearNativeTurnMetadata();
-            token=this._nextTurnCacheToken++;
-            this._turnCacheTokens.set(node,token);
+            token=this._nativeLifecycle?.cacheToken()||0;
+            if(token)this._turnCacheTokens.set(node,token);
             return token;
         }
         clearTurnListCache() {
@@ -1452,15 +1505,16 @@
             // observer. Only the cache-enabled optimizer uses this fast path.
             const now = Date.now();
             const cache = this._turnListCache;
-            if (this._turnScanCacheEnabled && cache?.doc === doc &&
-                requireNative(this._nativeLifecycle?.cacheNodesValid(1,cache.createdAt,cache.nodes,now))) {
-                return cache.nodes;
-            }
+            const plan=requireNative(this._nativeLifecycle?.providerCachePlan(this._turnScanCacheEnabled,cache?.doc===doc,!!cache,cache?.createdAt??NaN,now));
+            if(plan===1&&requireNative(this._nativeLifecycle?.cacheNodesValid(1,cache.createdAt,cache.nodes,now)))return cache.nodes;
             this.clearTurnListCache();
             const nodes=requireNative(this._nativeLifecycle?.providerTurns(doc,selectors));
-            if (this._turnScanCacheEnabled) {
-                this._turnListCache = { doc, nodes, createdAt: now };
-                this._turnListCacheTimer = setTimeout(() => this.clearTurnListCache(), requireNative(this._nativeLifecycle?.cacheTtl(1)));
+            if(plan!==0){
+                const entry={doc,nodes,createdAt:now};
+                this._turnListCache=entry;
+                this._turnListCacheTimer=setTimeout(()=>{
+                    if(this._turnListCache===entry)this.clearTurnListCache();
+                },requireNative(this._nativeLifecycle?.providerCacheDelay(plan)));
                 if (typeof this._turnListCacheTimer?.unref === 'function') this._turnListCacheTimer.unref();
             }
             return nodes;
@@ -1604,6 +1658,9 @@
 
             const url = typeof location !== 'undefined' ? location.href : (doc.defaultView?.location?.href || '');
             const title = typeof document !== 'undefined' ? document.title : (doc.title || '');
+            const errorFlags=Number(conversationCapacityReached)|(Number(!!signals.assistantErrorStop)<<1)|
+                (Number(!!signals.alert)<<2)|(Number(!!signals.status)<<3)|(Number(hasTryAgainButton&&!!signals.retry)<<4);
+            const errorChoice=requireNative(this._nativeSelectorEngine?.providerErrorSignal(errorFlags));
 
             return {
                 generating,
@@ -1628,9 +1685,7 @@
                     status: signals.status||null,
                     spinner: signals.spinner||null,
                     research: matchedResearchMarker ? `researchMarkers:${matchedResearchMarker}` : null,
-                    error: conversationCapacityReached
-                        ? (signals.alert||signals.status||'conversationCapacityMarkers')
-                        : (signals.assistantErrorStop?'assistant-error-stop':(signals.alert||(hasTryAgainButton?signals.retry:null))),
+                    error: [null,signals.alert,signals.status,'conversationCapacityMarkers','assistant-error-stop',signals.retry][errorChoice]||null,
                     retry: hasTryAgainButton?signals.retry:null,
                     scope: 'active-response',
                     compatibility: compatibilityState
@@ -1671,28 +1726,12 @@
             const turns = this.getConversationTurns(doc);
             if (turns.length === 0) return null;
 
-            const latestTurn = turns[turns.length - 1];
-            const flags=Number(!!latestTurn.querySelector('[data-message-author-role="assistant"]')||latestTurn.getAttribute('data-message-author-role')==='assistant')|
-                (Number(!!latestTurn.querySelector('[data-message-author-role="user"]')||latestTurn.getAttribute('data-message-author-role')==='user')<<1)|
-                (Number(!!latestTurn.querySelector(this.compatibilitySignals.assistantContentSelectors.join(',')))<<2)|(Number(turns.length>=2)<<3);
-            const isAssistant=requireNative(this._nativeSelectorEngine?.lastAssistant(flags));
-
-            if (!isAssistant) {
-                return {
-                    isAssistant: false,
-                    text: '',
-                    hasError: false,
-                    hasDeliveryTimeout: false,
-                    hasRetry: false,
-                    hasCompletedText: false
-                };
+            const observed=requireNative(this._nativeSelectorEngine?.providerLastTurn(this,turns));
+            if(!observed.turn)return null;
+            if(!observed.isAssistant){
+                return {isAssistant:false,text:'',hasError:false,hasDeliveryTimeout:false,hasRetry:false,hasCompletedText:false};
             }
-
-            const text = (latestTurn.innerText || latestTurn.textContent || '').trim();
-            const alertMatches = this.getSelectorNodes(latestTurn, 'errorAlerts');
-            const alertText=alertMatches.map(match=>match.element.innerText||match.element.textContent||'').join(' ');
-            const hasErrorStop=hasAssistantErrorStop(latestTurn,this._nativeSelectorEngine);
-            const hasRetry=!!this.getRetryButton(latestTurn);
+            const {text,alertText,hasErrorStop,hasRetry}=observed;
             const settlementFlags=Number(hasErrorStop)|(Number(hasRetry)<<1)|(Number(text.length>0)<<2);
             const errorSignal=this.getAssistantTurnErrorSignal(text);
             const state=requireNative(globalThis.CpoQueueEngine?.providerLastAssistant(settlementFlags,alertText,errorSignal));
@@ -1848,3 +1887,4 @@
         Object.assign(module.exports,ProviderAdapterRegistry);
     }
 })();
+"####;

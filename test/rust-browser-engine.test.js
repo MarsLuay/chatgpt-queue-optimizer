@@ -562,3 +562,16 @@ test('native popup generations and bounded rendering reject stale UI results',{s
     assert.equal(bridge.popupSendAction(3),1);
     assert.equal(bridge.popupQueueView(7),3);
 });
+
+
+test('native bridge cache plans, tokens and error signal priority',{skip},async()=>{
+    const bridge=await engine();
+    assert.equal(bridge.cacheToken(),1);assert.equal(bridge.cacheToken(),2);
+    assert.equal(bridge.providerCachePlan(true,true,true,1000,8999),1);
+    assert.equal(bridge.providerCachePlan(true,true,true,1000,9000),2);
+    assert.equal(bridge.providerCachePlan(false,true,true,1000,1001),0);
+    assert.equal(bridge.providerCacheDelay(2),8000);
+    assert.equal(bridge.providerErrorSignal(1|8),2);
+    assert.equal(bridge.providerErrorSignal(2|4),4);
+    assert.deepEqual(bridge.providerLastTurn({},[]),{turn:null});
+});

@@ -177,10 +177,10 @@ fn render(exports:&BTreeMap<String,Signature>)->Result<String>{
 "#);
     Ok(js)
 }
-pub fn generate(repo:&Path,stage:&Path)->Result<()>{
+pub fn generate(_repo:&Path,stage:&Path)->Result<()>{
     let bytes=fs::read(stage.join("optimizer_browser.wasm"))?;
     let exports=inspect(&bytes)?;
-    verify_bridge(&fs::read_to_string(repo.join("rust-browser-bridge.js"))?,&exports)?;
+    verify_bridge(&fs::read_to_string(stage.join(super::browser_bridge_bindings::OUTPUT))?,&exports)?;
     fs::write(stage.join(OUTPUT),render(&exports)?)?;
     println!("Generated {OUTPUT} ({} typed exports, ABI {})",exports.len(),browser_abi::VERSION);
     Ok(())
