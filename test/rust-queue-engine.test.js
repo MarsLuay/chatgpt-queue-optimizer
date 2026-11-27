@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 6);
+    assert.equal(e.cpo_queue_abi(), 7);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -324,4 +324,23 @@ test('native application settings, popup progress and logging policy', {skip}, a
     assert.equal(e.cpo_log_keep_start(299,10,300),9);
     assert.equal(e.cpo_log_duplicate(1,29999,30000),1);
     assert.equal(e.cpo_log_duplicate(1,30000,30000),0);
+});
+
+test('native browser API routing and event classification reject unknown names and arity', {skip}, async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    assert.equal(engine.eventCode(0,'CPO_HISTORY_BATCH'),5);
+    assert.equal(engine.eventCode(0,'CHECK_GENERATION_STATE'),9);
+    assert.equal(engine.eventCode(1,'stopSequence'),6);
+    assert.equal(engine.eventCode(1,'authorizeNativeQueueClick'),1);
+    assert.equal(engine.eventCode(2,'tabDiscard'),11);
+    assert.equal(engine.eventCode(2,'__proto__'),0);
+    assert.equal(engine.eventCode(2,'tabSend '),0);
+    assert.equal(engine.call('cpo_content_event_kind',[5]),3);
+    assert.equal(engine.call('cpo_content_event_kind',[13]),2);
+    assert.equal(engine.call('cpo_api_mode',[9,2,3]),1);
+    assert.equal(engine.call('cpo_api_mode',[9,2,2]),2);
+    assert.equal(engine.call('cpo_api_mode',[9,1,3]),0);
+    assert.equal(engine.call('cpo_api_mode',[99,1,3]),0);
+    assert.equal(engine.call('cpo_api_mode',[11,1,0]),0);
 });
