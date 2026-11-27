@@ -996,23 +996,21 @@ document.addEventListener('DOMContentLoaded', async function () {
             return resolved;
         }
 
-        const values = {};
-
+        const values = new Map();
         for (const v of uniqueVars) {
             const input = prompt(`Enter value for {{${v}}}:`);
             if (input === null) return null;
-            values[v] = input;
+            values.set(v,input);
         }
-
-        resolved = resolved.map(text => {
-            let temp = text;
-
-            for (const [k, v] of Object.entries(values)) {
-                temp = temp.split(`{{${k}}}`).join(v);
+        for(const [name,value] of values){
+            const next=[];
+            for(const text of resolved){
+                const replaced=ui.substitute(text,name,value);
+                if(replaced==null){showErrorStatus('Native variable substitution failed.');return null;}
+                next.push(replaced);
             }
-
-            return temp;
-        });
+            resolved=next;
+        }
 
         return resolved;
     }
@@ -1827,72 +1825,8 @@ The sequence should do the following: `;
         });
     }
 
-    function cleanImportedText(text) {
-        let cleaned = String(text || '').trim();
-
-        cleaned = cleaned.replace(/^```(?:json|text|js|javascript)?\s*/i, '');
-        cleaned = cleaned.replace(/\s*```$/i, '');
-
-        return cleaned.trim();
-    }
-
     function parseImportedSequence(rawText) {
-        const text = cleanImportedText(rawText);
-
-        if (!text) return null;
-
-        try {
-            const parsed = JSON.parse(text);
-
-            if (
-                parsed &&
-                typeof parsed === 'object' &&
-                !Array.isArray(parsed) &&
-                typeof parsed.name === 'string' &&
-                Array.isArray(parsed.messages) &&
-                parsed.messages.every(item => typeof item === 'string')
-            ) {
-                return {
-                    name: parsed.name.trim() || 'Imported sequence',
-                    messages: parsed.messages.map(item => item.trim()).filter(Boolean)
-                };
-            }
-
-            if (Array.isArray(parsed) && parsed.every(item => typeof item === 'string')) {
-                return {
-                    name: '',
-                    messages: parsed.map(item => item.trim()).filter(Boolean)
-                };
-            }
-
-            if (Array.isArray(parsed) && parsed.every(item => item && typeof item === 'object')) {
-                const importedMessages = parsed
-                    .map(item => item.message || item.text || item.prompt || '')
-                    .map(item => String(item).trim())
-                    .filter(Boolean);
-
-                return {
-                    name: '',
-                    messages: importedMessages
-                };
-            }
-        } catch {
-            // Fall back to line parsing below.
-        }
-
-        const lines = text
-            .split(/\r?\n/)
-            .map(line => line.trim())
-            .filter(Boolean)
-            .map(line => line.replace(/^[-*•\d.)\s]+/, '').trim())
-            .filter(Boolean);
-
-        if (lines.length === 0) return null;
-
-        return {
-            name: '',
-            messages: lines
-        };
+        return ui.importSequence(String(rawText||''));
     }
 
     function getUniqueSequenceName(baseName) {
