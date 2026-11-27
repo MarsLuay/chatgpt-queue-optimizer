@@ -5,6 +5,8 @@ Installer and packaging tools for ChatGPT Queue + Optimizer.
 ## Files
 
 - `Install ChatGPT Queue Optimizer.bat` - Windows launcher.
+- `../install locally.bat` - Windows Firefox-only local installer for the active browser profile.
+- `install_firefox_locally.ps1` - verified Firefox debugging-page and file-picker automation adapted from Vault Pi.
 - `Install ChatGPT Queue Optimizer.app` - macOS launcher.
 - `install_chatgpt_queue_optimizer.py` - shared Chrome/Firefox installation helper used by the launchers.
 - `package_for_stores.py` - builds upload-ready Chrome Web Store and Firefox AMO archives without installing or launching a browser.
@@ -28,6 +30,39 @@ open "Installers/Install ChatGPT Queue Optimizer.app"
 ```
 
 Both launchers ultimately call `install_chatgpt_queue_optimizer.py` against the repository root.
+
+## Install the latest local build into your normal Firefox session
+
+From the repository root in PowerShell:
+
+```powershell
+& '.\install locally.bat'
+```
+
+This builds the current checkout, validates the Firefox XPI against the pinned
+Gecko ID and current manifest version, detects the existing Firefox executable,
+opens or reuses `about:debugging#/runtime/this-firefox`, and automates **Load
+Temporary Add-on** through the real Firefox-owned file picker. It verifies the
+temporary add-on in the debugger inventory and, when replacing an existing
+temporary copy, requires evidence of the selected XPI location.
+
+Keep the Windows desktop available during setup; the installer needs access to
+Firefox's visible UI. It does not close Firefox, create a separate test profile,
+uninstall the store-installed add-on, change signature preferences, submit to
+AMO, or bump the version. A temporary add-on only lasts until Firefox restarts.
+Run the batch file again after restarting or changing the source. Windows,
+Python 3 and Firefox 140+ are required. The automation uses English Firefox UI
+labels and fails if it cannot verify the target window or controls.
+
+If multiple Firefox editions are running, select the intended executable:
+
+```powershell
+& '.\install locally.bat' -FirefoxPath 'C:\Program Files\Mozilla Firefox\firefox.exe'
+```
+
+The generated local XPI files are kept under `build/local-firefox/` by content
+hash to avoid overwriting a package that Firefox may still be using. You can
+remove unused packages after closing Firefox.
 
 ## Submit a Firefox update and test it locally
 
