@@ -126,34 +126,15 @@ def zip_dir(source_dir, out_file):
 
 
 def main():
-    default_root = Path(__file__).resolve().parents[1]
+    # Compatibility CLI; the native utility owns production package generation.
+    import subprocess
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo-dir", type=Path, default=default_root)
+    parser.add_argument("--repo-dir", type=Path, default=Path(__file__).resolve().parents[1])
     args = parser.parse_args()
-
-    repo_dir = args.repo_dir.resolve()
-    if not (repo_dir / "manifest.json").exists():
-        raise SystemExit(f"manifest.json was not found in {repo_dir}")
-
-    version = json.loads((repo_dir / "manifest.json").read_text())["version"]
-    build_dir = repo_dir / "build"
-    build_dir.mkdir(exist_ok=True)
-
-    log(f"Packaging ChatGPT Queue Optimizer v{version}")
-
-    chrome_src = build_dir / "chrome-src"
-    copy_source(repo_dir, chrome_src)
-    chrome_zip = build_dir / "chatgpt-queue-optimizer-chrome-store.zip"
-    zip_dir(chrome_src, chrome_zip)
-    log(f"  Chrome (MV3)  -> {chrome_zip.relative_to(repo_dir)}")
-
-    firefox_src = build_dir / "firefox-src"
-    build_firefox_source(repo_dir, firefox_src)
-    firefox_zip = build_dir / "chatgpt-queue-optimizer-firefox-store.zip"
-    zip_dir(firefox_src, firefox_zip)
-    log(f"  Firefox (MV2) -> {firefox_zip.relative_to(repo_dir)}")
-
-    log("Done. Both archives are ready to upload to the respective stores.")
+    root = args.repo_dir.resolve()
+    subprocess.run(["cargo", "run", "--release", "--manifest-path",
+                    str(root / "Installers" / "native" / "Cargo.toml"),
+                    "--", "package", "--repo-dir", str(root)], check=True)
 
 
 if __name__ == "__main__":
