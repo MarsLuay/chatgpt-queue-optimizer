@@ -4,7 +4,6 @@
   "description": "Automate ChatGPT prompts with prompt chains, queues, and ChatGPT performance optimization.",
   "version": "1.0.7",
   "offline_enabled": true,
-
   "action": {
     "default_title": "ChatGPT Queue + Optimizer",
     "default_popup": "popup.html",
@@ -14,17 +13,13 @@
       "128": "icon_128.png"
     }
   },
-
   "background": {
     "service_worker": "background.js"
   },
-
   "options_page": "options.html",
-
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },
-
   "commands": {
     "toggle-optimizer": {
       "description": "Toggle optimizer on/off",
@@ -33,11 +28,18 @@
       }
     }
   },
-
   "content_scripts": [
     {
-      "css": ["styles.css"],
-      "js": ["utils.js", "provider-adapter.js", "rust-browser-bridge.js", "content.js"],
+      "css": [
+        "styles.css"
+      ],
+      "js": [
+        "utils.js",
+        "rust-queue-bridge.js",
+        "provider-adapter.js",
+        "rust-browser-bridge.js",
+        "content.js"
+      ],
       "matches": [
         "https://chatgpt.com/*",
         "https://chat.openai.com/*",
@@ -47,14 +49,12 @@
       "run_at": "document_start"
     }
   ],
-
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",
     "https://gemini.google.com/*",
     "https://claude.ai/*"
   ],
-
   "permissions": [
     "scripting",
     "storage",
@@ -62,13 +62,11 @@
     "clipboardRead",
     "clipboardWrite"
   ],
-
   "icons": {
     "16": "icon_16.png",
     "48": "icon_48.png",
     "128": "icon_128.png"
   },
-
   "web_accessible_resources": [
     {
       "resources": [
@@ -81,6 +79,17 @@
       "matches": [
         "https://chatgpt.com/*",
         "https://chat.openai.com/*"
+      ]
+    },
+    {
+      "resources": [
+        "optimizer_queue.wasm"
+      ],
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://gemini.google.com/*",
+        "https://claude.ai/*"
       ]
     }
   ]
