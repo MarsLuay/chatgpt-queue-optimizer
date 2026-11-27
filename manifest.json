@@ -22,7 +22,7 @@
   "options_page": "options.html",
 
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },
 
   "commands": {
@@ -72,6 +72,7 @@
   "web_accessible_resources": [
     {
       "resources": [
+        "optimizer_core.wasm",
         "icon_16.png",
         "icon_48.png",
         "icon_128.png"
