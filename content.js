@@ -98,6 +98,8 @@
     }
 
     async init() {
+      // Lazy native loading never blocks composer or generation detection.
+      globalThis.CpoQueueEngine?.load();
       this.setupComposerQueueShortcut();
       await this.loadConfig();
 
