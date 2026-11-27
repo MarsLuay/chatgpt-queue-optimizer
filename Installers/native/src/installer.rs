@@ -1,8 +1,8 @@
 //! Native one-click installation. Dependency discovery, packaging, diagnostics
 //! and platform routing are owned by Rust. No signature or enterprise-policy
 //! overrides, no termination of arbitrary existing browser processes.
-use super::{err,Result,local_artifacts,logged_child,checked,stamp};
-use std::{env,fs,io::{self,Write},path::{Path,PathBuf},process::{Command,Stdio},time::{Duration,Instant}};
+use super::{err,Result,local_artifacts,logged_child,stamp};
+use std::{env,fs,io::Write,path::{Path,PathBuf},process::{Command,Stdio},time::{Duration,Instant}};
 
 #[derive(Default)]
 pub(super) struct Options{
@@ -172,7 +172,7 @@ pub(super) fn run(repo:&Path,selection:&str,paths:&[Option<String>;3],opts:&Opti
         if let Some(exe)=exe{report(&mut log,&format!("{target}: {}",exe.display()))?;available.push((target,index,exe));}
         else{
             failures.push(format!("{target} not found"));
-            links.push(match target{"Firefox"=>"Firefox - https://www.mozilla.org/firefox/","Chromium"=>"Chromium - https://www.chromium.org/getting-involved/download-chromium/","_"=>"Chrome - https://www.google.com/chrome/"}.into());
+            links.push(match target{"Firefox"=>"Firefox - https://www.mozilla.org/firefox/","Chromium"=>"Chromium - https://www.chromium.org/getting-involved/download-chromium/",_=>"Chrome - https://www.google.com/chrome/"}.into());
         }
     }
     if !cfg!(windows)&&!opts.no_restart&&!opts.no_temporary_loader&&available.iter().any(|(t,_,_)|*t=="Firefox")&&npm_path().is_none(){
