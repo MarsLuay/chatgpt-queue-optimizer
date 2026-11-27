@@ -80,7 +80,7 @@ fn shape(v:u32)->bool{
     let count=array(list);
     if count>100000{return false;}
     if count>0&&kind(at(list,0))==3&&kind(v)==2{objects=true;}
-    for i in 0..count{if kind(at(list,i))!=if objects{3}else{1}{return false;}}
+    for i in 0..count{if kind(at(list,i))!=(if objects{3}else{1}){return false;}}
     if name!=0{output(name,1);}
     for i in 0..count{
         let mut item=at(list,i);
@@ -96,7 +96,6 @@ fn shape(v:u32)->bool{
 pub extern "C" fn cpo_sequence_import(length:u32)->u32{
     if length==0||length>MAX{return 0;}
     let (mut a,mut b)=trim(0,length);
-    if starts(a,b,b"~~~"){/* Only the historical backtick fence is recognized. */}
     if starts(a,b,b"\x60\x60\x60"){
         a+=3;
         for lang in [b"javascript".as_slice(),b"json",b"text",b"js"]{
