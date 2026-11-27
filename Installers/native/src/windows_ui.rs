@@ -2,7 +2,7 @@
 //! package identities. No keyboard injection, preference edits, or removal.
 use super::{err,Result,ID,copy_tree,publish_path,stamp,Cleanup};
 use std::{env,fs,path::{Path,PathBuf},process::Command,thread,time::{Duration,Instant},io::Read};
-use windows::{core::{BSTR,PCWSTR},Win32::{Foundation::HWND,System::Com::*,UI::{Accessibility::*,WindowsAndMessaging::*}}};
+use windows::{core::BSTR,Win32::{Foundation::HWND,System::Com::*,UI::{Accessibility::*,WindowsAndMessaging::*}}};
 use sha2::{Digest,Sha256};
 use base64::Engine;
 use serde_json::Value;
@@ -59,15 +59,47 @@ fn wait<T>(what:&str,seconds:u64,mut probe:impl FnMut()->Result<Option<T>>)->Res
     loop{if let Some(v)=probe()?{return Ok(v);}if Instant::now()>=until{return Err(err(format!("Timed out: {what}")));}thread::sleep(Duration::from_millis(250));}
 }
 fn root(u:&IUIAutomation)->Result<IUIAutomationElement>{Ok(unsafe{u.GetRootElement()?})}
+#[link(name="user32")]
+extern "system"{
+    #[link_name="EnumWindows"] fn enum_windows(callback:unsafe extern "system" fn(isize,isize)->i32,data:isize)->i32;
+    #[link_name="GetClassNameW"] fn class_name(handle:isize,text:*mut u16,max:i32)->i32;
+    #[link_name="GetWindowThreadProcessId"] fn window_pid(handle:isize,pid:*mut u32)->u32;
+}
+unsafe extern "system" fn collect_window(handle:isize,data:isize)->i32{
+    (*(data as *mut Vec<isize>)).push(handle);1
+}
+fn all_windows()->Vec<isize>{
+    let mut handles=Vec::new();unsafe{enum_windows(collect_window,&mut handles as *mut _ as isize);}handles
+}
+fn window_class(h:HWND)->String{
+    let mut buf=[0u16;256];let len=unsafe{class_name(h.0 as isize,buf.as_mut_ptr(),buf.len() as i32)}.max(0) as usize;
+    String::from_utf16_lossy(&buf[..len])
+}
 fn windows(u:&IUIAutomation,exe:&Path)->Result<Vec<IUIAutomationElement>>{
-    Ok(nodes(u,&root(u)?,TreeScope_Children)?.into_iter().filter(|e|hwnd(e).is_some()&&process_path(pid(e)).is_some_and(|p|same(&p,exe))).collect())
+    let mut result=Vec::new();
+    for handle in all_windows(){
+        let mut p=0;unsafe{window_pid(handle,&mut p);}
+        if !process_path(p).is_some_and(|v|same(&v,exe)){continue;}
+        if let Ok(element)=unsafe{u.ElementFromHandle(HWND(handle as *mut _))}{result.push(element);}
+    }
+    Ok(result)
+}
+fn outside_document(u:&IUIAutomation,w:&IUIAutomationElement,e:&IUIAutomationElement)->bool{
+    let Ok(walker)= (unsafe{u.RawViewWalker()}) else{return false;};
+    let mut node=e.clone();
+    for _ in 0..32{
+        if control(&node,UIA_DocumentControlType){return false;}
+        if unsafe{u.CompareElements(&node,w)}.map(|b|b.as_bool()).unwrap_or(false){return true;}
+        match unsafe{walker.GetParentElement(&node)}{Ok(parent)=>node=parent,Err(_)=>return false}
+    }
+    false
 }
 fn verified_page(u:&IUIAutomation,w:&IUIAutomationElement,firefox:bool)->Result<bool>{
     let list=nodes(u,w,TreeScope_Descendants)?;
     let url=if firefox{"about:debugging#/runtime/this-firefox"}else{"chrome://extensions"};
     let url_ok=list.iter().any(|e|{
         let n=name(e).to_lowercase();
-        (control(e,UIA_EditControlType)||control(e,UIA_ComboBoxControlType))&&
+        outside_document(u,w,e)&&(control(e,UIA_EditControlType)||control(e,UIA_ComboBoxControlType))&&
         (n.contains("address")||n.contains("search or enter")||n.contains("search with"))&&
         value(e).trim_end_matches('/')==url
     });
@@ -158,7 +190,7 @@ fn card(u:&IUIAutomation,w:&IUIAutomationElement,id:&str,firefox:bool)->Result<O
     Ok(None)
 }
 fn owned_dialogs(u:&IUIAutomation,owner:HWND,exe:&Path)->Result<Vec<IUIAutomationElement>>{
-    Ok(windows(u,exe)?.into_iter().filter(|e|hwnd(e).is_some_and(|h|h!=owner&&unsafe{GetWindow(h,GW_OWNER).ok()==Some(owner)})).collect())
+    Ok(windows(u,exe)?.into_iter().filter(|e|hwnd(e).is_some_and(|h|h!=owner&&window_class(h)=="#32770"&&unsafe{GetWindow(h,GW_OWNER).ok()==Some(owner)})).collect())
 }
 fn install_picker(u:&IUIAutomation,w:&IUIAutomationElement,exe:&Path,firefox:bool,path:&Path)->Result<()>{
     assert_page(u,w,exe,firefox)?;
@@ -179,7 +211,6 @@ fn install_picker(u:&IUIAutomation,w:&IUIAutomationElement,exe:&Path,firefox:boo
         };f().map_err(|e|e.to_string())
     });
     let dialog=wait("new browser-owned file picker",30,||{
-        if worker.is_finished()&&owned_dialogs(u,owner,exe)?.is_empty(){return Err(err("Install invocation ended before a file picker was observed"));}
         unique(owned_dialogs(u,owner,exe)?,"browser-owned file dialog")
     })?;
     let handle=hwnd(&dialog).ok_or_else(||err("Dialog handle unavailable"))?;
@@ -197,8 +228,7 @@ fn install_picker(u:&IUIAutomation,w:&IUIAutomationElement,exe:&Path,firefox:boo
     }).collect(),"file picker path field")?.ok_or_else(||err("No verified accessible path field; use manual selection"))?;
     let pattern=value_pattern(&field).ok_or_else(||err("Path field changed"))?;
     let path_text=path.to_string_lossy().trim_start_matches("\\\\?\\").to_owned();
-    let wide:Vec<u16>=path_text.encode_utf16().chain(Some(0)).collect();
-    assert_dialog()?;unsafe{pattern.SetValue(PCWSTR(wide.as_ptr()))?;}
+    assert_dialog()?;unsafe{pattern.SetValue(&BSTR::from(path_text.as_str()))?;}
     if !unsafe{pattern.CurrentValue()?}.to_string().eq_ignore_ascii_case(&path_text){return Err(err("Picker did not retain the exact package path"));}
     let select=named(u,&dialog,if firefox{&["Open"][..]}else{&["Select Folder","Select","Open"][..]})?.ok_or_else(||err("Verified picker confirm button unavailable"))?;
     assert_dialog()?;invoke(&select)?;
