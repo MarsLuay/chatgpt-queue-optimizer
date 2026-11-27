@@ -543,6 +543,25 @@ const HOST:&str=r####"(() => {
             canPersist(){return !broken&&!!core&&(!engine||engine===core);},
             revision(){return native(e=>e.cpo_live_epoch());},
             transaction,
+            readFields(job,names){
+                const id=ids.get(job);
+                if(!id||handles.get(ownerTabs.get(job))!==job)return null;
+                let lo=0,hi=0;
+                for(const name of names){
+                    const i=fields.get(name);
+                    if(i===undefined||i===queueField||name==='isProcessing')throw new Error('Invalid scalar selection '+name);
+                    if(i<32)lo|=1<<i;else hi|=1<<(i-32);
+                }
+                return native(e=>readBatch(e,e.cpo_live_read_fields(id,lo>>>0,hi>>>0)>>>0));
+            },
+            pollAdmit(job,token,flags,now,started,ordinary,research,stale){
+                const id=ids.get(job);
+                if(!id||handles.get(ownerTabs.get(job))!==job)return 1;
+                return native(e=>{
+                    const result=e.cpo_live_poll_admit(id,token,flags,now,started,ordinary,research,stale)>>>0;
+                    return result===NONE?null:result;
+                });
+            },
             waitControl(job,token,op,a=0,b=0,now=Date.now()){
                 const id=ids.get(job);
                 if(!id||handles.get(ownerTabs.get(job))!==job)return null;

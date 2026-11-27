@@ -1832,12 +1832,10 @@ function getCommandBinding(job, context = {}) {
     if (context.commandBinding && typeof context.commandBinding === 'object') {
         return context.commandBinding;
     }
+    const fields=jobs.readFields(job,['submittedUserTurnId','assistantTurnId','conversationId','commandFingerprint','commandId'])||job;
     return {
-        userTurnId: job?.submittedUserTurnId || null,
-        assistantTurnId: job?.assistantTurnId || null,
-        conversationId: job?.conversationId || null,
-        commandFingerprint: job?.commandFingerprint || '',
-        commandId: job?.commandId || ''
+        userTurnId:fields?.submittedUserTurnId||null,assistantTurnId:fields?.assistantTurnId||null,
+        conversationId:fields?.conversationId||null,commandFingerprint:fields?.commandFingerprint||'',commandId:fields?.commandId||''
     };
 }
 
@@ -1862,6 +1860,7 @@ function getDiagnosticTurnIdentity(job, details = {}) {
 }
 
 function collectDeliveryDiagnostics(job, extra = {}) {
+    job=jobs.readFields(job,['runId','commandId','deliveryState','submissionAckSource','terminalAckSource','submittedUserTurnId','assistantTurnId','lastResponsePhase','commandFingerprint','currentCommandNumber'])||job;
     const values=globalThis.CpoQueueEngine?.diagnosticGroups([
         [job?.runId,extra.runId],[job?.commandId,extra.commandId],[job?.deliveryState,extra.deliveryState],
         [job?.submissionAckSource,extra.submissionAckSource],[job?.terminalAckSource,extra.terminalAckSource],
@@ -2545,19 +2544,11 @@ async function waitForTabResponse(tabId, context = {}) {
                 clearInterval(checkInterval);
                 return;
             }
-            const ready=waitNative(7);
-            if(ready===0)return;
-            if(ready==null){resolve({ok:false,error:'Queue ownership changed or native wait unavailable.',details:{failureClass:'user-stop'}});return;}
-
-            const job = jobs.get(tabId);
-
-            const flags=Number(!!job&&job===liveJob&&!job.isStopped)|
-                (Number(!!job&&job===liveJob&&job.isRunning&&!job.isPaused)<<1)|
-                (Number(unlimited)<<2)|(Number(queueSettings.queueDeepResearchAware)<<3)|(Number(sawDeepResearch)<<4);
-            const now=Date.now();
-            const gate=globalThis.CpoQueueEngine?.numeric('cpo_background_poll_gate',[
-                flags,now-startedAt,ordinaryMaxWaitMs,deepResearchMaxWaitMs,
-                now-Number(job?.lastResearchProgressAt||startedAt),deepResearchStaleMs]);
+            const job=jobs.get(tabId);
+            if(job!==liveJob){resolve({ok:false,error:'Queue ownership changed or native wait unavailable.',details:{failureClass:'user-stop'}});return;}
+            const flags=(Number(unlimited)<<2)|(Number(queueSettings.queueDeepResearchAware)<<3);
+            const gate=jobs.pollAdmit(liveJob,lease,flags,Date.now(),startedAt,ordinaryMaxWaitMs,deepResearchMaxWaitMs,deepResearchStaleMs);
+            if(gate===5)return;
             if(gate==null){resolve({ok:false,error:'Native response poll admission unavailable.',details:{failureClass:'non-retryable'}});return;}
             if(gate===1||gate===2){
                 resolve({ok:false,error:gate===1?'Queue was stopped.':'Queue was paused.',
@@ -2578,7 +2569,6 @@ async function waitForTabResponse(tabId, context = {}) {
             }
 
             try {
-                if(waitNative(1)!==1){resolve({ok:false,error:'Native poll lease unavailable.',details:{failureClass:'non-retryable'}});return;}
                 sendTabMessage(tabId, { type: 'CHECK_GENERATION_STATE', commandBinding }).then((response) => {
                     if (settled) {
                         return;

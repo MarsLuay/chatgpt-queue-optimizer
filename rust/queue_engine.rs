@@ -915,7 +915,17 @@ mod live_state {
     }
     impl Job {
         fn get(&self,name:&str)->&[u8]{self.fields[field(name)].as_deref().unwrap_or(NULL)}
-        fn set(&mut self,name:&str,value:&[u8]){self.fields[field(name)]=Some(value.to_vec());}
+        fn set(&mut self,name:&str,value:&[u8]){
+            let slot=&mut self.fields[field(name)];
+            if let Some(buf)=slot{
+                if buf.as_slice()==value{return;}
+                // Keep small scalar allocations; do not hold a large prior
+                // prompt's capacity after resetting its contents.
+                if buf.capacity()<=4096{buf.fill(0);buf.clear();buf.extend_from_slice(value);return;}
+                buf.fill(0);
+            }
+            *slot=Some(value.to_vec());
+        }
         fn num(&self,name:&str)->u32{number(self.get(name))}
         fn truth(&self,name:&str)->bool{present(self.get(name))}
         fn confirmed(&self)->bool{self.truth("submittedUserTurnId")||[b"\"confirmed-submission\"".as_slice(),b"\"active-response\"",b"\"terminal-awaiting-bookkeeping\""].contains(&self.get("deliveryState"))}
@@ -1284,6 +1294,21 @@ mod live_state {
             if dirty{self.changed(id);}
             result
         }
+        // Admission, state/deadline reads and acquiring the poll lock are
+        // one synchronous operation. 5 means another poll is in flight.
+        fn poll_admit(&mut self,id:u32,token:u32,flags:u32,now:f64,started:f64,ordinary:f64,research:f64,stale:f64)->u32{
+            let Some(job)=self.jobs.get_mut(&id)else{return 1;};
+            let Some(wait)=job.wait.as_ref()else{return 1;};
+            if token==0||wait.token!=token{return 1;}
+            if wait.polling{return 5;}
+            if ![now,started,ordinary,research,stale].iter().all(|v|v.is_finite()){return u32::MAX;}
+            let last=std::str::from_utf8(job.get("lastResearchProgressAt")).ok().and_then(|s|s.parse::<f64>().ok()).filter(|v|*v!=0.0).unwrap_or(started);
+            let facts=(!job.truth("isStopped")) as u32|(((job.truth("isRunning")&&!job.truth("isPaused")) as u32)<<1)|
+                (flags&12)|((job.truth("sawDeepResearch") as u32)<<4);
+            let gate=super::cpo_background_poll_gate(facts,now-started,ordinary,research,now-last,stale);
+            if gate==0{job.wait.as_mut().unwrap().polling=true;}
+            gate
+        }
         fn retry_tick(&self,id:u32,now:f64,slice:f64)->f64{
             let Some(job)=self.jobs.get(&id)else{return -1.0;};
             if !job.truth("isRunning")||job.truth("isPaused")||job.truth("isStopped")||
@@ -1372,11 +1397,16 @@ mod live_state {
         // A complete transition validates its frame and preconditions before
         // changing the deque or fields, then advances the revision once.
         fn transaction(&mut self,id:u32,op:u32,arg:u32,now:f64)->bool{
-            let input=std::mem::take(&mut self.input);
+            let mut input=std::mem::take(&mut self.input);
+            let result=self.transaction_frame(id,op,arg,now,&input);
+            input.fill(0);input.clear();
+            if input.capacity()<=256*1024{self.input=input;}
+            result
+        }
+        fn transaction_frame(&mut self,id:u32,op:u32,arg:u32,now:f64,input:&[u8])->bool{
             let Some(job)=self.jobs.get_mut(&id) else{return false;};
             if !now.is_finite()||now<0.0{return false;}
-            let time=now.to_string();
-            let Some(fields)=patch(&input) else{return false;};
+            let Some(fields)=patch(input) else{return false;};
             let value=|name:&str|fields.iter().find(|(i,_)|*i==field(name)).and_then(|(_,v)|v.as_deref());
             match op{
                 0=>{}, // generic atomic field patch
@@ -1619,7 +1649,7 @@ mod live_state {
                 _=>return false
             }
             if op==0{for (i,v) in fields{job.fields[i]=v;}}
-            if op!=1&&op!=11{job.set("updatedAt",time.as_bytes());}
+            if op!=1&&op!=11{job.set("updatedAt",now.to_string().as_bytes());}
             self.changed(id);true
         }
         fn target_decision(&mut self,id:u32,now:f64)->u32{
@@ -1680,6 +1710,23 @@ mod live_state {
                 else{super::command_identity::fingerprint_json(&text)?};
             let mut out=b"{\"text\":".to_vec();out.extend_from_slice(&text);
             out.extend_from_slice(b",\"fingerprint\":");out.extend_from_slice(&fp);out.push(b'}');Some(out)
+        }
+        // Bitmask selects only requested scalar fields. Never materialize
+        // pending prompts or unrelated metadata for a hot-path read.
+        fn read_fields(&mut self,id:u32,lo:u32,hi:u32)->u32{
+            self.output.fill(0);self.output.clear();
+            let Some(job)=self.jobs.get(&id)else{return 0;};
+            let mask=(lo as u64)|((hi as u64)<<32);
+            self.output.push(b'{');
+            for (i,desc) in super::DURABLE_FIELDS.iter().enumerate(){
+                if i==QUEUE||mask&(1u64<<i)==0{continue;}
+                let Some(value)=job.fields[i].as_deref()else{continue;};
+                if self.output.len()>1{self.output.push(b',');}
+                self.output.push(b'"');self.output.extend_from_slice(desc.name.as_bytes());self.output.extend_from_slice(b"\":");
+                self.output.extend_from_slice(value);
+            }
+            self.output.push(b'}');
+            u32::try_from(self.output.len()).ok().and_then(|n|n.checked_add(1)).unwrap_or(0)
         }
         fn read(&mut self, id: u32, field: u32, index: u32) -> u32 {
             self.output.clear();
@@ -1787,6 +1834,12 @@ mod live_state {
         STORE.with(|s|s.borrow().retry_plan(id,unlimited,limit,base,factor,max,unlimited_delay))
     }
     #[no_mangle]
+    pub extern "C" fn cpo_live_poll_admit(id:u32,token:u32,flags:u32,now:f64,started:f64,ordinary:f64,research:f64,stale:f64)->u32{
+        STORE.with(|s|s.borrow_mut().poll_admit(id,token,flags,now,started,ordinary,research,stale))
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_live_read_fields(id:u32,lo:u32,hi:u32)->u32{STORE.with(|s|s.borrow_mut().read_fields(id,lo,hi))}
+    #[no_mangle]
     pub extern "C" fn cpo_live_retry_tick(id:u32,now:f64,slice:f64)->f64{STORE.with(|s|s.borrow().retry_tick(id,now,slice))}
     #[no_mangle]
     pub extern "C" fn cpo_live_processing(id:u32,op:u32)->u32{
@@ -1812,6 +1865,7 @@ mod live_state {
             let mut s = s.borrow_mut();
             s.output.fill(0);
             s.output.clear();
+            if s.output.capacity()>256*1024{s.output.shrink_to(256*1024);}
         })
     }
     #[cfg(test)]

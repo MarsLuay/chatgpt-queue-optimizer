@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 40);
+    assert.equal(e.cpo_queue_abi(), 41);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -971,4 +971,19 @@ test('native queue initialization owns defaults and alarm dispatch',{skip},async
     assert.deepEqual(engine.alarmRoute('queue-wake'),{code:2,id:''});
     assert.deepEqual(engine.alarmRoute('scheduled-msg:a\ud800'),{code:3,id:'a\ud800'});
     assert.deepEqual(engine.alarmRoute('scheduled-msg:'),{code:0,id:''});
+});
+
+
+test('hot-path selective reads and native poll admission avoid full queue copies',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});engine.install(instance.exports);
+    const jobs=engine.createLiveJobs();
+    jobs.set(7,{tabId:7,isRunning:true,queue:['private prompt'],commandId:'run:1',submittedUserTurnId:'u',assistantTurnId:'a',lastResearchProgressAt:1000});
+    const job=jobs.get(7);
+    assert.deepEqual(jobs.readFields(job,['commandId','submittedUserTurnId','assistantTurnId']),{commandId:'run:1',submittedUserTurnId:'u',assistantTurnId:'a'});
+    const lease=jobs.waitControl(job,0,0,0,0,1000);
+    assert.equal(jobs.pollAdmit(job,lease,0,1100,1000,10000,20000,5000),0);
+    assert.equal(jobs.pollAdmit(job,lease,0,1200,1000,10000,20000,5000),5);
+    jobs.waitControl(job,lease,2);
+    assert.equal(jobs.pollAdmit(job,lease,0,12000,1000,10000,20000,5000),3);
+    jobs.delete(7);assert.equal(jobs.pollAdmit(job,lease,0,1200,1000,10000,20000,5000),1);
 });

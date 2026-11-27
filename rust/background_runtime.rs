@@ -51,7 +51,10 @@ impl ResponseWait{
         if !same{
             // Keep exact field boundaries. No concatenated-string ambiguity,
             // hash collisions or whole-job JSON materialization.
-            self.signature=fields.iter().map(|v|v.to_vec()).collect();
+            self.signature.resize_with(fields.len(),Vec::new);
+            for (buffer,value) in self.signature.iter_mut().zip(fields){
+                if buffer.as_slice()!=*value{buffer.fill(0);buffer.clear();buffer.extend_from_slice(value);}
+            }
         }
         self.last_persist=now;true
     }
