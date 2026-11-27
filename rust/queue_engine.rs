@@ -1,7 +1,7 @@
 //! Queue execution decisions and streaming legacy-compatible UTF-16 fingerprints.
 
 #[no_mangle]
-pub extern "C" fn cpo_queue_abi() -> u32 { 11 }
+pub extern "C" fn cpo_queue_abi() -> u32 { 12 }
 
 const OFFSET: u32 = 2166136261;
 const PRIME: u32 = 16777619;
@@ -1422,6 +1422,67 @@ mod presentation_batch {
         }
         Some(result)
     }
+
+    fn valid_sequence_name(name:&[u16])->bool{
+        !name.is_empty() && !["__proto__","constructor","prototype","__edit_selected_sequence__"].iter().any(|v|eq(name,v))
+    }
+    fn unique_sequence_name(f:&[&[u16]])->Option<Vec<u16>>{
+        let (base,existing)=f.split_first()?;
+        let base=trim(base);
+        let base=if base.is_empty(){ascii("Imported sequence")}else{base.to_vec()};
+        let names:BTreeSet<&[u16]>=existing.iter().copied().collect();
+        if valid_sequence_name(&base)&&!names.contains(base.as_slice()){return Some(base);}
+        // Each collision consumes a distinct existing name, so this is
+        // bounded by the number of saved names, even for hostile imports.
+        for n in 2..=names.len().saturating_add(3){
+            let mut candidate=base.clone();append(&mut candidate," ");append(&mut candidate,&n.to_string());
+            if valid_sequence_name(&candidate)&&!names.contains(candidate.as_slice()){return Some(candidate);}
+        }
+        None
+    }
+    fn collect_variables(f:&[&[u16]])->Vec<Vec<u16>>{
+        let mut seen=BTreeSet::new();let mut result=Vec::new();
+        for &text in f{
+            let mut pos=0;let mut opened=None;
+            while pos<text.len(){
+                let ch=text[pos];let next=text.get(pos+1).copied().unwrap_or(0);
+                if matches!(ch,10|13|0x2028|0x2029){opened=None;pos+=1;continue;}
+                if let Some(start)=opened{
+                    if ch==125&&next==125{
+                        let name=trim(&text[start..pos]);
+                        if !name.is_empty()&&seen.insert(name){result.push(name.to_vec());}
+                        opened=None;pos+=2;continue;
+                    }
+                }else if ch==123&&next==123{opened=Some(pos+2);pos+=2;continue;}
+                pos+=1;
+            }
+        }
+        result
+    }
+    fn valid_local_date(y:u32,m:u32,d:u32,h:u32,min:u32)->bool{
+        if !(100..=9999).contains(&y)||!(1..=12).contains(&m)||h>23||min>59{return false;}
+        let leap=y%4==0&&(y%100!=0||y%400==0);
+        let days=match m{2=>if leap{29}else{28},4|6|9|11=>30,_=>31};
+        d>=1&&d<=days
+    }
+    fn parse_local_date(text:&[u16])->Option<Vec<Vec<u16>>>{
+        let s=trim(text);
+        if s.len()!=16||s[4]!=45||s[7]!=45||s[10]!=84||s[13]!=58{return None;}
+        let mut values=[0u32;5];
+        for (i,(start,end)) in [(0,4),(5,7),(8,10),(11,13),(14,16)].into_iter().enumerate(){
+            for &c in &s[start..end]{if !(48..=57).contains(&c){return None;}values[i]=values[i]*10+u32::from(c-48);}
+        }
+        if !valid_local_date(values[0],values[1],values[2],values[3],values[4]){return None;}
+        Some(values.iter().map(|v|ascii(&v.to_string())).collect())
+    }
+    fn format_local_date(f:&[&[u16]])->Option<String>{
+        if f.len()!=5{return None;}
+        let mut v=[0i64;5];
+        for (i,s) in f.iter().enumerate(){v[i]=String::from_utf16_lossy(s).parse().ok()?;}
+        // Match the existing browser formatter, including years outside the
+        // input parser's accepted four-digit range.
+        Some(format!("{}-{:02}-{:02}T{:02}:{:02}",v[0],v[1],v[2],v[3],v[4]))
+    }
     fn execute(op:u32,f:&[&[u16]])->Option<Vec<Vec<u16>>>{
         let single=|v:Vec<u16>|Some(vec![v]);
         match op{
@@ -1460,6 +1521,11 @@ mod presentation_batch {
             12=>single(scheduled_label(f)?),
             13=>stats(f),
             14=>single(normalize(*f.first()?)),
+            15=>single(unique_sequence_name(f)?),
+            16=>Some(collect_variables(f)),
+            17=>parse_local_date(*f.first()?),
+            18=>format_local_date(f).map(|s|vec![ascii(&s)]),
+            19=>single(if valid_sequence_name(*f.first()?){ascii("1")}else{ascii("0")}),
             _=>None
         }
     }
@@ -1504,5 +1570,57 @@ mod presentation_batch {
             assert_eq!(clean_title(&ascii("ChatGPT - Example – Claude")),ascii("Example"));
             assert_eq!(normalize(&ascii("  a\t b  ")),ascii("a b"));
         }
+    }
+}
+
+ // Raw browser event facts: shift/alt/ctrl/meta/composing/IME=bits 0..5.
+ // Key identity and modifier eligibility are evaluated in native code.
+#[cfg(target_arch="wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_keyboard_event(len:u32,modifiers:u32,key_code:u32)->u32{
+    if len as usize>CHUNK{return 0;}
+    let key=unsafe{core::slice::from_raw_parts(cpo_fingerprint_buffer() as *const u16,len as usize)};
+    keyboard_event(key,modifiers,key_code)
+}
+fn keyboard_event(key:&[u16],modifiers:u32,key_code:u32)->u32{
+    (ascii_eq(key,b"Enter")&&modifiers&31==0&&key_code!=229) as u32
+}
+// Calendar interpretation uses the browser's local timezone and DST rules;
+// native code validates the observed civil-time round trip.
+#[no_mangle]
+pub extern "C" fn cpo_local_date_match(y:u32,m:u32,d:u32,h:u32,min:u32,ay:f64,am:f64,ad:f64,ah:f64,amin:f64)->u32{
+    (ay==y as f64&&am==m as f64&&ad==d as f64&&ah==h as f64&&amin==min as f64) as u32
+}
+#[no_mangle]
+pub extern "C" fn cpo_timestamp_valid(value:f64)->u32{
+    (value.is_finite()&&value>0.0) as u32
+}
+// 0 deadline addition, 1 elapsed, 2 nonnegative remaining, 3 round up
+// to next minute after a delay, 4 retry fallback, 5 alarm time,
+// 6 strictly future, 7 inclusive expiry check.
+#[no_mangle]
+pub extern "C" fn cpo_timestamp_math(op:u32,a:f64,b:f64,c:f64)->f64{
+    match op{
+        0=>a+b,1=>a-b,2=>if (a-b).is_nan(){f64::NAN}else{(a-b).max(0.0)},
+        3=>((a+b)/60000.0).ceil()*60000.0,
+        4=>if a.is_finite()&&a>b{a}else{b+c},
+        5=>if a.is_nan()||a==0.0{b}else{a.max(b)},
+        6=>(a>b) as u32 as f64,
+        7=>(a<=b) as u32 as f64,
+        _=>f64::NAN
+    }
+}
+#[cfg(test)]
+mod final_native_policy_tests{
+    use super::*;
+    #[test]
+    fn keyboard_and_epoch_math(){
+        let enter:Vec<_>="Enter".encode_utf16().collect();
+        assert_eq!(keyboard_event(&enter,0,13),1);
+        for i in 0..5{assert_eq!(keyboard_event(&enter,1<<i,13),0);}
+        assert_eq!(keyboard_event(&enter,0,229),0);
+        assert_eq!(cpo_timestamp_math(3,1800000000001.0,300000.0,0.0),1800000360000.0);
+        assert_eq!(cpo_timestamp_math(4,0.0,1800000000000.0,60000.0),1800000060000.0);
+        assert_eq!(cpo_timestamp_valid(f64::NAN),0);
     }
 }

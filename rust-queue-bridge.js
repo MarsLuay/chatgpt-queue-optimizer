@@ -24,9 +24,9 @@
             'cpo_durable_number','cpo_durable_boolean','cpo_durable_retry_mode','cpo_durable_trim',
             'cpo_setting_number','cpo_setting_bool','cpo_popup_status','cpo_popup_remaining','cpo_popup_schedule_actions',
             'cpo_log_duplicate','cpo_log_keep_start','cpo_log_limit','cpo_log_sensitive',
-            'cpo_event_code','cpo_content_event_kind','cpo_api_mode','cpo_api_path','cpo_injection_route','cpo_async_transition','cpo_live_new','cpo_live_delete','cpo_live_epoch','cpo_live_len','cpo_live_input','cpo_live_write','cpo_live_read','cpo_live_output','cpo_live_wipe','cpo_catalog_len','cpo_catalog_items','cpo_catalog_word','cpo_enter_eligible','cpo_enter_action','cpo_provider_predicate','cpo_log_plan','cpo_diag_pick','cpo_diag_reset','cpo_diag_update','cpo_diag_finish','cpo_log_walk_begin','cpo_log_walk_plan','cpo_log_walk_next','cpo_log_walk_close','cpo_batch_input','cpo_batch_run','cpo_batch_output','cpo_batch_wipe'];
+            'cpo_event_code','cpo_content_event_kind','cpo_api_mode','cpo_api_path','cpo_injection_route','cpo_async_transition','cpo_live_new','cpo_live_delete','cpo_live_epoch','cpo_live_len','cpo_live_input','cpo_live_write','cpo_live_read','cpo_live_output','cpo_live_wipe','cpo_catalog_len','cpo_catalog_items','cpo_catalog_word','cpo_enter_eligible','cpo_enter_action','cpo_provider_predicate','cpo_log_plan','cpo_diag_pick','cpo_diag_reset','cpo_diag_update','cpo_diag_finish','cpo_log_walk_begin','cpo_log_walk_plan','cpo_log_walk_next','cpo_log_walk_close','cpo_batch_input','cpo_batch_run','cpo_batch_output','cpo_batch_wipe','cpo_keyboard_event','cpo_local_date_match','cpo_timestamp_valid','cpo_timestamp_math'];
         if (!names.every(name => typeof exports[name] === 'function') ||
-            exports.cpo_queue_abi() !== 11 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
+            exports.cpo_queue_abi() !== 12 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
         core = exports;
         durableSchema = null;
         catalogCache.clear();
@@ -616,6 +616,39 @@
         }
         return batch(13,fields);
     }
+
+    function sequenceName(base,names){
+        return textBatch(15,[String(base||''),...names]);
+    }
+    function validSequenceName(name){
+        return typeof name==='string'&&textBatch(19,[name])==='1';
+    }
+    function sequenceVariables(texts){
+        if(!Array.isArray(texts)||texts.some(v=>typeof v!=='string'))return null;
+        return batch(16,texts);
+    }
+    function keyboardEvent(event){
+        const modifiers=Number(!!event.shiftKey)|(Number(!!event.altKey)<<1)|
+            (Number(!!event.ctrlKey)<<2)|(Number(!!event.metaKey)<<3)|(Number(!!event.isComposing)<<4);
+        const code=Number(event.keyCode||0);
+        return withUnits(String(event.key||''),(e,n)=>e.cpo_keyboard_event(n,modifiers,Number.isFinite(code)?code:0));
+    }
+    function localDateParts(value){
+        const parts=batch(17,[String(value||'')]);
+        return parts?.length===5?parts.map(Number):null;
+    }
+    function localDateMatches(parts,observed){
+        return numeric('cpo_local_date_match',[...parts,...observed])===1;
+    }
+    function localDateInput(parts){return textBatch(18,parts);}
+    function timestampValid(value){
+        if(!core)return null;
+        try{return core.cpo_timestamp_valid(Number(value))===1;}catch(error){fail(error);return null;}
+    }
+    function timestampMath(op,a,b,c=0){
+        if(!core)return null;
+        try{return core.cpo_timestamp_math(op,Number(a),Number(b),Number(c));}catch(error){fail(error);return null;}
+    }
     function providerCatalog(id){
         if(!core)return null;
         if(catalogCache.has(id))return catalogCache.get(id);
@@ -778,7 +811,7 @@
             (Number(!!job.waitForIdleBeforeSend) << 6);
         return call('cpo_queue_next', [flags, phase, job.queue.length]);
     }
-    const api = { batch, textBatch, scheduledSort, scheduledLookup, scheduledWithout, scheduledDue, identityKey, continuationHandoff, supportedTabs, popupStatus, popupRunningLabel, popupScheduledLabel, popupStats, providerCatalog, diagnosticText, diagnosticPick, sanitizeDiagnostic, createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
+    const api = { sequenceName, validSequenceName, sequenceVariables, keyboardEvent, localDateParts, localDateMatches, localDateInput, timestampValid, timestampMath, batch, textBatch, scheduledSort, scheduledLookup, scheduledWithout, scheduledDue, identityKey, continuationHandoff, supportedTabs, popupStatus, popupRunningLabel, popupScheduledLabel, popupStats, providerCatalog, diagnosticText, diagnosticPick, sanitizeDiagnostic, createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
     globalThis.CpoQueueEngine = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();

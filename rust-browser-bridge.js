@@ -228,7 +228,7 @@
             return this.invoke({value,spans:[]},(core,ctx)=>core.cpo_ui_variables(value.length)===1?ctx.spans:null);
         }
         savedSequence(action,sequences,name,messages) {
-            const valid=typeof name==='string'&&!!name&&!['__proto__','constructor','prototype','__edit_selected_sequence__'].includes(name);
+            const valid=globalThis.CpoQueueEngine?.validSequenceName?.(name)===true;
             const flags=Number(valid)|(Number(Object.hasOwn(sequences,name)&&Array.isArray(sequences[name]))<<1);
             return this.invoke({sequences,name,messages,result:null},(core,ctx)=>core.cpo_ui_saved_sequence(action,flags)===1?{ok:true,messages:ctx.result}:{ok:false});
         }

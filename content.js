@@ -825,7 +825,7 @@
         const diags = this.state.enterDiagnostics;
         if (diags && diags.length > 0) {
           const lastDiag = diags[diags.length - 1];
-          if (Date.now() - lastDiag.timestamp < 1000) {
+          if ((globalThis.CpoQueueEngine?.timestampMath?.(1,Date.now(),lastDiag.timestamp)??Infinity)<1000) {
             lastDiag.nativeSubmissionObserved = true;
           }
         }
@@ -874,12 +874,9 @@
 
     handleComposerKeydown(event) {
       const engine=globalThis.CpoQueueEngine;
-      const flags=Number(event.key==='Enter') | (Number(!!event.shiftKey)<<1) |
-        (Number(!!event.altKey)<<2) | (Number(!!event.ctrlKey)<<3) |
-        (Number(!!event.metaKey)<<4) | (Number(!!event.isComposing)<<5) |
-        (Number(event.keyCode===229)<<6);
-      // Never intercept native browser events before the policy is ready.
-      if(engine?.call('cpo_enter_eligible',[flags])!==1)return;
+      // The browser supplies raw modifier facts and key text. Rust
+      // classifies Enter, modifiers and IME before any interception.
+      if(engine?.keyboardEvent?.(event)!==1)return;
 
       const composerMatch = this.provider?.id === 'chatgpt' && typeof this.provider.getComposerMatchFromEventTarget === 'function'
         ? this.provider.getComposerMatchFromEventTarget(event.target, '#cpo-root')
@@ -937,7 +934,7 @@
       const now=Date.now();
       const decision=engine.numeric('cpo_enter_action',[Number(isGenerating) |
         (Number(!!this.state.inlineQueueInFlight)<<1) |
-        (Number(this.state.lastQueuedText===text)<<2),now-(this.state.lastQueuedAt||0)]);
+        (Number(this.state.lastQueuedText===text)<<2),engine.timestampMath(1,now,this.state.lastQueuedAt||0)]);
       if(decision==null)return;
       if (decision===0) {
         this.recordEnterDiagnostic(diagnostic);

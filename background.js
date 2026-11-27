@@ -418,7 +418,8 @@ function isVerifiedFreshConversation(adapter, identity, fromConversationId, navi
 }
 
 async function confirmFreshConversationIdentity(tabId, job, adapter, fromConversationId) {
-    const deadline = Date.now() + 20000;
+    const now=Date.now();
+    const deadline=globalThis.CpoQueueEngine?.timestampMath?.(0,now,20000)??(now+20000);
     const pollMs = Math.max(20, Number(QUEUE_WAIT_POLICY.submissionAckPollMs) || 50);
 
     while (Date.now() <= deadline) {
@@ -719,7 +720,7 @@ globalThis.CpoBrowserApi.listen(
             const grant=nativeClickGrants.get(tabId);
             const ok=!!grant && grant.token===request.token && !grant.used &&
                 (!grant.job || (jobs.get(tabId)===grant.job && grant.job.isRunning && !grant.job.isStopped && !grant.job.isPaused)) &&
-                Date.now()<=grant.expiresAt;
+                globalThis.CpoQueueEngine?.timestampMath?.(7,Date.now(),grant.expiresAt)===1;
             if(ok)grant.used=true;
             sendResponse({ok});
             return true;
@@ -1863,7 +1864,8 @@ function handleProcessRecovered(tabId, job) {
 }
 
 async function handleProcessRetryWait(tabId, job) {
-    const remainingMs = Math.max(0, Number(job.nextRetryAt || 0) - Date.now());
+    const retryNow=Date.now();
+    const remainingMs=globalThis.CpoQueueEngine?.timestampMath?.(2,Number(job.nextRetryAt||0),retryNow)??Math.max(0,Number(job.nextRetryAt||0)-retryNow);
     const interrupted = await interruptibleSleep(tabId, job, remainingMs);
 
     if (interrupted || !jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
@@ -2421,7 +2423,8 @@ function getRetryExhaustionReason(job, lastReason) {
 
 async function interruptibleSleep(tabId, job, ms) {
     const duration = Math.max(0, Number(ms) || 0);
-    const deadline = Date.now() + duration;
+    const now=Date.now();
+    const deadline=globalThis.CpoQueueEngine?.timestampMath?.(0,now,duration)??(now+duration);
     const sliceMs = Math.max(5, Number(QUEUE_RETRY_POLICY.sleepSliceMs) || 250);
 
     while (Date.now() < deadline) {
@@ -2484,7 +2487,8 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
     job.retryMode = unlimited ? 'unlimited' : 'finite';
     job.retryExhausted = false;
     job.nextRetryDelayMs = delayMs;
-    job.nextRetryAt = Date.now() + delayMs;
+    const retryNow=Date.now();
+    job.nextRetryAt=globalThis.CpoQueueEngine?.timestampMath?.(0,retryNow,delayMs)??(retryNow+delayMs);
     job.lastError = classification.reason;
     job.currentPhase = 'retry-wait';
     job.updatedAt = Date.now();
@@ -3080,7 +3084,9 @@ async function sendPromptToSpecificTab(tabId, text, expectedJob = jobs.get(tabId
                 return {ok:false,error:'Queue target changed before native submission.',details:{failureClass:'non-retryable'}};
             }
             const token=createRunId();
-            const grant={token,job,used:false,expiresAt:Date.now()+15000};
+            const expiry=globalThis.CpoQueueEngine?.timestampMath?.(0,Date.now(),15000);
+            if(expiry==null||!Number.isFinite(expiry))return {ok:false,error:'Native authorization expiry unavailable.',details:{failureClass:'non-retryable'}};
+            const grant={token,job,used:false,expiresAt:expiry};
             if(nativeClickGrants.has(tabId)) return {ok:false,error:'A native submission is already pending.',details:{failureClass:'transient'}};
             nativeClickGrants.set(tabId,grant);
             try {
@@ -4273,7 +4279,9 @@ function withScheduledStorageLock(operation) {
 
 function createScheduledAlarm(item) {
     if (!chrome.alarms || typeof chrome.alarms.create !== 'function' || !item?.id) return;
-    const when = Math.max(Number(item.dueTs) || Date.now(), Date.now());
+    const now=Date.now();
+    const when=globalThis.CpoQueueEngine?.timestampMath?.(5,Number(item.dueTs),now);
+    if(when==null||!Number.isFinite(when))return;
     chrome.alarms.create(scheduledAlarmName(item.id), { when });
 }
 
@@ -4325,7 +4333,7 @@ async function createScheduledMessage({ text, dueTs, tabId, conversationIdentity
         return { ok: false, error: 'A supported target tab is required.' };
     }
 
-    if (!Number.isFinite(normalizedDueTs) || normalizedDueTs <= 0) {
+    if (globalThis.CpoQueueEngine?.timestampValid?.(normalizedDueTs)!==true) {
         return { ok: false, error: 'A valid due date/time is required.' };
     }
 
@@ -4468,7 +4476,7 @@ async function retryScheduledMessage(id, dueTs = null) {
         }
 
         const nextDueTs = dueTs == null ? Date.now() : Number(dueTs);
-        if (!Number.isFinite(nextDueTs) || nextDueTs <= 0) {
+        if (globalThis.CpoQueueEngine?.timestampValid?.(nextDueTs)!==true) {
             return { ok: false, error: 'A valid due date/time is required to retry.' };
         }
 

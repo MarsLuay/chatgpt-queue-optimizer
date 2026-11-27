@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 11);
+    assert.equal(e.cpo_queue_abi(), 12);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -443,4 +443,28 @@ test('native scheduled collections, identity and popup formatters',{skip},async(
     assert.deepEqual(engine.supportedTabs(tabs),[tabs[2],tabs[0]]);
     assert.equal(engine.popupStats('ChatGPT',{messageCount:2,hiddenCount:0,visibleCount:2})[0],'Target: ChatGPT');
     assert.equal(engine.popupStats('ChatGPT',{messageCount:2,hiddenCount:0,visibleCount:2,debugInfo:{resources:{}}}).length,26);
+});
+
+test('native sequence names, ordered variable collection, keyboard and date policy',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    assert.equal(engine.sequenceName('  Test  ',['Test','Test 2','Test 4']),'Test 3');
+    assert.equal(engine.sequenceName('',[]),'Imported sequence');
+    assert.equal(engine.sequenceName('__proto__',[]),'__proto__ 2');
+    assert.equal(engine.validSequenceName('__proto__'),false);
+    assert.equal(engine.validSequenceName('__edit_selected_sequence__'),false);
+    assert.equal(engine.validSequenceName('Example'),true);
+    assert.deepEqual(engine.sequenceVariables(['{{ x }} {{y}} {{ x}}','{{z}} {{a\nb}} {{ }}','{{x}} {{\ud800}}']),['x','y','z','\ud800']);
+    assert.equal(engine.keyboardEvent({key:'Enter',keyCode:13}),1);
+    for(const modifier of ['shiftKey','altKey','ctrlKey','metaKey','isComposing'])assert.equal(engine.keyboardEvent({key:'Enter',[modifier]:true}),0);
+    assert.equal(engine.keyboardEvent({key:'Enter',keyCode:229}),0);
+    assert.equal(engine.keyboardEvent({key:'Escape'}),0);
+    assert.deepEqual(engine.localDateParts(' 2024-02-29T23:59 '),[2024,2,29,23,59]);
+    for(const value of ['2023-02-29T12:00','1900-02-29T12:00','2026-04-31T12:00','2026-01-01T24:00','2026-01-01T01:60','0099-01-01T12:00'])assert.equal(engine.localDateParts(value),null);
+    assert.equal(engine.localDateMatches([2024,2,29,23,59],[2024,2,29,23,59]),true);
+    assert.equal(engine.localDateMatches([2024,2,29,23,59],[2024,3,1,0,59]),false);
+    assert.equal(engine.localDateInput([2026,1,2,3,4]),'2026-01-02T03:04');
+    assert.equal(engine.timestampValid(Infinity),false);
+    assert.equal(engine.timestampMath(3,1800000000001,300000),1800000360000);
+    assert.equal(engine.timestampMath(4,0,1800000000000,60000),1800000060000);
 });

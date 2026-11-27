@@ -86,6 +86,16 @@ function formatPopupRunningInstanceText(tabTitle, job = {}) {
 }
 
 function parseScheduledLocalDateTime(value) {
+    const engine=globalThis.CpoQueueEngine;
+    if(engine?.status==='Rust/WASM'){
+        const parts=engine.localDateParts(value);
+        if(!parts)return null;
+        const [year,month,day,hour,minute]=parts;
+        const date=new Date(year,month-1,day,hour,minute,0,0);
+        // Only the platform can resolve local civil time and DST gaps.
+        if(!engine.localDateMatches(parts,[date.getFullYear(),date.getMonth()+1,date.getDate(),date.getHours(),date.getMinutes()]))return null;
+        return date.getTime();
+    }
     const text = String(value || '').trim();
     const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(text);
 
@@ -581,6 +591,8 @@ document.addEventListener('DOMContentLoaded', async function () {
         const date = new Date(Number(timestamp));
         if (!Number.isFinite(date.getTime())) return '';
 
+        const native=globalThis.CpoQueueEngine?.localDateInput?.([date.getFullYear(),date.getMonth()+1,date.getDate(),date.getHours(),date.getMinutes()]);
+        if(native!=null)return native;
         const pad = (value) => String(value).padStart(2, '0');
         return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
             `T${pad(date.getHours())}:${pad(date.getMinutes())}`;
@@ -589,7 +601,9 @@ document.addEventListener('DOMContentLoaded', async function () {
     function initializeScheduledDueDefault() {
         if (!scheduledDueAtInput || scheduledDueAtInput.value) return;
 
-        const nextMinute = Math.ceil((Date.now() + 5 * 60 * 1000) / 60000) * 60000;
+        const now=Date.now();
+        const nextMinute=globalThis.CpoQueueEngine.timestampMath(3,now,300000);
+        if(nextMinute==null||!Number.isFinite(nextMinute))return;
         scheduledDueAtInput.value = formatDateTimeLocalInput(nextMinute);
     }
 
@@ -702,7 +716,9 @@ document.addEventListener('DOMContentLoaded', async function () {
 
     async function retryScheduledItem(item) {
         const dueTs = parseScheduledLocalDateTime(scheduledDueAtInput?.value || '');
-        const nextDueTs = dueTs && dueTs > Date.now() ? dueTs : Date.now() + 60 * 1000;
+        const now=Date.now();
+        const nextDueTs=globalThis.CpoQueueEngine.timestampMath(4,dueTs??0,now,60000);
+        if(nextDueTs==null||!Number.isFinite(nextDueTs)){showScheduledStatus('Native timestamp calculation unavailable.','error',0);return;}
 
         try {
             const response = await sendScheduledRuntimeMessage({
@@ -743,7 +759,7 @@ document.addEventListener('DOMContentLoaded', async function () {
                 return;
             }
 
-            if (dueTs <= Date.now()) {
+            if (globalThis.CpoQueueEngine.timestampMath(6,dueTs,Date.now())!==1) {
                 showScheduledStatus('Choose a future local date and time.', 'error', 0);
                 return;
             }
@@ -902,16 +918,9 @@ document.addEventListener('DOMContentLoaded', async function () {
     }
 
     function getVariablesFromTextList(textList) {
-        const vars=new Set();
-        for(const text of textList){
-            const spans=ui.variables(text);
-            if(spans==null)throw new Error('Native variable scan unavailable');
-            for(const [start,end] of spans){
-                const name=globalThis.CpoQueueEngine.trim(text.slice(start,end));
-                if(name)vars.add(name);
-            }
-        }
-        return Array.from(vars);
+        const vars=globalThis.CpoQueueEngine.sequenceVariables(textList);
+        if(vars==null)throw new Error('Native variable collection unavailable');
+        return vars;
     }
 
     function resolveVariablesForTextList(textList) {
@@ -1249,9 +1258,9 @@ document.addEventListener('DOMContentLoaded', async function () {
 
         const name = prompt('Enter a name for this sequence:');
 
-        if (name && globalThis.CpoQueueEngine.trim(name)) {
-            const cleanName = globalThis.CpoQueueEngine.trim(name);
-            if(['__proto__','constructor','prototype',EDIT_SEQUENCE_VALUE].includes(cleanName)){showErrorStatus('Reserved sequence name.');return;}
+        const cleanName=name?globalThis.CpoQueueEngine.trim(name):'';
+        if (cleanName) {
+            if(!globalThis.CpoQueueEngine.validSequenceName(cleanName)){showErrorStatus('Reserved sequence name or native validation unavailable.');return;}
 
             if(ui.savedSequence(0,savedSequences,cleanName,messages)?.ok!==true){showErrorStatus('Could not save sequence.');return;}
 
@@ -1756,21 +1765,7 @@ The sequence should do the following: `;
     }
 
     function getUniqueSequenceName(baseName) {
-        const cleanBaseName = String(baseName || '').trim() || 'Imported sequence';
-
-        if (!savedSequences[cleanBaseName]) {
-            return cleanBaseName;
-        }
-
-        let counter = 2;
-        let candidate = `${cleanBaseName} ${counter}`;
-
-        while (savedSequences[candidate]) {
-            counter++;
-            candidate = `${cleanBaseName} ${counter}`;
-        }
-
-        return candidate;
+        return globalThis.CpoQueueEngine.sequenceName(baseName,Object.keys(savedSequences));
     }
 
     if (importPromptButton) {
@@ -1808,6 +1803,7 @@ The sequence should do the following: `;
             }
 
             const finalName = getUniqueSequenceName(sequenceName);
+            if(finalName==null){showErrorStatus('Native sequence name generation unavailable.');return;}
 
             messages = importedSequence.messages;
             if(ui.savedSequence(0,savedSequences,finalName,messages)?.ok!==true){showErrorStatus('Could not save sequence.');return;}
