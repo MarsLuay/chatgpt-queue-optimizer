@@ -10,7 +10,7 @@
         req.onerror = () => reject(req.error || new Error('Local database request failed.'));
     });
 
-    // Compatibility policy is used only if the local Rust module cannot load.
+    // Browser transaction transport for the required native history engine.
     class CpoHistoryStore {
         constructor(db) {
             this.db = db;
