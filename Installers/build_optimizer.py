@@ -9,12 +9,12 @@ from pathlib import Path
 
 TARGET = "wasm32-unknown-unknown"
 OUTPUT = "optimizer_core.wasm"
+BROWSER_OUTPUT = "optimizer_browser.wasm"
 
 
 @functools.lru_cache(maxsize=4)
 def build_optimizer(repo_dir):
     repo = Path(repo_dir).resolve()
-    source = repo / "rust" / "optimizer_core.rs"
     rustc = shutil.which("rustc")
     if not rustc:
         raise RuntimeError("Rust is required. Install rustup from https://rustup.rs/ and retry.")
@@ -31,19 +31,23 @@ def build_optimizer(repo_dir):
     destination = repo / OUTPUT
     print("Building Rust optimizer (WebAssembly)...", flush=True)
     with tempfile.TemporaryDirectory(prefix="optimizer-wasm-", dir=build_dir) as temp:
-        artifact = Path(temp) / OUTPUT
-        subprocess.run([
-            rustc, "--edition=2021", "--crate-name", "optimizer_core",
-            "--crate-type", "cdylib", "--target", TARGET,
-            "-C", "opt-level=z", "-C", "panic=abort",
-            "-C", "strip=symbols", "-C", "link-arg=-zstack-size=16384",
-            str(source), "-o", str(artifact),
-        ], cwd=repo, check=True)
-        if artifact.read_bytes()[:8] != b"\x00asm\x01\x00\x00\x00":
-            raise RuntimeError("Rust compiler did not produce a valid WASM header.")
-        # Replace only after a successful compilation.
-        artifact.replace(destination)
-    print(f"Rust optimizer built: {destination.name} ({destination.stat().st_size} bytes)", flush=True)
+        artifacts = []
+        for name, source_name in [(OUTPUT, "optimizer_core.rs"), (BROWSER_OUTPUT, "browser_engine.rs")]:
+            artifact = Path(temp) / name
+            subprocess.run([
+                rustc, "--edition=2021", "--crate-name", Path(name).stem,
+                "--crate-type", "cdylib", "--target", TARGET,
+                "-C", "opt-level=z", "-C", "panic=abort",
+                "-C", "strip=symbols", "-C", "link-arg=-zstack-size=16384",
+                str(repo / "rust" / source_name), "-o", str(artifact),
+            ], cwd=repo, check=True)
+            if artifact.read_bytes()[:8] != b"\x00asm\x01\x00\x00\x00":
+                raise RuntimeError(f"Rust compiler did not produce a valid WASM header for {name}.")
+            artifacts.append(artifact)
+        for artifact in artifacts:
+            output = repo / artifact.name
+            artifact.replace(output)
+            print(f"Rust optimizer built: {output.name} ({output.stat().st_size} bytes)", flush=True)
     return destination
 
 
