@@ -59,6 +59,8 @@ const IDLE_DISCARD_PERIOD_MINUTES = 1;
 const ALLOWED_IDLE_DISCARD_MINUTES = new Set([15, 30, 60]);
 
 function isIdleDiscardCandidate(tab, minutes, now = Date.now()) {
+    const native = globalThis.CpoQueueEngine?.tabDiscard(tab,0,0,minutes,now,getActiveProviderAdapter(tab?.url || '')?.id);
+    if (native != null) return native === 1;
     return ALLOWED_IDLE_DISCARD_MINUTES.has(minutes) &&
         !!tab && Number.isInteger(tab.id) &&
         tab.active === false && tab.highlighted !== true &&
@@ -72,6 +74,7 @@ function isIdleDiscardCandidate(tab, minutes, now = Date.now()) {
 
 // Explicit user request from the extension's local reader, not from a web page.
 async function discardHistorySource(request, sender) {
+    await globalThis.CpoQueueEngine?.load();
     if (typeof chrome.tabs.discard !== 'function' ||
         typeof sender?.url !== 'string' || sender.url.split('?')[0] !== chrome.runtime.getURL('history-viewer.html')) {
         return { ok: false, error: 'Tab unloading is unavailable from this context.' };
@@ -85,6 +88,7 @@ async function discardHistorySource(request, sender) {
         return { ok: false, error: 'Invalid source conversation.' };
     }
     const safeTab = tab => !!tab && tab.id === tabId && tab.url === expectedUrl &&
+        (globalThis.CpoQueueEngine?.tabDiscard(tab,0,1,0,Date.now(),'chatgpt') ?? 1) === 1 &&
         tab.active === false && tab.highlighted !== true && tab.discarded !== true &&
         tab.pinned !== true && tab.audible !== true && tab.incognito !== true &&
         tab.autoDiscardable !== false && tab.status === 'complete';
@@ -104,7 +108,9 @@ async function discardHistorySource(request, sender) {
         const safe = await sendTabMessage(tabId, { type: 'CAN_DISCARD_INACTIVE_TAB' });
         if (!safe?.safe || !await noWork()) return { ok: false, error: 'Source has a draft, active response, upload, media, or pending work.' };
         const after = await getTab(tabId);
-        if (!safeTab(after) || before.lastAccessed !== after.lastAccessed || jobs.has(tabId)) {
+        const approved = globalThis.CpoQueueEngine?.tabDiscard(after,1,1,0,Date.now(),'chatgpt',jobs.has(tabId),
+            before.lastAccessed === after?.lastAccessed && after?.url === expectedUrl, safe?.safe === true);
+        if (approved === 0 || !safeTab(after) || before.lastAccessed !== after.lastAccessed || jobs.has(tabId)) {
             return { ok: false, error: 'Source tab state changed.' };
         }
         const discarded = await extensionApiPromise(
@@ -120,12 +126,13 @@ async function discardHistorySource(request, sender) {
 function configureIdleDiscardAlarm(minutes) {
     if (!chrome.alarms) return;
     chrome.alarms.clear(IDLE_DISCARD_ALARM_NAME);
-    if (ALLOWED_IDLE_DISCARD_MINUTES.has(Number(minutes))) {
+    if ((globalThis.CpoQueueEngine?.call('cpo_tab_alarm',[Number(minutes)]) ?? Number(ALLOWED_IDLE_DISCARD_MINUTES.has(Number(minutes)))) === 1) {
         chrome.alarms.create(IDLE_DISCARD_ALARM_NAME, { periodInMinutes: IDLE_DISCARD_PERIOD_MINUTES });
     }
 }
 
 async function discardInactiveChatGPTTabs() {
+    await globalThis.CpoQueueEngine?.load();
     // Settings and queue-state read failures abort this sweep rather than risk work.
     const settings = await readSyncStorage({ inactiveTabMinutes: 0 });
     const minutes = Number(settings.inactiveTabMinutes || 0);
@@ -156,8 +163,11 @@ async function discardInactiveChatGPTTabs() {
                 upcoming.some(item => Number(item.tabId) === tab.id &&
                     (item.status === 'pending' || item.status === 'firing'))) continue;
             const after = await getTab(tab.id);
-            if (!isIdleDiscardCandidate(after, minutes) ||
-                before.lastAccessed !== after.lastAccessed || jobs.has(tab.id)) continue;
+            const approved = globalThis.CpoQueueEngine?.tabDiscard(after,1,0,minutes,Date.now(),
+                getActiveProviderAdapter(after?.url || '')?.id,jobs.has(tab.id),
+                before.lastAccessed === after?.lastAccessed && before.url === after?.url,reply?.safe === true);
+            if (approved === 0 || !isIdleDiscardCandidate(after, minutes) ||
+                before.lastAccessed !== after.lastAccessed || before.url !== after.url || jobs.has(tab.id)) continue;
             await extensionApiPromise(
                 done => chrome.tabs.discard(tab.id, done),
                 () => chrome.tabs.discard(tab.id)
@@ -884,13 +894,14 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-    if (jobs.has(tabId)) {
+    if ((globalThis.CpoQueueEngine?.call('cpo_tab_close_action',[Number(jobs.has(tabId))]) ?? Number(jobs.has(tabId))) === 1) {
         const job = jobs.get(tabId);
         logQueueEvent(tabId, 'warn', 'ChatGPT tab closed while queue was active.', {
             completedCount: job?.completedCount || 0,
             totalMessages: getTotalMessages(job),
             remaining: getRemainingCount(job)
         });
+        if (job) { job.isStopped = true; job.isRunning = false; }
         jobs.delete(tabId);
         updateRunningJobsStorage({ force: true });
     }
@@ -2529,54 +2540,50 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
 }
 
 async function refreshChatGPTTab(tabId) {
-    try {
-        const response = await sendTabMessage(tabId, { type: 'RELOAD_PAGE' });
-        if (response && response.ok) {
-            return true;
-        }
-    } catch {}
-
-    if (chrome.tabs && typeof chrome.tabs.reload === 'function') {
+    await globalThis.CpoQueueEngine?.load();
+    let stage = 0;
+    let succeeded = false;
+    const owner = jobs.get(tabId);
+    for (let attempt=0;attempt<4;attempt++) {
+        if (owner && (jobs.get(tabId)!==owner || owner.isStopped || owner.isPaused)) return false;
+        const flags=Number(succeeded) |
+            (Number(typeof chrome.tabs?.reload==='function')<<1) |
+            (Number(typeof chrome.scripting?.executeScript==='function')<<2);
+        const action=globalThis.CpoQueueEngine?.call('cpo_tab_reload_next',[stage,flags]) ??
+            (succeeded?4:stage===0?1:stage<=1&&(flags&2)?2:stage<=2&&(flags&4)?3:0);
+        if(action===4)return true;
+        if(action===0)return false;
         try {
-            await new Promise((resolve) => {
-                chrome.tabs.reload(tabId, {}, () => resolve());
-            });
-            return true;
-        } catch {}
+            if(action===1) succeeded=!!(await sendTabMessage(tabId,{type:'RELOAD_PAGE'}))?.ok;
+            else if(action===2) {
+                await extensionApiPromise(done=>chrome.tabs.reload(tabId,{},done),()=>chrome.tabs.reload(tabId,{}));
+                succeeded=true;
+            } else if(action===3) {
+                await chrome.scripting.executeScript({target:{tabId},func:()=>window.location.reload()});
+                succeeded=true;
+            }
+        } catch { succeeded=false; }
+        stage=action;
     }
-
-    if (chrome.scripting && typeof chrome.scripting.executeScript === 'function') {
-        try {
-            await chrome.scripting.executeScript({
-                target: { tabId },
-                func: () => {
-                    if (typeof window !== 'undefined' && window.location) {
-                        window.location.reload();
-                    }
-                }
-            });
-            return true;
-        } catch {}
-    }
-
     return false;
 }
 
 async function waitForTabToRecover(tabId, maxWaitMs = 30000) {
-    const started = Date.now();
+    await globalThis.CpoQueueEngine?.load();
+    const started=Date.now();
+    const owner=jobs.get(tabId);
+    const cancelled=()=>!!owner&&(jobs.get(tabId)!==owner||owner.isStopped||owner.isPaused);
+    const poll=(ready=false)=>globalThis.CpoQueueEngine?.numeric('cpo_tab_recover_poll',[
+        Date.now()-started,maxWaitMs,Number(ready)|(Number(cancelled())<<1)]) ??
+        (cancelled()?0:ready?2:Date.now()-started<maxWaitMs?1:0);
     await sleep(1500);
-
-    while (Date.now() - started < maxWaitMs) {
-        try {
-            const resp = await sendTabMessage(tabId, { type: 'CHECK_GENERATION_STATE' });
-            if (resp && resp.state) {
-                return true;
-            }
-        } catch {}
-
+    while(poll()===1){
+        try{
+            const resp=await sendTabMessage(tabId,{type:'CHECK_GENERATION_STATE'});
+            if(poll(!!resp?.state)===2)return true;
+        }catch{}
         await sleep(1000);
     }
-
     return false;
 }
 
@@ -4052,7 +4059,7 @@ function updateRunningJobsStorage(options = {}) {
         queueDurableJobs: durableJobs,
         isRunning: hasJobs
     };
-    const serialized = JSON.stringify(items);
+    const serialized = globalThis.CpoQueueEngine?.serialize(items) ?? JSON.stringify(items);
 
     updateQueueWakeAlarm(hasJobs);
 
