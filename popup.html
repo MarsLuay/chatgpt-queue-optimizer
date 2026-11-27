@@ -1145,6 +1145,14 @@
                 </div>
 
                 <div class="optimizer-setting">
+                    <label><input type="checkbox" id="optimizer-adaptive-budget"> Adaptive resource budget (experimental)</label>
+                </div>
+                <div class="optimizer-setting">
+                    <label for="optimizer-resource-budget">Recent-window resource budget (relative units):</label>
+                    <input type="number" id="optimizer-resource-budget" min="1000" max="1000000" step="1000" value="8000">
+                </div>
+                <div class="optimizer-autosave-note">Limits the recent window based on sampled DOM and media complexity. At least eight recent turns remain visible. Auto-load is paused in this mode; manually load older turns and use Return to budget to collapse them. Units are not RAM bytes.</div>
+                <div class="optimizer-setting">
                     <label for="optimizer-idle-minutes">Unload inactive ChatGPT tabs:</label>
                     <select id="optimizer-idle-minutes">
                         <option value="0">Never (default)</option>
