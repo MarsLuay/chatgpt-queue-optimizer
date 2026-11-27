@@ -62,21 +62,12 @@ const ALLOWED_IDLE_DISCARD_MINUTES = new Set([15, 30, 60]);
 
 function isIdleDiscardCandidate(tab, minutes, now = Date.now()) {
     const native = globalThis.CpoQueueEngine?.tabDiscard(tab,0,0,minutes,now,getActiveProviderAdapter(tab?.url || '')?.id);
-    if (native != null) return native === 1;
-    return ALLOWED_IDLE_DISCARD_MINUTES.has(minutes) &&
-        !!tab && Number.isInteger(tab.id) &&
-        tab.active === false && tab.highlighted !== true &&
-        tab.discarded !== true && tab.pinned !== true && tab.audible !== true &&
-        tab.incognito !== true && tab.autoDiscardable !== false &&
-        tab.status === 'complete' &&
-        getActiveProviderAdapter(tab.url || '')?.id === 'chatgpt' &&
-        Number.isFinite(tab.lastAccessed) && tab.lastAccessed > 0 &&
-        now - tab.lastAccessed >= minutes * 60000;
+    return native === 1;
 }
 
 // Explicit user request from the extension's local reader, not from a web page.
 async function discardHistorySource(request, sender) {
-    await globalThis.CpoQueueEngine?.load();
+    if(!await globalThis.CpoQueueEngine?.load())return {ok:false,error:'Native tab safety engine unavailable.'};
     if (typeof chrome.tabs.discard !== 'function' ||
         typeof sender?.url !== 'string' || sender.url.split('?')[0] !== chrome.runtime.getURL('history-viewer.html')) {
         return { ok: false, error: 'Tab unloading is unavailable from this context.' };
@@ -90,7 +81,7 @@ async function discardHistorySource(request, sender) {
         return { ok: false, error: 'Invalid source conversation.' };
     }
     const safeTab = tab => !!tab && tab.id === tabId && tab.url === expectedUrl &&
-        (globalThis.CpoQueueEngine?.tabDiscard(tab,0,1,0,Date.now(),'chatgpt') ?? 1) === 1 &&
+        (globalThis.CpoQueueEngine?.tabDiscard(tab,0,1,0,Date.now(),'chatgpt') ?? 0) === 1 &&
         tab.active === false && tab.highlighted !== true && tab.discarded !== true &&
         tab.pinned !== true && tab.audible !== true && tab.incognito !== true &&
         tab.autoDiscardable !== false && tab.status === 'complete';
@@ -112,7 +103,7 @@ async function discardHistorySource(request, sender) {
         const after = await getTab(tabId);
         const approved = globalThis.CpoQueueEngine?.tabDiscard(after,1,1,0,Date.now(),'chatgpt',jobs.has(tabId),
             before.lastAccessed === after?.lastAccessed && after?.url === expectedUrl, safe?.safe === true);
-        if (approved === 0 || !safeTab(after) || before.lastAccessed !== after.lastAccessed || jobs.has(tabId)) {
+        if (approved !== 1 || !safeTab(after) || before.lastAccessed !== after.lastAccessed || jobs.has(tabId)) {
             return { ok: false, error: 'Source tab state changed.' };
         }
         const discarded = await extensionApiPromise(
@@ -168,7 +159,7 @@ async function discardInactiveChatGPTTabs() {
             const approved = globalThis.CpoQueueEngine?.tabDiscard(after,1,0,minutes,Date.now(),
                 getActiveProviderAdapter(after?.url || '')?.id,jobs.has(tab.id),
                 before.lastAccessed === after?.lastAccessed && before.url === after?.url,reply?.safe === true);
-            if (approved === 0 || !isIdleDiscardCandidate(after, minutes) ||
+            if (approved !== 1 || !isIdleDiscardCandidate(after, minutes) ||
                 before.lastAccessed !== after.lastAccessed || before.url !== after.url || jobs.has(tab.id)) continue;
             await extensionApiPromise(
                 done => chrome.tabs.discard(tab.id, done),
@@ -720,14 +711,21 @@ let pendingQueueLogEntries = [];
 let queueLogFlushTimer = null;
 let queueLogGeneration = 0;
 
-chrome.runtime.onMessage.addListener(
+globalThis.CpoBrowserApi.listen(
     /**
      * @param {RuntimeMessageRequest} request
      * @param {chrome.runtime.MessageSender} sender
      * @param {(response?: RuntimeMessageResponse) => void} sendResponse
      */
-    (request, sender, sendResponse) => {
-        if (request.action === 'authorizeNativeQueueClick') {
+    async (request, sender, sendResponse) => {
+        const engine=globalThis.CpoQueueEngine;
+        const ready=await engine?.load();
+        let code=ready?engine.eventCode(1,request?.action):null;
+        if(code==null){
+            // Cancellation/status must remain possible during an engine outage.
+            code=({stopSequence:6,stopAllSequences:7,getRunningJobs:8,getQueueDebugLogs:9,clearQueueDebugLogs:10})[request?.action]||0;
+        }
+        if (code === 1) {
             const tabId=sender?.tab?.id;
             const grant=nativeClickGrants.get(tabId);
             const ok=!!grant && grant.token===request.token && !grant.used &&
@@ -738,38 +736,38 @@ chrome.runtime.onMessage.addListener(
             return true;
         }
 
-        if (request.action === 'discardHistorySource') {
+        if (code === 2) {
             discardHistorySource(request, sender).then(sendResponse, () =>
                 sendResponse({ ok: false, error: 'Source tab unloading failed.' }));
             return true;
         }
 
-        if (request.action === 'startSequence') {
+        if (code === 3) {
             handleStartSequence(request, sendResponse);
             return true;
         }
 
-        if (request.action === 'enqueueMessage') {
+        if (code === 4) {
             handleEnqueueMessage(request, sender, sendResponse);
             return true;
         }
 
-        if (request.action === 'retryPausedJob') {
+        if (code === 5) {
             handleRetryPausedJob(request, sendResponse);
             return true;
         }
 
-        if (request.action === 'stopSequence') {
+        if (code === 6) {
             handleStopSequence(request, sendResponse);
             return true;
         }
 
-        if (request.action === 'stopAllSequences') {
+        if (code === 7) {
             handleStopAllSequences(sendResponse);
             return true;
         }
 
-        if (request.action === 'getRunningJobs') {
+        if (code === 8) {
             sendResponse({
                 ok: true,
                 jobs: getRunningJobsSnapshot()
@@ -777,47 +775,48 @@ chrome.runtime.onMessage.addListener(
             return true;
         }
 
-        if (request.action === 'getQueueDebugLogs') {
+        if (code === 9) {
             handleGetQueueDebugLogs(sendResponse);
             return true;
         }
 
-        if (request.action === 'clearQueueDebugLogs') {
+        if (code === 10) {
             handleClearQueueDebugLogs(sendResponse);
             return true;
         }
 
-        if (request.action === 'logAutomationEvent') {
+        if (code === 11) {
             handleLogAutomationEvent(request, sendResponse);
             return true;
         }
 
-        if (request.action === 'scheduleMessage') {
+        if (code === 12) {
             handleScheduleMessage(request, sendResponse);
             return true;
         }
 
-        if (request.action === 'listScheduledMessages') {
+        if (code === 13) {
             handleListScheduledMessages(sendResponse);
             return true;
         }
 
-        if (request.action === 'cancelScheduledMessage') {
+        if (code === 14) {
             handleCancelScheduledMessage(request, sendResponse);
             return true;
         }
 
-        if (request.action === 'deleteScheduledMessage') {
+        if (code === 15) {
             handleDeleteScheduledMessage(request, sendResponse);
             return true;
         }
 
-        if (request.action === 'retryScheduledMessage') {
+        if (code === 16) {
             handleRetryScheduledMessage(request, sendResponse);
             return true;
         }
 
-        return false;
+        sendResponse({ok:false,error:'Unknown action or required Rust event router unavailable.'});
+        return true;
     }
 );
 
@@ -980,7 +979,7 @@ function initializeQueueDiagnostics() {
 }
 
 async function resumeDurableQueues(source = 'manual') {
-    await globalThis.CpoQueueEngine?.load();
+    if(!await globalThis.CpoQueueEngine?.load())return 0;
     if (jobs.size > 0) {
         updateQueueWakeAlarm(true);
 
@@ -1039,78 +1038,10 @@ function restoreDurableJobs(durableJobs) {
     const restoredJobs = [];
 
     for (const rawJob of Object.values(durableJobs || {})) {
-        let job;
         const decoded = globalThis.CpoQueueEngine?.deserializeDurable(rawJob, Date.now(), createRunId);
-        if (decoded != null) {
-            if (!decoded.ok) {
-                // Never auto-run malformed persisted prompts or delivery state.
-                console.warn('CPO: durable queue restore skipped:', decoded.error);
-                continue;
-            }
-            job = decoded.value;
-        } else {
-            if (!rawJob || !rawJob.tabId) continue;
-
-            const tabId = Number(rawJob.tabId);
-            const queue = Array.isArray(rawJob.queue)
-                ? rawJob.queue.map(message => String(message || '').trim()).filter(Boolean)
-                : [];
-            const currentMessage = String(rawJob.currentMessage || '').trim() || null;
-
-            const eligible = globalThis.CpoQueueEngine?.numeric('cpo_restore_eligible', [tabId, queue.length, Number(!!currentMessage), Number(rawJob.isStopped === true)]);
-            if (eligible == null ? (!Number.isSafeInteger(tabId) || tabId <= 0 || rawJob.isStopped === true || (!currentMessage && queue.length === 0)) : eligible === 0) continue;
-            if (jobs.has(tabId)) continue;
-
-            const provider = rawJob.provider || 'chatgpt';
-            const conversationId = rawJob.conversationId || null;
-            const conversationType = rawJob.conversationType || (conversationId ? 'existing' : (rawJob.targetKey === 'chatgpt:new' ? 'new' : 'unknown'));
-            const targetKey = rawJob.targetKey || (conversationId ? `${provider}:c:${conversationId}` : `${provider}:${conversationType}`);
-
-            job = {
-                tabId,
-                provider,
-                conversationId,
-                conversationType,
-                targetKey,
-                queue,
-                currentMessage,
-                isRunning: rawJob.isRunning !== false && rawJob.isPaused !== true,
-                isPaused: rawJob.isPaused === true,
-                isStopped: false,
-                pausedReason: rawJob.pausedReason || '',
-                lastError: rawJob.lastError || '',
-                runId: rawJob.runId || createRunId(),
-                totalMessages: Number(rawJob.totalMessages || 0),
-                completedCount: Number(rawJob.completedCount || 0),
-                currentCommandNumber: Number(rawJob.currentCommandNumber || 0),
-                currentPhase: rawJob.currentPhase || (rawJob.waitForIdleBeforeSend ? 'waiting-for-idle' : (currentMessage ? 'waiting' : 'queued')),
-                waitForIdleBeforeSend: rawJob.waitForIdleBeforeSend === true,
-                deliveryTimeoutAttempts: Number(rawJob.deliveryTimeoutAttempts || 0),
-                retryAttemptCount: Number(rawJob.retryAttemptCount || 0),
-                lastRetryableReason: String(rawJob.lastRetryableReason || ''),
-                retryClass: String(rawJob.retryClass || ''),
-                retryMode: rawJob.retryMode === 'unlimited' ? 'unlimited' : (rawJob.retryMode === 'finite' ? 'finite' : ''),
-                nextRetryDelayMs: Number(rawJob.nextRetryDelayMs || 0),
-                nextRetryAt: Number(rawJob.nextRetryAt || 0),
-                retryExhausted: rawJob.retryExhausted === true,
-                waitStartedAt: Number(rawJob.waitStartedAt || 0),
-                lastResearchProgressAt: Number(rawJob.lastResearchProgressAt || 0),
-                sawDeepResearch: rawJob.sawDeepResearch === true,
-                sawGenerating: rawJob.sawGenerating === true,
-                deliveryState: rawJob.deliveryState || '',
-                commandId: rawJob.commandId || '',
-                commandFingerprint: rawJob.commandFingerprint || '',
-                submittedUserTurnId: rawJob.submittedUserTurnId || null,
-                assistantTurnId: rawJob.assistantTurnId || null,
-                submissionAckSource: rawJob.submissionAckSource || '',
-                terminalAckSource: rawJob.terminalAckSource || '',
-                lastResponsePhase: rawJob.lastResponsePhase || '',
-                ...copyRolloverFields(rawJob),
-                startedAt: Number(rawJob.startedAt || Date.now()),
-                updatedAt: Number(rawJob.updatedAt || Date.now())
-            };
-
-        }
+        if(decoded==null)throw new Error('Native durable restoration unavailable; stored jobs preserved.');
+        if(!decoded.ok){console.warn('CPO: durable queue restore skipped:',decoded.error);continue;}
+        const job=decoded.value;
         const tabId = job.tabId;
         if (jobs.has(tabId)) continue;
 
@@ -1122,11 +1053,8 @@ function restoreDurableJobs(durableJobs) {
         else if (job.currentMessage && !job.currentCommandNumber) job.currentCommandNumber = Number(job.completedCount || 0) + 1;
 
         const confirmed = isSubmissionConfirmed(job);
-        const sending = ['sending', 'awaiting-submission-ack'].includes(job.currentPhase);
-        const restoreAction = globalThis.CpoQueueEngine?.restoreAction(job, confirmed) ??
-            (job.currentPhase === 'terminal' || job.deliveryState === 'terminal-awaiting-bookkeeping' ? 2 :
-                confirmed && (job.currentPhase === 'waiting' || sending) ? 1 :
-                job.currentMessage && (sending || ['pre-click','unknown-acceptance'].includes(job.deliveryState)) ? 3 : 0);
+        const restoreAction = globalThis.CpoQueueEngine?.restoreAction(job, confirmed);
+        if(restoreAction==null)throw new Error('Native recovery classification unavailable.');
         if (restoreAction === 2) {
             job.currentPhase = 'terminal';
             job.deliveryState = 'terminal-awaiting-bookkeeping';
@@ -4348,20 +4276,13 @@ function sortScheduledMessages(items) {
 
 function scheduledAction(action, item, now = Date.now()) {
     if (!item) return 0;
-    const native = globalThis.CpoQueueEngine?.schedule(action, item, now);
-    if (native != null) return native;
-    if ((action === 1 || action === 3) && item.status === 'completed') return 2;
-    if (action >= 1 && action <= 3) return item.status === 'firing' ? 3 : 1;
-    if (action === 4) {
-        const due = Number(item.dueTs);
-        return item.status !== 'pending' || !Number.isFinite(due) || due <= 0 ? 0 : due <= now + SCHEDULED_DUE_SKEW_MS ? 1 : 4;
-    }
-    if (action === 5) return item.status === 'firing' ? 5 : item.status === 'pending' ? 4 : 0;
-    return 0;
+    const native=globalThis.CpoQueueEngine?.schedule(action,item,now);
+    if(native==null)throw new Error('Native scheduler unavailable; no scheduled delivery authorized.');
+    return native;
 }
 
 async function readScheduledMessages() {
-    await globalThis.CpoQueueEngine?.load();
+    if(!await globalThis.CpoQueueEngine?.load())throw new Error('Native scheduler unavailable.');
     const data = await readLocalStorage([SCHEDULED_MESSAGES_KEY]);
     const items = data[SCHEDULED_MESSAGES_KEY];
     return sortScheduledMessages(Array.isArray(items) ? items : []);
@@ -4425,41 +4346,8 @@ function buildScheduledConversationIdentity(item) {
     };
 }
 
-function identitiesMatchForSchedule(stored, current) {
-    if (!stored || !current) return false;
-    const native = globalThis.CpoQueueEngine?.scheduleIdentity(stored, current);
-    if (native != null) return native === 1;
-
-    const storedType = stored.conversationType || stored.type || 'unknown';
-    const currentType = current.conversationType || current.type || 'unknown';
-    const storedKey = stored.targetKey || stored.key || '';
-    const currentKey = current.targetKey || current.key || '';
-
-    if (stored.provider && current.provider && current.provider !== 'unknown' && stored.provider !== current.provider) {
-        return false;
-    }
-
-    if (currentType === 'unsupported' || storedType === 'unsupported') {
-        return false;
-    }
-
-    if (storedType === 'existing' && stored.conversationId) {
-        return currentType === 'existing' && current.conversationId === stored.conversationId;
-    }
-
-    if (storedType === 'new') {
-        return currentType === 'new' || currentType === 'existing';
-    }
-
-    if (storedType === 'unknown' || currentType === 'unknown') {
-        return false;
-    }
-
-    if (storedKey && currentKey) {
-        return storedKey === currentKey;
-    }
-
-    return false;
+function identitiesMatchForSchedule(stored,current){
+    return !!stored&&!!current&&globalThis.CpoQueueEngine?.scheduleIdentity(stored,current)===1;
 }
 
 async function createScheduledMessage({ text, dueTs, tabId, conversationIdentity = null }) {
