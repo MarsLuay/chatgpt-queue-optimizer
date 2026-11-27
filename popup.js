@@ -190,6 +190,8 @@ document.addEventListener('DOMContentLoaded', function () {
     const optimizerBatchSize = document.getElementById('optimizer-batch-size');
     const optimizerAutoScroll = document.getElementById('optimizer-auto-scroll');
     const optimizerOffscreen = document.getElementById('optimizer-offscreen');
+    const optimizerAdaptive = document.getElementById('optimizer-adaptive-budget');
+    const optimizerResourceBudget = document.getElementById('optimizer-resource-budget');
     const optimizerIdleMinutes = document.getElementById('optimizer-idle-minutes');
     const optimizerToggle = document.getElementById('optimizer-toggle');
     const optimizerStats = document.getElementById('optimizer-stats');
@@ -2231,6 +2233,8 @@ The sequence should do the following: `;
                 batchSize: 25,
                 autoScroll: true,
                 offscreenRendering: false,
+                adaptiveBudget: false,
+                resourceBudget: 8000,
                 inactiveTabMinutes: 0
             },
             async function (config) {
@@ -2238,6 +2242,8 @@ The sequence should do the following: `;
                 optimizerBatchSize.value = config.batchSize;
                 optimizerAutoScroll.checked = config.autoScroll;
                 if (optimizerOffscreen) optimizerOffscreen.checked = config.offscreenRendering === true;
+                if (optimizerAdaptive) optimizerAdaptive.checked = config.adaptiveBudget === true;
+                if (optimizerResourceBudget) optimizerResourceBudget.value = String(config.resourceBudget || 8000);
                 if (optimizerIdleMinutes) optimizerIdleMinutes.value = String(config.inactiveTabMinutes || 0);
 
                 await refreshOptimizerStatus();
@@ -2273,6 +2279,8 @@ The sequence should do the following: `;
                 batchSize: parseInt(optimizerBatchSize.value, 10),
                 autoScroll: optimizerAutoScroll.checked,
                 offscreenRendering: optimizerOffscreen?.checked === true,
+                adaptiveBudget: optimizerAdaptive?.checked === true,
+                resourceBudget: Math.max(1000, Math.min(1000000, Number(optimizerResourceBudget?.value) || 8000)),
                 inactiveTabMinutes: Number(optimizerIdleMinutes?.value || 0)
             };
 
@@ -2425,6 +2433,22 @@ The sequence should do the following: `;
             `Streaming mutation batches skipped: ${response.debugInfo?.performance?.mutationSkips ?? 0}`
         ];
 
+        const resources = response.debugInfo?.resources;
+        if (resources) {
+            const mib = bytes => typeof bytes === 'number' ? (bytes / 1048576).toFixed(2) + ' MiB' : 'Unavailable';
+            lines.push(
+                'Resource sample (recent turns only):',
+                `Sampled: ${resources.sampledTurns}/${resources.totalTurns}; capped turns: ${resources.truncatedTurns}`,
+                `Sampled DOM nodes: ${resources.nodes}; text characters: ${resources.textChars}`,
+                `Images: ${resources.images}; audio/video: ${resources.media}; canvas/frames: ${resources.surfaces}`,
+                `Resource units (estimate): ${resources.units}`,
+                `Adaptive budget: ${resources.adaptiveEnabled ? resources.budget + ' units; target ' + resources.adaptiveTarget + ' turns' : 'Off'}`,
+                `Manual history expansion: ${resources.manuallyExpanded ? 'Yes' : 'No'}`,
+                `Extension cached message references: ${resources.cachedMessageRefs}`,
+                `WASM linear memory: ${mib(resources.wasmLinearBytes)}`,
+                `Browser JS heap (not tab RAM): ${mib(resources.usedJsHeapBytes)}`
+            );
+        }
         optimizerStats.appendChild(label);
 
         lines.forEach((line) => {
@@ -2435,6 +2459,8 @@ The sequence should do the following: `;
 
     if (optimizerIdleMinutes) optimizerIdleMinutes.addEventListener('change', scheduleOptimizerAutoSave);
     if (optimizerOffscreen) optimizerOffscreen.addEventListener('change', scheduleOptimizerAutoSave);
+    if (optimizerAdaptive) optimizerAdaptive.addEventListener('change', scheduleOptimizerAutoSave);
+    if (optimizerResourceBudget) optimizerResourceBudget.addEventListener('change', scheduleOptimizerAutoSave);
 
     if (optimizerToggle) {
         optimizerToggle.addEventListener('click', async function () {
