@@ -24,7 +24,7 @@
             'cpo_durable_number','cpo_durable_boolean','cpo_durable_retry_mode','cpo_durable_trim',
             'cpo_setting_number','cpo_setting_bool','cpo_popup_status','cpo_popup_remaining','cpo_popup_schedule_actions',
             'cpo_log_duplicate','cpo_log_keep_start','cpo_log_limit','cpo_log_sensitive',
-            'cpo_event_code','cpo_content_event_kind','cpo_api_mode','cpo_api_path','cpo_injection_route','cpo_async_transition','cpo_live_new','cpo_live_delete','cpo_live_epoch','cpo_live_len','cpo_live_input','cpo_live_write','cpo_live_read','cpo_live_output','cpo_live_wipe','cpo_catalog_len','cpo_catalog_items','cpo_catalog_word','cpo_enter_eligible','cpo_enter_action','cpo_provider_predicate','cpo_log_plan','cpo_diag_pick','cpo_diag_reset','cpo_diag_update','cpo_diag_finish'];
+            'cpo_event_code','cpo_content_event_kind','cpo_api_mode','cpo_api_path','cpo_injection_route','cpo_async_transition','cpo_live_new','cpo_live_delete','cpo_live_epoch','cpo_live_len','cpo_live_input','cpo_live_write','cpo_live_read','cpo_live_output','cpo_live_wipe','cpo_catalog_len','cpo_catalog_items','cpo_catalog_word','cpo_enter_eligible','cpo_enter_action','cpo_provider_predicate','cpo_log_plan','cpo_diag_pick','cpo_diag_reset','cpo_diag_update','cpo_diag_finish','cpo_log_walk_begin','cpo_log_walk_plan','cpo_log_walk_next','cpo_log_walk_close'];
         if (!names.every(name => typeof exports[name] === 'function') ||
             exports.cpo_queue_abi() !== 10 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
         core = exports;
@@ -595,26 +595,33 @@
     // objects and builds the bounded structured-clone output.
     function sanitizeDiagnostic(value,depth,key,isSensitive,serializeError){
         if(!core)return {ok:false};
-        const visit=(v,d,k)=>{
+        const native=(name,args=[])=>{const result=call(name,args);if(result==null||result===0xffffffff)throw new Error('Native diagnostic cursor unavailable');return result;};
+        const visit=(v,k)=>{
             const type=v==null?0:typeof v==='string'?1:typeof v==='number'||typeof v==='boolean'?2:Array.isArray(v)?3:v instanceof Error?5:typeof v==='object'?4:6;
             const length=type===1||type===3?v.length:type===4?30:0;
             const sensitive=!!k&&isSensitive(k);
             const marker=sensitive&&v&&typeof v==='object'&&v.redacted===true;
-            const plan=call('cpo_log_plan',[type,d,length,Number(sensitive)|(Number(!!marker)<<1)]);
-            if(plan==null)throw new Error('Native diagnostic policy unavailable');
+            const plan=native('cpo_log_walk_plan',[type,length,Number(sensitive)|(Number(!!marker)<<1)]);
             const action=plan&255,bound=plan>>>8;
             switch(action){
                 case 0:return v;
                 case 1:return v.length>bound?v.slice(0,bound)+'...':v;
-                case 2:{const out=[];for(let i=0;i<bound;i++)out.push(visit(v[i],d+1,''));return out;}
+                case 2:{
+                    const out=[];
+                    try{for(let i=native('cpo_log_walk_next');i;i=native('cpo_log_walk_next'))out.push(visit(v[i-1],''));}
+                    finally{native('cpo_log_walk_close');}
+                    return out;
+                }
                 case 3:{
-                    const out={};let seen=0;
-                    for(const name in v){
-                        if(!Object.hasOwn(v,name))continue;
-                        if(seen++>=bound)break;
-                        const item=v[name];if(typeof item==='function'||item===undefined)continue;
-                        Object.defineProperty(out,name,{value:visit(item,d+1,name),enumerable:true,configurable:true,writable:true});
-                    }
+                    const out={};
+                    try{
+                        for(const name in v){
+                            if(!Object.hasOwn(v,name))continue;
+                            if(!native('cpo_log_walk_next'))break;
+                            const item=v[name];if(typeof item==='function'||item===undefined)continue;
+                            Object.defineProperty(out,name,{value:visit(item,name),enumerable:true,configurable:true,writable:true});
+                        }
+                    }finally{native('cpo_log_walk_close');}
                     return out;
                 }
                 case 4:return '['+v.length+' items]';
@@ -626,11 +633,11 @@
                     for(const field of ['length','messageLength'])if(Number.isSafeInteger(v[field])&&v[field]>=0)out[field]=v[field];
                     return out;
                 }
-                case 9:return visit(serializeError(v),d,k);
+                case 9:return visit(serializeError(v),k);
                 default:return String(v);
             }
         };
-        try{return {ok:true,value:visit(value,depth,key)};}catch(error){return {ok:false};}
+        try{native('cpo_log_walk_begin',[depth]);return {ok:true,value:visit(value,key)};}catch(error){return {ok:false};}
     }
 
     function sensitiveKey(normalized) {

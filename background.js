@@ -2240,7 +2240,7 @@ function getCommandBinding(job, context = {}) {
 }
 
 function boundedDiagnosticValue(value, maxLength = 160) {
-    const native=globalThis.CpoQueueEngine?.diagnosticText(value,maxLength);
+    const native=globalThis.CpoQueueEngine?.diagnosticText?.(value,maxLength);
     if(native!=null)return native;
     const normalized = String(value ?? '').replace(/\s+/g, ' ').trim();
     if (!normalized) {
@@ -2269,7 +2269,7 @@ function getDiagnosticTurnIdentity(job, details = {}) {
 }
 
 function collectDeliveryDiagnostics(job, extra = {}) {
-    const pick=(...values)=>globalThis.CpoQueueEngine?.diagnosticPick(...values)??values.find(Boolean)??'';
+    const pick=(...values)=>globalThis.CpoQueueEngine?.diagnosticPick?.(...values)??values.find(Boolean)??'';
     const turnIdentity = getDiagnosticTurnIdentity(job, extra);
     return {
         ...extra,
@@ -4123,7 +4123,7 @@ function describeLoggedMessage(text) {
 }
 
 function sanitizeLogValue(value, depth = 0, key = '') {
-    const native=globalThis.CpoQueueEngine?.sanitizeDiagnostic(value,depth,key,isSensitiveLogKey,serializeError);
+    const native=globalThis.CpoQueueEngine?.sanitizeDiagnostic?.(value,depth,key,isSensitiveLogKey,serializeError);
     if(native?.ok)return native.value;
     return emergencySanitizeLogValue(value,depth,key);
 }
@@ -4201,7 +4201,7 @@ function createRunId() {
 }
 
 function previewText(text, maxLength = 70) {
-    const native=globalThis.CpoQueueEngine?.diagnosticText(text||'',maxLength);
+    const native=globalThis.CpoQueueEngine?.diagnosticText?.(text||'',maxLength);
     if(native!=null)return native;
     const clean = String(text || '').replace(/\s+/g, ' ').trim();
 

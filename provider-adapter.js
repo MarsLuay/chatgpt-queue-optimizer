@@ -29,7 +29,7 @@
 
     function catalogView(id, fallbackFactory) {
         let fallback;
-        const current=()=>globalThis.CpoQueueEngine?.providerCatalog(id) || (fallback ||= fallbackFactory());
+        const current=()=>{const native=globalThis.CpoQueueEngine?.providerCatalog?.(id);if(native){fallback=null;return native;}return (fallback ||= fallbackFactory());};
         return new Proxy({},{
             get(_target,key){return current()[key];},
             ownKeys(){return Reflect.ownKeys(current());},
@@ -1262,7 +1262,7 @@
 
         findMatchingSelector(node, selectorKey) {
             const selectors = this.selectors?.[selectorKey] || [];
-            const native=this._nativeSelectorEngine?.firstMatchingSelector(node,selectors);
+            const native=this._nativeSelectorEngine?.firstMatchingSelector?.(node,selectors);
             if(native!=null)return native||null;
             return selectors.find((selector) => {
                 try {
@@ -1888,7 +1888,7 @@
 
         isValidMessageNode(node, mainRoot) {
             if (!node || !mainRoot.contains(node)) return false;
-            const native=this._nativeSelectorEngine?.messagePredicate(0,node,mainRoot,this);
+            const native=this._nativeSelectorEngine?.messagePredicate?.(0,node,mainRoot,this);
             if(native!=null)return native;
             if (node.closest('#cpo-root')) return false;
             if (node.classList && node.classList.contains('cpo-more-banner')) return false;
@@ -1946,7 +1946,7 @@
 
         isValidFallbackNode(node, mainRoot) {
             if (!node || !mainRoot.contains(node)) return false;
-            const native=this._nativeSelectorEngine?.messagePredicate(1,node,mainRoot,this);
+            const native=this._nativeSelectorEngine?.messagePredicate?.(1,node,mainRoot,this);
             if(native!=null)return native;
             if (node.closest('#cpo-root')) return false;
             if (node.classList && node.classList.contains('cpo-more-banner')) return false;

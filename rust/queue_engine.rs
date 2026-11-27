@@ -1191,7 +1191,7 @@ mod diagnostic_text {
     thread_local! {static STATE:RefCell<State>=RefCell::new(State{units:Vec::new(),pending:false,limit:0,overflow:false});}
     #[no_mangle]
     pub extern "C" fn cpo_diag_reset(limit:u32)->u32 {
-        STATE.with(|s|{let mut s=s.borrow_mut();s.units.fill(0);s.units.clear();s.pending=false;s.overflow=false;s.limit=limit.min(1024) as usize;});
+        STATE.with(|s|{let mut s=s.borrow_mut();s.units.fill(0);s.units.clear();s.units.reserve(1024);s.pending=false;s.overflow=false;s.limit=limit.min(1024) as usize;});
         1
     }
     #[no_mangle]
@@ -1218,5 +1218,67 @@ mod diagnostic_text {
             s.units.fill(0);s.units.clear();s.pending=false;s.overflow=false;
             count as u32
         })
+    }
+}
+
+ // Native traversal cursor: the host cannot exceed the Rust depth or child
+ // bounds. Only the currently visited browser values live on the host stack.
+mod diagnostic_walk {
+    use std::cell::RefCell;
+    #[derive(Default)]
+    struct Walk { base:u32, depth:usize, frames:[(u32,u32);4] }
+    thread_local! {static WALK:RefCell<Walk>=RefCell::new(Walk::default());}
+    #[no_mangle]
+    pub extern "C" fn cpo_log_walk_begin(depth:u32)->u32 {
+        WALK.with(|w|*w.borrow_mut()=Walk{base:depth,..Walk::default()});1
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_log_walk_plan(kind:u32,len:u32,flags:u32)->u32 {
+        WALK.with(|w|{
+            let mut w=w.borrow_mut();
+            let plan=super::cpo_log_plan(kind,w.base.saturating_add(w.depth as u32),len,flags);
+            if matches!(plan&255,2|3){
+                let index=w.depth;
+                if index>=w.frames.len(){return u32::MAX;}
+                w.frames[index]=(0,plan>>8);w.depth+=1;
+            }
+            plan
+        })
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_log_walk_next()->u32 {
+        WALK.with(|w|{
+            let mut w=w.borrow_mut();
+            if w.depth==0{return 0;}
+            let index=w.depth-1;
+            let frame=&mut w.frames[index];
+            if frame.0>=frame.1{return 0;}
+            frame.0+=1;frame.0
+        })
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_log_walk_close()->u32 {
+        WALK.with(|w|{
+            let mut w=w.borrow_mut();
+            if w.depth==0{return 0;}
+            w.depth-=1;1
+        })
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn native_walk_limits_and_depth(){
+            cpo_log_walk_begin(0);
+            assert_eq!(cpo_log_walk_plan(3,100,0),2|(12<<8));
+            assert_eq!(cpo_log_walk_next(),1);
+            assert_eq!(cpo_log_walk_plan(4,100,0),3|(30<<8));
+            assert_eq!(cpo_log_walk_next(),1);
+            assert_eq!(cpo_log_walk_plan(3,100,0),4);
+            assert_eq!(cpo_log_walk_close(),1);
+            for i in 2..=12{assert_eq!(cpo_log_walk_next(),i);}
+            assert_eq!(cpo_log_walk_next(),0);
+            assert_eq!(cpo_log_walk_close(),1);
+        }
     }
 }
