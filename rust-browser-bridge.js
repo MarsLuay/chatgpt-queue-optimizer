@@ -385,8 +385,10 @@
                 }
                 case 33: return Number(owner.stashSources(ctx.group[a], b >= 2 ? ['src'] : a === 0 ? ['srcset', 'src'] : ['srcset']));
                 case 34: return Number(owner.restoreSources(ctx.group[a]));
-                case 35: return Number(owner.mediaOriginals.has(ctx.group[a]) &&
-                    ['src','srcset'].some(name => ctx.group[a].hasAttribute(name)));
+                case 35: {
+                    const node=ctx.group[a],original=owner.mediaOriginals.get(node);
+                    return Number(!!original&&['src','srcset'].some(name=>node.hasAttribute(name)&&node.getAttribute(name)!==original[name]));
+                }
                 case 36: owner.forgetSources(ctx.group[a]); return 1;
                 case 37: {
                     const media = ctx.group[0];
@@ -655,7 +657,8 @@
                 case 150: {
                     ctx.journalNode=ctx.entries[a]?.deref();
                     const node=ctx.journalNode;
-                    return !node||!owner.mediaOriginals.has(node)?0:1|(Number(node.hasAttribute('src')||node.hasAttribute('srcset'))<<1);
+                    const original=node&&owner.mediaOriginals.get(node);
+                    return !original?0:1|(Number(['src','srcset'].some(name=>node.hasAttribute(name)&&node.getAttribute(name)!==original[name]))<<1);
                 }
                 case 151: {
                     if(b)owner.restoreSources(ctx.journalNode);
