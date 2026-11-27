@@ -27,6 +27,7 @@ REPO_FILES = [
     "manifest.json",
     "background.js",
     "content.js",
+    "rust-browser-bridge.js",
     "provider-adapter.js",
     "utils.js",
     "popup.html",
@@ -99,6 +100,7 @@ def copy_source(repo_dir, target_dir):
         shutil.copy2(repo_dir / name, target_dir / name)
 
     shutil.copy2(wasm, target_dir / wasm.name)
+    shutil.copy2(repo_dir / 'optimizer_browser.wasm', target_dir / 'optimizer_browser.wasm')
     icons = repo_dir / "icons"
     if icons.exists():
         shutil.copytree(icons, target_dir / "icons")
@@ -130,6 +132,7 @@ def build_firefox_source(repo_dir, target_dir):
         "content_security_policy": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",
         "web_accessible_resources": [
             "optimizer_core.wasm",
+            "optimizer_browser.wasm",
             "icon_16.png",
             "icon_48.png",
             "icon_128.png",
