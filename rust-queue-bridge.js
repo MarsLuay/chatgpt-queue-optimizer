@@ -21,7 +21,7 @@
             'cpo_tab_reload_next','cpo_tab_recover_poll','cpo_tab_close_action',
             'cpo_durable_field_count','cpo_durable_field_rule','cpo_durable_field_name','cpo_durable_default',
             'cpo_durable_number','cpo_durable_boolean','cpo_durable_retry_mode','cpo_durable_trim',
-            'cpo_setting_number','cpo_setting_bool','cpo_popup_status','cpo_popup_remaining',
+            'cpo_setting_number','cpo_setting_bool','cpo_popup_status','cpo_popup_remaining','cpo_popup_schedule_actions',
             'cpo_log_duplicate','cpo_log_keep_start','cpo_log_limit','cpo_log_sensitive'];
         if (!names.every(name => typeof exports[name] === 'function') ||
             exports.cpo_queue_abi() !== 6 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
@@ -370,6 +370,9 @@
             return out;
         }catch(error){fail(error);return null;}
     }
+    function scheduledActions(status) {
+        return call('cpo_popup_schedule_actions',[Math.max(0,['','pending','firing','completed','failed','cancelled'].indexOf(status))]);
+    }
     function remaining(jobs) {
         if(!core)return null;
         try{
@@ -427,7 +430,7 @@
             (Number(!!job.waitForIdleBeforeSend) << 6);
         return call('cpo_queue_next', [flags, phase, job.queue.length]);
     }
-    const api = { load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, settings, remaining, sensitiveKey, tabDiscard, install, get status() { return status; } };
+    const api = { load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, settings, remaining, scheduledActions, sensitiveKey, tabDiscard, install, get status() { return status; } };
     globalThis.CpoQueueEngine = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();
