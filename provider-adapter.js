@@ -135,10 +135,15 @@
         return requireNative(native);
     }
 
-    function getTurnId(node, index, role, fingerprint) {
-        return node?.getAttribute?.('data-message-id') ||
-            node?.getAttribute?.('data-testid') ||
-            `turn:${index}:${role || 'unknown'}:${fingerprint || '0'}`;
+    function semanticButton(buttons,mode,active=()=>true){
+        const rows=buttons.map(button=>[
+            Number(!!button&&!button.disabled&&button.getAttribute('aria-disabled')!=='true'&&active(button)),
+            button?.getAttribute?.('data-testid')||button?.getAttribute?.('data-test-id')||'',
+            button?.getAttribute?.('aria-label')||(mode===0?(button?.innerText||button?.textContent||''):''),
+            mode===1?(button?.innerText||button?.textContent||''):''
+        ]);
+        const index=requireNative(globalThis.CpoQueueEngine?.providerSemanticButton(mode,rows));
+        return index>=0?buttons[index]:null;
     }
 
     function summarizeSelectorMatch(match) {
@@ -534,37 +539,7 @@
         invalidateTurnScanCache(mutations) {
             if (!this._turnScanCacheEnabled) return;
             const nativeStructural = this._nativeLifecycle?.mutations(mutations, 1, false, this);
-            if (nativeStructural != null) {
-                if (nativeStructural) this.clearTurnListCache();
-                return;
-            }
-            const turnSelector = '[data-testid*="conversation-turn"], [data-message-author-role], [data-message-id], article';
-            let structureChanged = false;
-            // Deduplicate changed ancestors across large streaming mutation batches.
-            const dirtyNodes = new Set();
-            for (const mutation of mutations) {
-                let node = mutation.target?.nodeType === 3
-                    ? mutation.target.parentElement
-                    : mutation.target;
-                for (; node; node = node.parentElement) dirtyNodes.add(node);
-
-                if (mutation.type === 'attributes' &&
-                    ['data-testid', 'data-message-author-role', 'data-message-id'].includes(mutation.attributeName)) {
-                    structureChanged = true;
-                }
-                const added = mutation.addedNodes || [];
-                const removed = mutation.removedNodes || [];
-                if (added.length || removed.length) {
-                    const affected = [...added, ...removed];
-                    if (!mutation.target?.closest?.(turnSelector) ||
-                        affected.some(child => child.nodeType === 1 &&
-                            (child.matches?.(turnSelector) || child.querySelector?.(turnSelector)))) {
-                        structureChanged = true;
-                    }
-                }
-            }
-            for (const node of dirtyNodes) this._turnScanCache.delete(node);
-            if (structureChanged) this.clearTurnListCache();
+            if(requireNative(nativeStructural))this.clearTurnListCache();
         }
 
         getCompatibilityContract() {
@@ -639,9 +614,7 @@
             const now = Date.now();
             const cache = this._turnListCache;
             if (this._turnScanCacheEnabled && cache?.doc === doc &&
-                (this._nativeLifecycle?.cacheNodesValid(1, cache.createdAt, cache.nodes, now) ??
-                 (now >= cache.createdAt && now - cache.createdAt < 8000 &&
-                    cache.nodes.every(node => node.isConnected !== false)))) {
+                requireNative(this._nativeLifecycle?.cacheNodesValid(1, cache.createdAt, cache.nodes, now))) {
                 return cache.nodes;
             }
             this.clearTurnListCache();
@@ -668,27 +641,17 @@
             }
             if (this._turnScanCacheEnabled) {
                 this._turnListCache = { doc, nodes, createdAt: now };
-                this._turnListCacheTimer = setTimeout(() => this.clearTurnListCache(), this._nativeLifecycle?.cacheTtl(1) ?? 8000);
+                this._turnListCacheTimer = setTimeout(() => this.clearTurnListCache(), requireNative(this._nativeLifecycle?.cacheTtl(1)));
                 if (typeof this._turnListCacheTimer?.unref === 'function') this._turnListCacheTimer.unref();
             }
             return nodes;
         }
 
         getAssistantTurnErrorSignal(text) {
-            const normalized = normalizeCommandText(text).toLowerCase();
-            if (!normalized) return '';
-
-            const markers = Array.isArray(this.compatibilitySignals?.errorMarkers)
-                ? this.compatibilitySignals.errorMarkers
-                : [];
-            return markers.find((marker) => {
-                const normalizedMarker = normalizeCommandText(marker).toLowerCase();
-                return normalized === normalizedMarker ||
-                    normalized.startsWith(`${normalizedMarker}.`) ||
-                    normalized.startsWith(`${normalizedMarker}!`) ||
-                    normalized.startsWith(`${normalizedMarker}?`) ||
-                    normalized.startsWith(`${normalizedMarker} `);
-            }) || '';
+            // Prefix matching needs only the longest marker plus its boundary.
+            const markers=this.compatibilitySignals.errorMarkers||[];
+            const length=Math.max(0,...markers.map(marker=>marker.length))+1;
+            return requireNative(globalThis.CpoQueueEngine?.textBatch(22,[String(text||'').slice(0,length)]));
         }
 
         getCommandTurnSnapshot(doc = (typeof document !== 'undefined' ? document : null), options = {}) {
@@ -707,79 +670,31 @@
             const expectedTextFingerprint = expectedText ? fingerprintCommandText(expectedText) : '';
             const expectedFingerprint = options.expectedFingerprint || expectedTextFingerprint;
             const turns = this.getConversationTurns(doc);
-            const userTurns = [];
-            const assistantTurns = [];
-
-            turns.forEach((node, index) => {
-                const role = getNodeRole(node, this._nativeSelectorEngine);
-                // Cache only the completed history, never the last two turns.
-                // Store fingerprints, not the potentially multi-megabyte text.
-                const cacheable = this._turnScanCacheEnabled && index < turns.length - 2;
-                const existing = cacheable ? this._turnScanCache.get(node) : null;
-                const memo = existing?.role === role ? existing : null;
-                let text = null;
-                let fingerprint;
-                let hasText;
-                let errorSignal;
-                if (memo) {
-                    fingerprint = memo.fingerprint;
-                    hasText = memo.hasText;
-                    errorSignal = memo.errorSignal;
-                } else {
-                    text = getNodeText(node);
-                    fingerprint = fingerprintCommandText(text);
-                    hasText = text.length > 0;
-                    errorSignal = role === 'assistant'
-                        ? this.getAssistantTurnErrorSignal(text)
-                        : '';
-                    if (cacheable) this._turnScanCache.set(node, { role, fingerprint, hasText, errorSignal });
+            const rows=[];
+            for(let index=0;index<turns.length;index++){
+                const node=turns[index];
+                const role=getNodeRole(node,this._nativeSelectorEngine);
+                const cacheable=requireNative(globalThis.CpoQueueEngine?.call('cpo_turn_cache_eligible',[Number(this._turnScanCacheEnabled),index,turns.length]))===1;
+                const existing=cacheable?this._turnScanCache.get(node):null;
+                const memo=existing?.role===role?existing:null;
+                let text=null,fingerprint,hasText,errorSignal;
+                if(memo){({fingerprint,hasText,errorSignal}=memo);}
+                else{
+                    text=getNodeText(node);
+                    fingerprint=fingerprintCommandText(text);
+                    hasText=text.length>0;
+                    errorSignal=role==='assistant'?this.getAssistantTurnErrorSignal(text):'';
+                    if(cacheable)this._turnScanCache.set(node,{role,fingerprint,hasText,errorSignal});
                 }
-                const turnId = getTurnId(node, index, role, fingerprint);
-                // A fingerprint alone is insufficient for delivery confirmation.
-                const matchedExpected = !!expectedText && fingerprint === expectedTextFingerprint &&
-                    (text === null ? getNodeText(node) : text) === expectedText;
-
-                if (role === 'user' || (!role && matchedExpected)) {
-                    userTurns.push({
-                        turnId,
-                        index,
-                        fingerprint,
-                        matchedExpected
-                    });
-                    if (matchedExpected) {
-                        snapshot.matchedUserTurnId = turnId;
-                    }
-                }
-
-                if (role === 'assistant') {
-                    const streaming = !!(node.querySelector?.('[data-message-streaming="true"], [data-is-streaming="true"], .result-streaming'));
-                    const errorStop = hasAssistantErrorStop(node, this._nativeSelectorEngine);
-                    assistantTurns.push({
-                        turnId,
-                        index,
-                        followingUserTurnId: userTurns.length > 0 ? userTurns[userTurns.length - 1].turnId : null,
-                        fingerprint,
-                        streaming,
-                        hasErrorStop: errorStop,
-                        hasIncompleteToolTurn: hasIncompleteToolTurn(node, this._nativeSelectorEngine),
-                        hasCompletedText: !streaming && !errorStop && hasText,
-                        errorSignal
-                    });
-                }
-            });
-
-            snapshot.userTurns = userTurns;
-            snapshot.assistantTurns = assistantTurns;
-            snapshot.latestUserTurnId = userTurns.length > 0 ? userTurns[userTurns.length - 1].turnId : null;
-            snapshot.latestAssistantTurnId = assistantTurns.length > 0 ? assistantTurns[assistantTurns.length - 1].turnId : null;
-            if (!snapshot.matchedUserTurnId && expectedFingerprint) {
-                const fingerprintMatch = userTurns.find(turn => turn.fingerprint === expectedFingerprint);
-                if (fingerprintMatch) {
-                    snapshot.matchedUserTurnId = fingerprintMatch.turnId;
-                    fingerprintMatch.matchedExpected = true;
-                }
+                const exact=!!expectedText&&fingerprint===expectedTextFingerprint&&(text===null?getNodeText(node):text)===expectedText;
+                const assistant=role==='assistant';
+                const streaming=assistant&&!!node.querySelector?.('[data-message-streaming="true"], [data-is-streaming="true"], .result-streaming');
+                const errorStop=assistant&&hasAssistantErrorStop(node,this._nativeSelectorEngine);
+                const incomplete=assistant&&hasIncompleteToolTurn(node,this._nativeSelectorEngine);
+                const flags=Number(exact)|(Number(streaming)<<1)|(Number(errorStop)<<2)|(Number(incomplete)<<3)|(Number(hasText)<<4);
+                rows.push([role==='user'?1:assistant?2:0,node?.getAttribute?.('data-message-id')||'',node?.getAttribute?.('data-testid')||'',fingerprint,flags,errorSignal]);
             }
-            return snapshot;
+            return {...snapshot,...requireNative(globalThis.CpoQueueEngine?.providerTurnSnapshot(rows,expectedFingerprint,!!expectedText))};
         }
 
         getCommandResponseState(doc = (typeof document !== 'undefined' ? document : null), binding = {}, generationState = null) {
@@ -787,139 +702,7 @@
             const snapshot = this.getCommandTurnSnapshot(doc, {
                 expectedFingerprint: binding.commandFingerprint || ''
             });
-            const userTurnId = binding.userTurnId || snapshot.matchedUserTurnId || snapshot.latestUserTurnId || null;
-            const boundUser = snapshot.userTurns.find(turn => turn.turnId === userTurnId) || null;
-            const followingAssistant = snapshot.assistantTurns.find(turn => turn.followingUserTurnId === userTurnId) ||
-                (boundUser
-                    ? snapshot.assistantTurns.find(turn => turn.index > boundUser.index)
-                    : null) ||
-                null;
-            const conversationId = binding.conversationId || snapshot.conversationId || null;
-            const statusText = String(generation.researchStatusPreview || '').toLowerCase();
-            const waitingForUser = (this.compatibilitySignals.waitingForUserMarkers || []).some(marker => nativeContains(statusText, marker));
-            const interrupted = (this.compatibilitySignals.interruptedMarkers || []).some(marker => nativeContains(statusText, marker));
-            const incompleteToolTurn = followingAssistant?.hasIncompleteToolTurn === true;
-            const native = nativeResponse(generation, followingAssistant, waitingForUser, interrupted);
-
-            if (native === 1) {
-                return {
-                    phase: 'error',
-                    userTurnId,
-                    assistantTurnId: followingAssistant?.turnId || null,
-                    conversationId,
-                    generating: false,
-                    deepResearchActive: false,
-                    hasCompletedAssistant: false,
-                    source: 'conversation-max-length'
-                };
-            }
-
-            if (native === 2) {
-                return {
-                    phase: 'error',
-                    userTurnId,
-                    assistantTurnId: followingAssistant.turnId,
-                    conversationId,
-                    generating: false,
-                    deepResearchActive: false,
-                    hasCompletedAssistant: false,
-                    source: 'assistant-error-stop'
-                };
-            }
-
-            if ([3,4,5].includes(native)) {
-                return {
-                    phase: 'error',
-                    userTurnId,
-                    assistantTurnId: followingAssistant?.turnId || null,
-                    conversationId,
-                    generating: false,
-                    deepResearchActive: !!generation.deepResearchActive,
-                    hasCompletedAssistant: false,
-                    source: generation.hasDeliveryTimedOut ? 'delivery-timeout' : (generation.hasTryAgainButton ? 'retry-visible' : 'generation-error')
-                };
-            }
-
-            if (native === 6) {
-                return {
-                    phase: 'error',
-                    userTurnId,
-                    assistantTurnId: followingAssistant.turnId,
-                    conversationId,
-                    generating: false,
-                    deepResearchActive: false,
-                    hasCompletedAssistant: false,
-                    source: 'assistant-error-stop',
-                    errorSignal: followingAssistant.errorSignal
-                };
-            }
-
-            if (native === 7) {
-                return {
-                    phase: 'waiting-for-user',
-                    userTurnId,
-                    assistantTurnId: followingAssistant?.turnId || null,
-                    conversationId,
-                    generating: false,
-                    deepResearchActive: false,
-                    hasCompletedAssistant: false,
-                    source: 'waiting-for-user'
-                };
-            }
-
-            if (native === 8) {
-                return {
-                    phase: 'interrupted',
-                    userTurnId,
-                    assistantTurnId: followingAssistant?.turnId || null,
-                    conversationId,
-                    generating: false,
-                    deepResearchActive: false,
-                    hasCompletedAssistant: false,
-                    source: 'interrupted'
-                };
-            }
-
-            const boundActivity = !!(generation.generating || generation.deepResearchActive || followingAssistant?.streaming || incompleteToolTurn);
-            if ([9,10,11,12].includes(native)) {
-                return {
-                    phase: 'active',
-                    userTurnId,
-                    assistantTurnId: followingAssistant?.turnId || null,
-                    conversationId,
-                    generating: !!generation.generating,
-                    deepResearchActive: !!generation.deepResearchActive,
-                    hasCompletedAssistant: false,
-                    toolTurnIncomplete: incompleteToolTurn,
-                    source: incompleteToolTurn
-                        ? 'incomplete-tool-turn'
-                        : (generation.deepResearchActive ? 'deep-research' : (followingAssistant?.streaming ? 'streaming' : 'generating'))
-                };
-            }
-
-            if (native === 13) {
-                return {
-                    phase: 'terminal',
-                    userTurnId,
-                    assistantTurnId: followingAssistant.turnId,
-                    conversationId,
-                    generating: false,
-                    deepResearchActive: false,
-                    hasCompletedAssistant: true,
-                    source: 'bound-assistant-turn'
-                };
-            }
-
-            return {
-                phase: 'transient-idle',
-                userTurnId,
-                assistantTurnId: followingAssistant?.turnId || null,
-                conversationId,
-                generating: false,
-                deepResearchActive: false,
-                hasCompletedAssistant: false,
-                source: 'transient-idle'
-            };
+            return requireNative(globalThis.CpoQueueEngine?.providerBoundResponse(snapshot,binding,generation));
         }
 
         findMatchingSelector(node, selectorKey) {
@@ -1149,25 +932,7 @@
             const stopSelectorMatch = this.getSelectorMatch(doc, 'stopButton', (button) => {
                 return inActiveSurface(button) && !button.disabled && button.getAttribute('aria-disabled') !== 'true';
             });
-            const semanticStopButton = buttons.find(button => {
-                if (button.disabled || button.getAttribute('aria-disabled') === 'true') {
-                    return false;
-                }
-                const testId = (
-                    button.getAttribute('data-testid') ||
-                    button.getAttribute('data-test-id') ||
-                    ''
-                ).toLowerCase();
-                const label = (
-                    button.getAttribute('aria-label') ||
-                    button.innerText ||
-                    button.textContent ||
-                    ''
-                ).toLowerCase().trim();
-                return this.compatibilitySignals.stopLabels.some(marker =>
-                    label === marker || nativeContains(label, marker) || nativeContains(testId, marker.replace(/ /g, '-'))
-                );
-            });
+            const semanticStopButton=stopSelectorMatch.element?null:semanticButton(buttons,0);
             const stopButton = stopSelectorMatch.element || semanticStopButton;
             const hasActiveStopButton = !!stopButton;
 
@@ -1283,31 +1048,12 @@
             };
             if (!doc) return empty;
 
-            const isRetryOrRegenerate = (btn) => {
-                if (!btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true') {
-                    return false;
-                }
-                const testId = (
-                    btn.getAttribute('data-testid') ||
-                    btn.getAttribute('data-test-id') ||
-                    ''
-                ).toLowerCase();
-                if (testId === 'retry-button' || testId.includes('retry') || testId.includes('regenerate')) {
-                    return true;
-                }
-                const label = (btn.getAttribute('aria-label') || '').toLowerCase().trim();
-                const text = (btn.innerText || btn.textContent || '').toLowerCase().trim();
-                return this.compatibilitySignals.retryLabels.some(marker =>
-                    label === marker || nativeContains(label, marker) || text === marker || nativeContains(text, marker)
-                );
-            };
-
             const turns = this.getConversationTurns(doc);
             const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
 
             if (latestTurn) {
                 const turnButtons = Array.from(latestTurn.querySelectorAll('button'));
-                const foundInTurn = turnButtons.reverse().find(isRetryOrRegenerate);
+                const foundInTurn = semanticButton(turnButtons.reverse(),1);
                 if (foundInTurn) {
                     return {
                         element: foundInTurn,
@@ -1320,7 +1066,7 @@
             const alertMatches = this.getSelectorNodes(doc, 'errorAlerts');
             for (const alertMatch of alertMatches) {
                 const alertButtons = Array.from(alertMatch.element.querySelectorAll('button'));
-                const foundInAlert = alertButtons.reverse().find(isRetryOrRegenerate);
+                const foundInAlert = semanticButton(alertButtons.reverse(),1);
                 if (foundInAlert) {
                     return {
                         element: foundInAlert,
@@ -1331,9 +1077,7 @@
             }
 
             const allButtons = Array.from(doc.querySelectorAll('button'));
-            const fallback = allButtons.reverse().find(btn => {
-                return isRetryOrRegenerate(btn) && this.isActiveResponseNode(btn, turns, latestTurn);
-            });
+            const fallback = semanticButton(allButtons.reverse(),1,btn=>this.isActiveResponseNode(btn,turns,latestTurn));
             return fallback
                 ? { element: fallback, selector: 'retryButton.semantic', signalKey: 'retryButton' }
                 : empty;

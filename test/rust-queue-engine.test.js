@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 12);
+    assert.equal(e.cpo_queue_abi(), 14);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -510,3 +510,23 @@ test('native job transactions retain confirmed prompts, revisions and snapshot p
     assert.equal(scheduled.completedAt,1001);
 });
 
+
+test('native provider snapshots preserve exact-match safety and response association',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    const rows=[[1,'u1','','fp1',0,''],[2,'a1','','fpA',16,''],[1,'u2','','fp2',1,''],[2,'a2','','fpB',8,'']];
+    const snap=engine.providerTurnSnapshot(rows,'fp2',true);
+    assert.equal(snap.matchedUserTurnId,'u2');
+    assert.equal(snap.latestAssistantTurnId,'a2');
+    assert.equal(snap.assistantTurns[0].followingUserTurnId,'u1');
+    assert.equal(snap.assistantTurns[0].hasCompletedText,true);
+    assert.equal(engine.providerBoundResponse(snap,{userTurnId:'u1'},{}).phase,'terminal');
+    assert.equal(engine.providerBoundResponse(snap,{userTurnId:'u2'},{}).source,'incomplete-tool-turn');
+    assert.equal(engine.providerBoundResponse(snap,{userTurnId:'u2'},{hasDeliveryTimedOut:true}).source,'delivery-timeout');
+    assert.equal(engine.providerTurnSnapshot([[1,'u','','collision',0,'']],'collision',true).matchedUserTurnId,null);
+    assert.equal(engine.providerTurnSnapshot([[1,'u','','collision',0,'']],'collision',false).matchedUserTurnId,'u');
+    assert.equal(engine.textBatch(22,['Something went wrong. Later']), 'something went wrong');
+    assert.equal(engine.textBatch(22,['Something went wrongish']), '');
+    assert.equal(engine.providerSemanticButton(1,[[0,'retry','',''],[1,'other','Try again','']]),1);
+    assert.equal(engine.providerSemanticButton(0,[[1,'stop-generating','','']]),0);
+});

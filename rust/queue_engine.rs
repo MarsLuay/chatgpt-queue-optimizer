@@ -1,7 +1,7 @@
 //! Queue execution decisions and streaming legacy-compatible UTF-16 fingerprints.
 
 #[no_mangle]
-pub extern "C" fn cpo_queue_abi() -> u32 { 13 }
+pub extern "C" fn cpo_queue_abi() -> u32 { 14 }
 
 const OFFSET: u32 = 2166136261;
 const PRIME: u32 = 16777619;
@@ -1748,6 +1748,116 @@ mod presentation_batch {
         };
         Some(vec![ascii(status),reason,f[3].to_vec(),if op==3{f[4].to_vec()}else{Vec::new()},if op==4||op==7{f[3].to_vec()}else{Vec::new()}])
     }
+
+    fn catalog_signal(key:&str)->&'static [&'static str]{
+        super::CATALOG_4.iter().find(|(name,_)|*name==key).map_or(&[],|(_,values)|*values)
+    }
+    fn contains_units(hay:&[u16],needle:&[u16])->bool{
+        !needle.is_empty()&&hay.windows(needle.len()).any(|v|v==needle)
+    }
+    fn marker_present(text:&[u16],key:&str)->bool{
+        let text=lower_ascii(text);
+        catalog_signal(key).iter().any(|marker|contains_units(&text,&ascii(marker)))
+    }
+    fn assistant_error_prefix(f:&[&[u16]])->Option<Vec<u16>>{
+        if f.len()!=1{return None;}
+        let text=lower_ascii(f[0]);
+        for marker in catalog_signal("errorMarkers"){
+            let m=ascii(marker);
+            if text.starts_with(&m)&&(text.len()==m.len()||matches!(text.get(m.len()),Some(32|46|33|63))){return Some(m);}
+        }
+        Some(Vec::new())
+    }
+    // Per-turn metadata only. Host supplies DOM attributes and exact normalized
+    // text equality; Rust owns ordering, IDs, association, completion and match
+    // precedence. Prompt bodies never enter the aggregation buffer.
+    // input: expected fingerprint, exact-text-present, repeated role/ID/testID/
+    // fingerprint/flags/error. output: latest user, latest assistant, matched,
+    // followed by fixed-width rows (role,index,id,following,fp,flags,error).
+    fn turn_snapshot(f:&[&[u16]])->Option<Vec<Vec<u16>>>{
+        if f.len()<2||(f.len()-2)%6!=0{return None;}
+        let expected=f[0];let exact_required=eq(f[1],"1");
+        let mut latest_user=Vec::new();let mut latest_assistant=Vec::new();let mut matched=Vec::new();
+        let mut rows:Vec<Vec<u16>>=Vec::new();
+        let mut first_fingerprint=None;
+        for (index,v) in f[2..].chunks_exact(6).enumerate(){
+            let role=number(v[0]) as u32;let flags=number(v[4]) as u32;
+            let exact=flags&1!=0;
+            if role!=1&&role!=2&&!(role==0&&exact){continue;}
+            let mut id=if !v[1].is_empty(){v[1].to_vec()}else{v[2].to_vec()};
+            if id.is_empty(){
+                id=ascii(&format!("turn:{index}:{}:",if role==1{"user"}else if role==2{"assistant"}else{"unknown"}));
+                if v[3].is_empty(){append(&mut id,"0");}else{id.extend_from_slice(v[3]);}
+            }
+            let user=role!=2;
+            let following=if user{Vec::new()}else{latest_user.clone()};
+            let result_flags=if user{u32::from(exact)}else{(flags&14)|if flags&6==0&&flags&16!=0{16}else{0}};
+            if user{
+                latest_user=id.clone();
+                if exact{matched=id.clone();}
+                if first_fingerprint.is_none()&&!expected.is_empty()&&v[3]==expected{first_fingerprint=Some(rows.len());}
+            }else{latest_assistant=id.clone();}
+            rows.extend([ascii(if user{"1"}else{"2"}),ascii(&index.to_string()),id,following,v[3].to_vec(),ascii(&result_flags.to_string()),v[5].to_vec()]);
+        }
+        // A fingerprint-only observation can locate a candidate, but when
+        // exact text is supplied, a collision must never upgrade a match.
+        if matched.is_empty()&&!exact_required{
+            if let Some(at)=first_fingerprint{matched=rows[at+2].clone();rows[at+5]=ascii("1");}
+        }
+        let mut out=vec![latest_user,latest_assistant,matched];out.extend(rows);Some(out)
+    }
+    // Bind a response to the first assistant following the selected user,
+    // then apply the native response-state priority and presentation policy.
+    // Input: explicit/matched/latest user, explicit/snapshot conversation ID,
+    // generation bits, status text, user count, user rows, assistant rows.
+    fn bound_response(f:&[&[u16]])->Option<Vec<Vec<u16>>>{
+        if f.len()<8{return None;}
+        let user=[f[0],f[1],f[2]].into_iter().find(|v|!v.is_empty()).unwrap_or(&[]);
+        let conversation=if f[3].is_empty(){f[4]}else{f[3]};
+        let generation=number(f[5]) as u32;let count=number(f[7]) as usize;
+        let end=8usize.checked_add(count.checked_mul(2)?)?;
+        if end>f.len()||(f.len()-end)%5!=0{return None;}
+        let bound=f[8..end].chunks_exact(2).find(|v|v[0]==user).map(|v|number(v[1]) as u32);
+        let assistants=&f[end..];
+        let following=assistants.chunks_exact(5).find(|v|v[1]==user)
+            .or_else(||bound.and_then(|idx|assistants.chunks_exact(5).find(|v|number(v[2]) as u32>idx)));
+        let a=following.map_or(0,|v|number(v[3]) as u32);
+        let error=following.map_or(&[][..],|v|v[4]);
+        let id=following.map_or(&[][..],|v|v[0]);
+        let mut flags=generation;
+        if a&4!=0{flags|=2;}if !error.is_empty(){flags|=32;}
+        if marker_present(f[6],"waitingForUserMarkers"){flags|=64;}
+        if marker_present(f[6],"interruptedMarkers"){flags|=128;}
+        if a&16!=0{flags|=256;}if a&2!=0{flags|=2048;}if a&8!=0{flags|=4096;}
+        let code=super::cpo_response_class(flags);
+        let (phase,source)=match code{
+            1=>("error","conversation-max-length"),2|6=>("error","assistant-error-stop"),
+            3=>("error","delivery-timeout"),4=>("error","retry-visible"),5=>("error","generation-error"),
+            7=>("waiting-for-user","waiting-for-user"),8=>("interrupted","interrupted"),
+            9=>("active","incomplete-tool-turn"),10=>("active","deep-research"),11=>("active","streaming"),12=>("active","generating"),
+            13=>("terminal","bound-assistant-turn"),_=>("transient-idle","transient-idle")
+        };
+        let active=matches!(code,9..=12);
+        let deep=(active||matches!(code,3..=5))&&generation&1024!=0;
+        let result_flags=u32::from(active&&generation&512!=0)|(u32::from(deep)<<1)|(u32::from(code==13)<<2)|(u32::from(active)<<3)|(u32::from(a&8!=0)<<4);
+        Some(vec![ascii(phase),ascii(source),user.to_vec(),id.to_vec(),conversation.to_vec(),ascii(&result_flags.to_string()),if code==6{error.to_vec()}else{Vec::new()}])
+    }
+    // Return index of first eligible semantic button in requested order.
+    fn semantic_button(f:&[&[u16]])->Option<Vec<u16>>{
+        if f.is_empty()||(f.len()-1)%4!=0{return None;}
+        let retry=eq(f[0],"1");
+        for (index,v) in f[1..].chunks_exact(4).enumerate(){
+            if !eq(v[0],"1"){continue;}
+            let test_id=lower_ascii(v[1]);let label=lower_ascii(trim(v[2]));let text=lower_ascii(trim(v[3]));
+            if retry&&(contains_units(&test_id,&ascii("retry"))||contains_units(&test_id,&ascii("regenerate"))){return Some(ascii(&index.to_string()));}
+            let matched=catalog_signal(if retry{"retryLabels"}else{"stopLabels"}).iter().any(|m|{
+                let units=ascii(m);
+                contains_units(&label,&units)||if retry{contains_units(&text,&units)}else{contains_units(&test_id,&ascii(&m.replace(' ',"-")))}
+            });
+            if matched{return Some(ascii(&index.to_string()));}
+        }
+        Some(Vec::new())
+    }
     fn execute(op:u32,f:&[&[u16]])->Option<Vec<Vec<u16>>>{
         let single=|v:Vec<u16>|Some(vec![v]);
         match op{
@@ -1793,6 +1903,10 @@ mod presentation_batch {
             19=>single(if valid_sequence_name(*f.first()?){ascii("1")}else{ascii("0")}),
             20=>failure_class(f),
             21=>scheduled_patch(f),
+            22=>single(assistant_error_prefix(f)?),
+            23=>turn_snapshot(f),
+            24=>bound_response(f),
+            25=>single(semantic_button(f)?),
             _=>None
         }
     }
@@ -1904,3 +2018,8 @@ mod final_native_policy_tests{
     if (stored==0||flags&2==0)&&(current==1||current==2){return 8;}
     0
  }
+
+#[no_mangle]
+pub extern "C" fn cpo_turn_cache_eligible(enabled:u32,index:u32,total:u32)->u32{
+    (enabled!=0&&index<total.saturating_sub(2)) as u32
+}

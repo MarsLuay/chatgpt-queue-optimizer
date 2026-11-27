@@ -290,3 +290,7 @@ Live job patches and the enqueue, claim, pause, resume, retry, completion, reset
 Restore reconciliation now publishes native handles before applying the classified recovery transaction, and failed transaction preconditions leave the native engine usable. Scheduled completion refuses to overwrite a record whose firing claim is no longer present. Native insertion calculates totals before inserting a new prompt, avoiding double counting when a declared total is stale.
 
 Native release verification includes the Rust tracked-file PEM scanner and Rust publishing tests. Run `cargo test --manifest-path Installers/native/Cargo.toml` for the native suite. The scanner is included in `npm run check` and managed publishing preflight.
+
+### Native provider observation migration (Queue ABI 14)
+
+ChatGPT command-turn snapshot construction, synthetic turn IDs, user/assistant association, bound response-state selection, error prefix recognition, semantic stop/retry matching and completed-turn cache eligibility now execute in Rust. Only metadata enters the snapshot batch; the host retains DOM references, weak caches and exact text equality. Fingerprint-only matching remains advisory; when exact expected text is provided, a fingerprint collision cannot upgrade a failed exact match. The original provider adapter remains as the transitional browser host facade. No provider or browser integration verification has been performed yet.
