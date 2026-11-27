@@ -3,6 +3,7 @@
     let core = null;
     let loading = null;
     let status = 'not loaded';
+    let durableSchema = null;
     const phases = ['','terminal','waiting','retry-wait','rollover-in-progress'];
     const delivery = ['','confirmed-submission','active-response','terminal-awaiting-bookkeeping'];
     const count = value => Number.isSafeInteger(value) && value >= 0 && value <= 0xffffffff ? value : null;
@@ -17,10 +18,13 @@
             'cpo_provider_host','cpo_provider_route','cpo_marker_contains','cpo_generation_state',
             'cpo_response_class','cpo_wait_failure','cpo_wait_settle','cpo_rollover_next','cpo_rollover_fresh','cpo_rollover_generation',
             'cpo_json_output','cpo_json_escape','cpo_json_wipe','cpo_json_token','cpo_tab_discard','cpo_tab_alarm',
-            'cpo_tab_reload_next','cpo_tab_recover_poll','cpo_tab_close_action'];
+            'cpo_tab_reload_next','cpo_tab_recover_poll','cpo_tab_close_action',
+            'cpo_durable_field_count','cpo_durable_field_rule','cpo_durable_field_name','cpo_durable_default',
+            'cpo_durable_number','cpo_durable_boolean','cpo_durable_retry_mode','cpo_durable_trim'];
         if (!names.every(name => typeof exports[name] === 'function') ||
-            exports.cpo_queue_abi() !== 4 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
+            exports.cpo_queue_abi() !== 5 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
         core = exports;
+        durableSchema = null;
         status = 'Rust/WASM';
     }
     function fail(error) {
@@ -199,6 +203,151 @@
             if(output)try{e.cpo_json_wipe(output.length);}catch{}
         }
     }
+    // The field list and conversion rules come from Rust. JS only reads and
+    // writes structured-clone values because browser storage accepts objects.
+    function getDurableSchema() {
+        if (durableSchema) return durableSchema;
+        const e=core;
+        const size=e.cpo_durable_field_count()>>>0;
+        if(!size||size>128)throw new Error('Invalid durable schema');
+        const fields=[];
+        const seen=new Set();
+        for(let i=0;i<size;i++){
+            let name='';
+            for(let offset=0;offset<64;offset+=4){
+                const packed=e.cpo_durable_field_name(i,offset)>>>0;
+                if(!packed)break;
+                for(let byte=0;byte<4;byte++){
+                    const ch=(packed>>>(byte*8))&255;
+                    if(!ch)break;
+                    name+=String.fromCharCode(ch);
+                }
+            }
+            if(!/^[a-zA-Z][a-zA-Z0-9]*$/.test(name)||seen.has(name)||
+                ['constructor','prototype'].includes(name))throw new Error('Invalid durable field');
+            seen.add(name);
+            fields.push({name,project:e.cpo_durable_field_rule(i,0)>>>0,restore:e.cpo_durable_field_rule(i,1)>>>0});
+        }
+        durableSchema=fields;
+        return fields;
+    }
+    function durableTrim(text) {
+        const size=core.cpo_fingerprint_capacity()>>>0;
+        if(!size||size>1024)throw new Error('Invalid trim capacity');
+        const edge=chunk=>{
+            const packed=withUnits(chunk,(e,n)=>e.cpo_durable_trim(n));
+            if(packed==null||packed===0xffffffff)throw new Error('Native trim failed');
+            return [packed&2047,(packed>>>11)&2047];
+        };
+        let start=0,end=text.length;
+        while(start<end){
+            const chunk=text.slice(start,Math.min(start+size,end));
+            const [left]=edge(chunk);
+            start+=left;
+            if(left<chunk.length)break;
+        }
+        while(end>start){
+            const from=Math.max(start,end-size);
+            const chunk=text.slice(from,end);
+            const [left,right]=edge(chunk);
+            if(left===chunk.length){end=from;continue;}
+            end=from+right;
+            break;
+        }
+        return start===0&&end===text.length?text:text.slice(start,end);
+    }
+    function durableObject(source, mode, now=Date.now(), createId=()=>crypto.randomUUID()) {
+        if(!core)return null;
+        if(!source||typeof source!=='object'||Array.isArray(source))return {ok:false,error:'Invalid durable job'};
+        const e=core;
+        const out={};
+        const read=name=>Object.prototype.hasOwnProperty.call(source,name)?source[name]:undefined;
+        const reject=field=>({ok:false,error:'Invalid durable field: '+field});
+        const defaultText=(rule)=>{
+            const flags=Number(!!out.conversationId)|(Number(read('targetKey')==='chatgpt:new')<<1)|
+                (Number(read('waitForIdleBeforeSend')===true)<<2)|(Number(!!out.currentMessage)<<3);
+            const code=e.cpo_durable_default(rule,mode,flags)>>>0;
+            switch(code){
+                case 1:return '';
+                case 2:return null;
+                case 3:return 'chatgpt';
+                case 4:return 'existing';
+                case 5:return 'new';
+                case 6:return 'unknown';
+                case 7:return out.conversationId?out.provider+':c:'+out.conversationId:out.provider+':'+out.conversationType;
+                case 8:return createId();
+                case 9:return 'queued';
+                case 10:return 'waiting-for-idle';
+                case 11:return 'waiting';
+                default:throw new Error('Unknown durable default');
+            }
+        };
+        try{
+            for(const field of getDurableSchema()){
+                const rule=mode===0?field.project:field.restore;
+                const key=field.name;
+                const v=read(key);
+                if(rule===6){
+                    if(v!=null&&!Array.isArray(v))return reject(key);
+                    const queue=[];
+                    for(const item of v||[]){
+                        if(typeof item!=='string')return reject(key);
+                        const text=mode===1?durableTrim(item):item;
+                        if(mode===0||text)queue.push(text);
+                    }
+                    out[key]=queue;
+                }else if(rule===7){
+                    if(v!=null&&typeof v!=='string')return reject(key);
+                    const text=mode===1?durableTrim(v||''):v||'';
+                    out[key]=text||defaultText(rule);
+                }else if([3,4,13,14].includes(rule)){
+                    if(mode===1&&v!=null&&typeof v!=='boolean')return reject(key);
+                    if(mode===1&&rule===14&&v===true)return reject(key);
+                    const flags=Number(v===true)|(Number(v===false)<<1)|(Number(!!v)<<2)|(Number(read('isPaused')===true)<<3);
+                    out[key]=e.cpo_durable_boolean(rule,mode,flags)===1;
+                }else if([5,16,17,18].includes(rule)){
+                    // Numeric strings in older checkpoints are accepted, but
+                    // objects, fractional counters and unsafe timestamps are not.
+                    if(v!=null&&typeof v!=='number'&&typeof v!=='string')return reject(key);
+                    if(mode===0&&rule===16&&v===undefined){out[key]=undefined;continue;}
+                    const n=Number(v||0);
+                    const value=e.cpo_durable_number(rule,mode,n,now);
+                    if(!Number.isFinite(value))return reject(key);
+                    if(rule===17){
+                        const completed=Number(read('completedCount')||0);
+                        const done=e.cpo_durable_number(5,mode,completed,now);
+                        if(!Number.isFinite(done)||!Number.isSafeInteger(done+out.queue.length+Number(!!out.currentMessage)))return reject(key);
+                        const remaining=out.queue.length+Number(!!out.currentMessage);
+                        out[key]=value<=0xffffffff&&done<=0xffffffff&&done+remaining<=0xffffffff?
+                            e.cpo_queue_total(value,done,remaining)>>>0:Math.max(value,done+remaining);
+                    }else out[key]=value;
+                }else if(rule===15){
+                    if(v!=null&&typeof v!=='string')return reject(key);
+                    const code=v==='finite'?1:v==='unlimited'?2:v?3:0;
+                    const selected=e.cpo_durable_retry_mode(mode,code);
+                    out[key]=selected===1?'finite':selected===2?'unlimited':selected===3?v:'';
+                }else{
+                    if(v!=null&&typeof v!=='string')return reject(key);
+                    out[key]=v||defaultText(rule);
+                }
+            }
+            if(mode===1){
+                if(e.cpo_restore_eligible(out.tabId,out.queue.length,Number(!!out.currentMessage),Number(out.isStopped))!==1)return {ok:false,error:'Durable job is inactive or empty'};
+                if(out.currentMessage&&!out.currentCommandNumber){
+                    if(out.completedCount>=Number.MAX_SAFE_INTEGER)return reject('currentCommandNumber');
+                    out.currentCommandNumber=out.completedCount+1;
+                }
+            }
+            return {ok:true,value:out};
+        }catch(error){
+            // An engine failure is distinct from a rejected checkpoint. The
+            // existing compatibility path handles unavailable native execution.
+            fail(error);
+            return null;
+        }
+    }
+    function projectDurable(job){return durableObject(job,0);}
+    function deserializeDurable(raw,now,createId){return durableObject(raw,1,now,createId);}
     function tabDiscard(tab, stage, mode, minutes, now, provider, work=false, unchanged=false, safe=false) {
         const flags=Number(!!tab && Number.isInteger(tab.id)) |
             (Number(tab?.active===false)<<1) | (Number(tab?.status==='complete')<<2) |
@@ -245,7 +394,7 @@
             (Number(!!job.waitForIdleBeforeSend) << 6);
         return call('cpo_queue_next', [flags, phase, job.queue.length]);
     }
-    const api = { load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, tabDiscard, install, get status() { return status; } };
+    const api = { load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, tabDiscard, install, get status() { return status; } };
     globalThis.CpoQueueEngine = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();
