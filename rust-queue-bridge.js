@@ -20,9 +20,11 @@
             'cpo_json_output','cpo_json_escape','cpo_json_wipe','cpo_json_token','cpo_tab_discard','cpo_tab_alarm',
             'cpo_tab_reload_next','cpo_tab_recover_poll','cpo_tab_close_action',
             'cpo_durable_field_count','cpo_durable_field_rule','cpo_durable_field_name','cpo_durable_default',
-            'cpo_durable_number','cpo_durable_boolean','cpo_durable_retry_mode','cpo_durable_trim'];
+            'cpo_durable_number','cpo_durable_boolean','cpo_durable_retry_mode','cpo_durable_trim',
+            'cpo_setting_number','cpo_setting_bool','cpo_popup_status','cpo_popup_remaining',
+            'cpo_log_duplicate','cpo_log_keep_start','cpo_log_limit','cpo_log_sensitive'];
         if (!names.every(name => typeof exports[name] === 'function') ||
-            exports.cpo_queue_abi() !== 5 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
+            exports.cpo_queue_abi() !== 6 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
         core = exports;
         durableSchema = null;
         status = 'Rust/WASM';
@@ -348,6 +350,37 @@
     }
     function projectDurable(job){return durableObject(job,0);}
     function deserializeDurable(raw,now,createId){return durableObject(raw,1,now,createId);}
+    function settings(source,mode='optimizer') {
+        if(!core)return null;
+        const out={};
+        const bool=(key,defaultValue)=> {
+            if(Object.prototype.hasOwnProperty.call(source,key)){
+                out[key]=core.cpo_setting_bool(Number(defaultValue),source[key]===true?2:source[key]===false?1:0)===1;
+            }
+        };
+        try{
+            if(mode==='queue'){
+                bool('queueUnlimitedRetryWait',false);bool('queueDeepResearchAware',true);bool('queueDeliveryTimeoutRefresh',true);
+            }else{
+                for(const [i,key] of ['windowSize','batchSize','resourceBudget','inactiveTabMinutes'].entries()){
+                    if(Object.prototype.hasOwnProperty.call(source,key))out[key]=core.cpo_setting_number(i,Number(source[key]))>>>0;
+                }
+                for(const key of ['enabled','autoScroll','offscreenRendering','adaptiveBudget','evictPausedMedia'])bool(key,key==='enabled'||key==='autoScroll');
+            }
+            return out;
+        }catch(error){fail(error);return null;}
+    }
+    function remaining(jobs) {
+        if(!core)return null;
+        try{
+            let total=0;
+            for(const job of Object.values(jobs||{}))total=core.cpo_popup_remaining(total,Number(job?.remaining||0));
+            return total;
+        }catch(error){fail(error);return null;}
+    }
+    function sensitiveKey(normalized) {
+        return withUnits(normalized,(e,n)=>e.cpo_log_sensitive(n));
+    }
     function tabDiscard(tab, stage, mode, minutes, now, provider, work=false, unchanged=false, safe=false) {
         const flags=Number(!!tab && Number.isInteger(tab.id)) |
             (Number(tab?.active===false)<<1) | (Number(tab?.status==='complete')<<2) |
@@ -394,7 +427,7 @@
             (Number(!!job.waitForIdleBeforeSend) << 6);
         return call('cpo_queue_next', [flags, phase, job.queue.length]);
     }
-    const api = { load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, tabDiscard, install, get status() { return status; } };
+    const api = { load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, settings, remaining, sensitiveKey, tabDiscard, install, get status() { return status; } };
     globalThis.CpoQueueEngine = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();
