@@ -1,7 +1,7 @@
 //! Queue execution decisions and streaming legacy-compatible UTF-16 fingerprints.
 
 #[no_mangle]
-pub extern "C" fn cpo_queue_abi() -> u32 { 16 }
+pub extern "C" fn cpo_queue_abi() -> u32 { 17 }
 
 const OFFSET: u32 = 2166136261;
 const PRIME: u32 = 16777619;
@@ -1913,6 +1913,9 @@ mod presentation_batch {
             28=>provider_generation_text(f),
             29=>provider_diagnostics(f),
             30=>provider_generation_state(f),
+            31=>turn_metadata_finish(f),
+            32=>turn_metadata_lookup(f),
+            33=>last_assistant_observation(f),
             _=>None
         }
     }

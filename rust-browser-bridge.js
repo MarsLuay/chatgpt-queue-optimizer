@@ -496,7 +496,7 @@
                     const node = ctx.dirtyNode;
                     if (!node || ctx.dirty.has(node)) return 0;
                     ctx.dirty.add(node);
-                    ctx.adapter._turnScanCache.delete(node);
+                    ctx.adapter.invalidateNativeTurn(node);
                     ctx.dirtyNode = node.parentElement;
                     return 1;
                 }
@@ -746,7 +746,6 @@
     'use strict';
 
     const PROVIDER_CODES = { chatgpt: 1, gemini: 2, claude: 3 };
-    const nativeContains = (text, marker) => requireNative(globalThis.CpoQueueEngine?.contains(text,marker));
     function nativeRoute(provider, pathname) {
         const engine=globalThis.CpoQueueEngine;
         const route=engine?.providerRoute(PROVIDER_CODES[provider],pathname);
@@ -826,10 +825,6 @@
             (Number(!!node?.querySelector?.('[data-message-author-role="assistant"]'))<<3);
         const native=engine?.nodeRole(flags);
         return ['','user','assistant'][requireNative(native)]||'';
-    }
-
-    function getNodeText(node) {
-        return normalizeCommandText(node?.innerText || node?.textContent || '');
     }
 
     const ASSISTANT_ERROR_STATUS_ATTRIBUTES = [
@@ -1197,6 +1192,7 @@
         }
     }
 
+    let nextTurnCacheScope=1;
     class ChatGPTAdapter extends ProviderAdapter {
         constructor() {
             super('chatgpt', 'ChatGPT', {
@@ -1206,7 +1202,9 @@
             });
             this.compatibilitySignals = CHATGPT_COMPATIBILITY_SIGNALS;
             this._turnScanCacheEnabled = false;
-            this._turnScanCache = new WeakMap();
+            this._turnCacheScope=nextTurnCacheScope++;
+            this._turnCacheTokens=new WeakMap();
+            this._nextTurnCacheToken=1;
             this._turnListCache = null;
             this._turnListCacheTimer = null;
             this._nativeMessageDiscovery = null;
@@ -1221,15 +1219,35 @@
             this._nativeLifecycle = engine || null;
         }
 
+        clearNativeTurnMetadata(){
+            if(this._turnCacheScope)globalThis.CpoQueueEngine?.invalidateProviderTurn(this._turnCacheScope);
+            this._turnCacheTokens=new WeakMap();
+            this._nextTurnCacheToken=1;
+        }
+        invalidateNativeTurn(node){
+            const token=this._turnCacheTokens.get(node);
+            if(token){
+                globalThis.CpoQueueEngine?.invalidateProviderTurn(this._turnCacheScope,token);
+                this._turnCacheTokens.delete(node);
+            }
+        }
+        turnCacheToken(node){
+            let token=this._turnCacheTokens.get(node);
+            if(token)return token;
+            if(this._nextTurnCacheToken>0xffffffff)this.clearNativeTurnMetadata();
+            token=this._nextTurnCacheToken++;
+            this._turnCacheTokens.set(node,token);
+            return token;
+        }
         clearTurnListCache() {
             clearTimeout(this._turnListCacheTimer);
             this._turnListCacheTimer = null;
+            if(this._turnListCache)this.clearNativeTurnMetadata();
             this._turnListCache = null;
         }
-
         setTurnScanCacheEnabled(enabled) {
             this._turnScanCacheEnabled = enabled === true;
-            this._turnScanCache = new WeakMap();
+            this.clearNativeTurnMetadata();
             this.clearTurnListCache();
         }
 
@@ -1325,10 +1343,7 @@
         }
 
         getAssistantTurnErrorSignal(text) {
-            // Prefix matching needs only the longest marker plus its boundary.
-            const markers=this.compatibilitySignals.errorMarkers||[];
-            const length=Math.max(0,...markers.map(marker=>marker.length))+1;
-            return requireNative(globalThis.CpoQueueEngine?.textBatch(22,[String(text||'').slice(0,length)]));
+            return requireNative(globalThis.CpoQueueEngine?.providerTurnMetadata(0,0,2,()=>String(text||''))).errorSignal;
         }
 
         getCommandTurnSnapshot(doc = (typeof document !== 'undefined' ? document : null), options = {}) {
@@ -1352,18 +1367,12 @@
                 const node=turns[index];
                 const role=getNodeRole(node,this._nativeSelectorEngine);
                 const cacheable=requireNative(globalThis.CpoQueueEngine?.call('cpo_turn_cache_eligible',[Number(this._turnScanCacheEnabled),index,turns.length]))===1;
-                const existing=cacheable?this._turnScanCache.get(node):null;
-                const memo=existing?.role===role?existing:null;
-                let text=null,fingerprint,hasText,errorSignal;
-                if(memo){({fingerprint,hasText,errorSignal}=memo);}
-                else{
-                    text=getNodeText(node);
-                    fingerprint=fingerprintCommandText(text);
-                    hasText=text.length>0;
-                    errorSignal=role==='assistant'?this.getAssistantTurnErrorSignal(text):'';
-                    if(cacheable)this._turnScanCache.set(node,{role,fingerprint,hasText,errorSignal});
-                }
-                const exact=!!expectedText&&fingerprint===expectedTextFingerprint&&(text===null?getNodeText(node):text)===expectedText;
+                const roleCode=role==='user'?1:role==='assistant'?2:0;
+                const token=cacheable?this.turnCacheToken(node):0;
+                let raw=null;
+                const readText=()=>raw??(raw=String(node?.innerText||node?.textContent||''));
+                const {fingerprint,hasText,errorSignal}=requireNative(globalThis.CpoQueueEngine?.providerTurnMetadata(cacheable?this._turnCacheScope:0,token,roleCode,readText));
+                const exact=!!expectedText&&fingerprint===expectedTextFingerprint&&normalizeCommandText(readText())===expectedText;
                 const assistant=role==='assistant';
                 const streaming=assistant&&!!node.querySelector?.('[data-message-streaming="true"], [data-is-streaming="true"], .result-streaming');
                 const errorStop=assistant&&hasAssistantErrorStop(node,this._nativeSelectorEngine);
@@ -1747,32 +1756,13 @@
 
             const text = (latestTurn.innerText || latestTurn.textContent || '').trim();
             const alertMatches = this.getSelectorNodes(latestTurn, 'errorAlerts');
-            const alertText = alertMatches
-                .map(match => match.element.innerText || match.element.textContent || '')
-                .join(' ')
-                .toLowerCase()
-                .replace(/\s+/g, ' ')
-                .trim();
-
-            const hasDeliveryTimeout=!!requireNative(globalThis.CpoQueueEngine?.providerMarker(4,alertText));
-            const hasGeneralError=!!requireNative(globalThis.CpoQueueEngine?.providerMarker(5,alertText));
-            const hasErrorStop = hasAssistantErrorStop(latestTurn, this._nativeSelectorEngine);
-            const errorSignal = this.getAssistantTurnErrorSignal(text);
-            const hasError = hasDeliveryTimeout || hasGeneralError || hasErrorStop || !!errorSignal;
-
-            const retryBtn = this.getRetryButton(latestTurn);
-            const hasRetry = !!retryBtn;
-
-            return {
-                isAssistant: true,
-                text,
-                hasError,
-                hasErrorStop,
-                hasDeliveryTimeout,
-                hasRetry,
-                errorSignal,
-                hasCompletedText: isAssistant && !hasError && !hasRetry && text.length > 0
-            };
+            const alertText=alertMatches.map(match=>match.element.innerText||match.element.textContent||'').join(' ');
+            const hasErrorStop=hasAssistantErrorStop(latestTurn,this._nativeSelectorEngine);
+            const hasRetry=!!this.getRetryButton(latestTurn);
+            const settlementFlags=Number(hasErrorStop)|(Number(hasRetry)<<1)|(Number(text.length>0)<<2);
+            const errorSignal=this.getAssistantTurnErrorSignal(text);
+            const state=requireNative(globalThis.CpoQueueEngine?.providerLastAssistant(settlementFlags,alertText,errorSignal));
+            return {isAssistant:true,text,hasErrorStop,hasRetry,...state};
         }
 
         getMainRoot(doc = (typeof document !== 'undefined' ? document : null)) {

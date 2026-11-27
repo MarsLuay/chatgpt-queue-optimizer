@@ -24,9 +24,9 @@
             'cpo_durable_number','cpo_durable_boolean','cpo_durable_retry_mode','cpo_durable_trim',
             'cpo_setting_number','cpo_setting_bool','cpo_popup_status','cpo_popup_remaining','cpo_popup_schedule_actions',
             'cpo_log_duplicate','cpo_log_keep_start','cpo_log_limit','cpo_log_sensitive',
-            'cpo_event_code','cpo_content_event_kind','cpo_api_mode','cpo_api_path','cpo_injection_route','cpo_async_transition','cpo_live_new','cpo_live_delete','cpo_live_epoch','cpo_live_len','cpo_live_input','cpo_live_write','cpo_live_read','cpo_live_output','cpo_live_wipe','cpo_catalog_len','cpo_catalog_items','cpo_catalog_word','cpo_enter_eligible','cpo_enter_action','cpo_provider_predicate','cpo_log_plan','cpo_diag_pick','cpo_diag_reset','cpo_diag_update','cpo_diag_finish','cpo_log_walk_begin','cpo_log_walk_plan','cpo_log_walk_next','cpo_log_walk_close','cpo_batch_input','cpo_batch_run','cpo_batch_output','cpo_batch_wipe','cpo_keyboard_event','cpo_local_date_match','cpo_timestamp_valid','cpo_timestamp_math','cpo_live_transaction','cpo_job_binding','cpo_turn_cache_eligible'];
+            'cpo_event_code','cpo_content_event_kind','cpo_api_mode','cpo_api_path','cpo_injection_route','cpo_async_transition','cpo_live_new','cpo_live_delete','cpo_live_epoch','cpo_live_len','cpo_live_input','cpo_live_write','cpo_live_read','cpo_live_output','cpo_live_wipe','cpo_catalog_len','cpo_catalog_items','cpo_catalog_word','cpo_enter_eligible','cpo_enter_action','cpo_provider_predicate','cpo_log_plan','cpo_diag_pick','cpo_diag_reset','cpo_diag_update','cpo_diag_finish','cpo_log_walk_begin','cpo_log_walk_plan','cpo_log_walk_next','cpo_log_walk_close','cpo_batch_input','cpo_batch_run','cpo_batch_output','cpo_batch_wipe','cpo_keyboard_event','cpo_local_date_match','cpo_timestamp_valid','cpo_timestamp_math','cpo_live_transaction','cpo_job_binding','cpo_turn_cache_eligible','cpo_turn_text_reset','cpo_turn_text_update','cpo_turn_cache_invalidate'];
         if (!names.every(name => typeof exports[name] === 'function') ||
-            exports.cpo_queue_abi() !== 16 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
+            exports.cpo_queue_abi() !== 17 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
         core = exports;
         durableSchema = null;
         catalogCache.clear();
@@ -697,6 +697,37 @@
         if(op===7)patch.completedAt=Number(eventTime);
         Object.assign(item,patch);return true;
     }
+    function providerTurnMetadata(scope,token,role,readText){
+        if(!core)return null;
+        const key=[scope,token,role];
+        let result=scope&&token?batch(32,key):[];
+        if(result==null)return null;
+        if(result.length===3)return {fingerprint:result[0],hasText:result[1]==='1',errorSignal:result[2]};
+        const e=core;
+        let input;
+        try{
+            const value=String(readText()||'');
+            const capacity=e.cpo_fingerprint_capacity()>>>0;
+            if(!capacity||capacity>4096)throw new Error('Invalid native text capacity');
+            input=new Uint16Array(e.memory.buffer,e.cpo_fingerprint_buffer()>>>0,capacity);
+            e.cpo_turn_text_reset();
+            for(let start=0;start<value.length;start+=capacity){
+                const n=Math.min(capacity,value.length-start);
+                for(let i=0;i<n;i++)input[i]=value.charCodeAt(start+i);
+                if(e.cpo_turn_text_update(n)!==1)throw new Error('Native turn scan failed');
+            }
+            result=batch(31,key);
+            return result?.length===3?{fingerprint:result[0],hasText:result[1]==='1',errorSignal:result[2]}:null;
+        }catch(error){fail(error);return null;}
+        finally{try{input?.fill(0);}catch{}try{e.cpo_turn_text_reset();}catch{}}
+    }
+    function invalidateProviderTurn(scope,token=0){return call('cpo_turn_cache_invalidate',[scope,token])===1;}
+    function providerLastAssistant(flags,alerts,errorSignal){
+        const v=batch(33,[flags,alerts,errorSignal]);
+        if(v?.length!==2)return null;
+        const result=Number(v[0]);
+        return {hasError:!!(result&1),hasDeliveryTimeout:!!(result&2),hasCompletedText:!!(result&4),errorSignal:v[1]};
+    }
     function providerTurnSnapshot(rows,expectedFingerprint,exactRequired){
         const result=batch(23,[expectedFingerprint||'',Number(exactRequired),...rows.flat()]);
         if(!result||result.length<3||(result.length-3)%7!==0)return null;
@@ -910,7 +941,7 @@
             (Number(!!job.waitForIdleBeforeSend) << 6);
         return call('cpo_queue_next', [flags, phase, job.queue.length]);
     }
-    const api = { providerGenerationState, providerMarker, providerButtons, providerGenerationText, providerDiagnostics, providerTurnSnapshot, providerBoundResponse, providerSemanticButton, classifyFailure, bindingDecision, scheduledMutation, sequenceName, validSequenceName, sequenceVariables, keyboardEvent, localDateParts, localDateMatches, localDateInput, timestampValid, timestampMath, batch, textBatch, scheduledSort, scheduledLookup, scheduledWithout, scheduledDue, identityKey, continuationHandoff, supportedTabs, popupStatus, popupRunningLabel, popupScheduledLabel, popupStats, providerCatalog, diagnosticText, diagnosticPick, sanitizeDiagnostic, createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
+    const api = { providerTurnMetadata, invalidateProviderTurn, providerLastAssistant, providerGenerationState, providerMarker, providerButtons, providerGenerationText, providerDiagnostics, providerTurnSnapshot, providerBoundResponse, providerSemanticButton, classifyFailure, bindingDecision, scheduledMutation, sequenceName, validSequenceName, sequenceVariables, keyboardEvent, localDateParts, localDateMatches, localDateInput, timestampValid, timestampMath, batch, textBatch, scheduledSort, scheduledLookup, scheduledWithout, scheduledDue, identityKey, continuationHandoff, supportedTabs, popupStatus, popupRunningLabel, popupScheduledLabel, popupStats, providerCatalog, diagnosticText, diagnosticPick, sanitizeDiagnostic, createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
     globalThis.CpoQueueEngine = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();

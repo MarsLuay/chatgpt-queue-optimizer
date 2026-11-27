@@ -123,3 +123,130 @@ mod additional_provider_tests{
     result.push(ascii(&state.to_string()));result.push(ascii(&facts.to_string()));
     Some(result)
  }
+
+
+// Store only bounded metadata, never full prompts or browser object handles.
+const TURN_CACHE_LIMIT:usize=4096;
+const TURN_PREFIX:usize=128;
+struct TurnMetadata{role:u32,fingerprint:Vec<u16>,has_text:bool,error:Vec<u16>}
+impl TurnMetadata{
+    fn fields(&self)->Vec<Vec<u16>>{vec![self.fingerprint.clone(),ascii(if self.has_text{"1"}else{"0"}),self.error.clone()]}
+}
+struct TurnText{fingerprint:super::Fingerprint,prefix:[u16;TURN_PREFIX],used:usize}
+impl TurnText{
+    fn new()->Self{Self{fingerprint:super::Fingerprint::new(),prefix:[0;TURN_PREFIX],used:0}}
+    fn push(&mut self,unit:u16){
+        self.fingerprint.push(unit);
+        if self.used<TURN_PREFIX{self.prefix[self.used]=unit;self.used+=1;}
+    }
+    fn update(&mut self,units:&[u16]){
+        for &unit in units{
+            if super::whitespace(unit){
+                if self.fingerprint.len!=0{self.fingerprint.pending=true;}
+            }else{
+                if self.fingerprint.pending{self.push(32);self.fingerprint.pending=false;}
+                self.push(unit);
+            }
+        }
+    }
+    fn metadata(&self,role:u32)->TurnMetadata{
+        let error=if role==2{first_marker(&lower_ascii(&self.prefix[..self.used]),provider_group("errorMarkers"),true)}else{Vec::new()};
+        TurnMetadata{role,fingerprint:ascii(&format!("fnv1a:{:x}:len:{}",self.fingerprint.hash,self.fingerprint.len)),has_text:self.fingerprint.len!=0,error}
+    }
+}
+thread_local!{
+    static TURN_TEXT:RefCell<TurnText>=RefCell::new(TurnText::new());
+    static TURN_CACHE:RefCell<std::collections::BTreeMap<(u32,u32),TurnMetadata>>=RefCell::new(std::collections::BTreeMap::new());
+}
+#[no_mangle]
+pub extern "C" fn cpo_turn_text_reset(){
+    TURN_TEXT.with(|state|{let mut state=state.borrow_mut();state.prefix.fill(0);*state=TurnText::new();});
+}
+#[cfg(target_arch="wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_turn_text_update(len:u32)->u32{
+    if len as usize>super::CHUNK{return 0;}
+    unsafe{
+        let ptr=super::cpo_fingerprint_buffer() as *mut u16;
+        let input=core::slice::from_raw_parts(ptr,len as usize);
+        TURN_TEXT.with(|state|state.borrow_mut().update(input));
+        for i in 0..len as usize{core::ptr::write_volatile(ptr.add(i),0);}
+    }
+    1
+}
+#[no_mangle]
+pub extern "C" fn cpo_turn_cache_invalidate(scope:u32,token:u32)->u32{
+    TURN_CACHE.with(|cache|{
+        let mut cache=cache.borrow_mut();
+        if token==0{cache.retain(|(owner,_),_|*owner!=scope);}
+        else{cache.remove(&(scope,token));}
+    });1
+}
+fn turn_key(f:&[&[u16]])->Option<(u32,u32,u32)>{
+    if f.len()!=3{return None;}
+    let scope=number(f[0]);let token=number(f[1]);let role=number(f[2]);
+    if [scope,token,role].iter().any(|v|!v.is_finite()||*v<0.0||*v>u32::MAX as f64||v.fract()!=0.0)||role>2.0{return None;}
+    Some((scope as u32,token as u32,role as u32))
+}
+fn turn_metadata_finish(f:&[&[u16]])->Option<Vec<Vec<u16>>>{
+    let (scope,token,role)=turn_key(f)?;
+    let metadata=TURN_TEXT.with(|state|state.borrow().metadata(role));
+    cpo_turn_text_reset();
+    let fields=metadata.fields();
+    if scope!=0&&token!=0{
+        TURN_CACHE.with(|cache|{
+            let mut cache=cache.borrow_mut();
+            if cache.len()>=TURN_CACHE_LIMIT&&!cache.contains_key(&(scope,token)){
+                if let Some(key)=cache.keys().next().copied(){cache.remove(&key);}
+            }
+            cache.insert((scope,token),metadata);
+        });
+    }
+    Some(fields)
+}
+fn turn_metadata_lookup(f:&[&[u16]])->Option<Vec<Vec<u16>>>{
+    let (scope,token,role)=turn_key(f)?;
+    Some(TURN_CACHE.with(|cache|cache.borrow().get(&(scope,token)).filter(|m|m.role==role).map_or_else(Vec::new,TurnMetadata::fields)))
+}
+// Error prefix has already been computed by the streaming text scanner.
+fn last_assistant_observation(f:&[&[u16]])->Option<Vec<Vec<u16>>>{
+    if f.len()!=3{return None;}
+    let flags=number(f[0]) as u32;
+    let alerts=lower_ascii(&normalize(f[1]));
+    let timeout=!first_marker(&alerts,provider_group("deliveryTimeoutMarkers"),false).is_empty();
+    let general=!first_marker(&alerts,provider_group("errorMarkers"),false).is_empty();
+    let has_error=timeout||general||flags&1!=0||!f[2].is_empty();
+    let completed=flags&4!=0&&!has_error&&flags&2==0;
+    let result=u32::from(has_error)|(u32::from(timeout)<<1)|(u32::from(completed)<<2);
+    Some(vec![ascii(&result.to_string()),f[2].to_vec()])
+}
+#[cfg(test)]
+mod turn_cache_tests{
+    use super::*;
+    fn frame(scope:u32,token:u32,role:u32)->Vec<Vec<u16>>{[scope,token,role].iter().map(|v|ascii(&v.to_string())).collect()}
+    #[test]fn streaming_metadata_and_cache_invalidation(){
+        cpo_turn_text_reset();
+        TURN_TEXT.with(|state|{let mut state=state.borrow_mut();state.update(&ascii("  Something  "));state.update(&ascii("went wrong.\n"));state.update(&ascii("More text"));});
+        let values=frame(1,1,2);let refs=values.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let metadata=turn_metadata_finish(&refs).unwrap();
+        let mut expected=super::super::Fingerprint::new();expected.update(&ascii("Something went wrong. More text"));
+        assert_eq!(metadata[0],ascii(&format!("fnv1a:{:x}:len:{}",expected.hash,expected.len)));
+        assert_eq!(metadata[1],ascii("1"));assert_eq!(metadata[2],ascii("something went wrong"));
+        assert_eq!(turn_metadata_lookup(&refs).unwrap(),metadata);
+        let wrong=frame(1,1,1);let wrong_refs=wrong.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        assert!(turn_metadata_lookup(&wrong_refs).unwrap().is_empty());
+        cpo_turn_cache_invalidate(1,1);
+        assert!(turn_metadata_lookup(&refs).unwrap().is_empty());
+    }
+    #[test]fn cache_bounded_and_scope_clear(){
+        TURN_CACHE.with(|cache|cache.borrow_mut().clear());
+        for token in 1..=TURN_CACHE_LIMIT as u32+2{
+            TURN_TEXT.with(|state|state.borrow_mut().update(&ascii("x")));
+            let values=frame(2,token,1);let refs=values.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            turn_metadata_finish(&refs).unwrap();
+        }
+        TURN_CACHE.with(|cache|assert_eq!(cache.borrow().len(),TURN_CACHE_LIMIT));
+        cpo_turn_cache_invalidate(2,0);
+        TURN_CACHE.with(|cache|assert!(cache.borrow().is_empty()));
+    }
+}

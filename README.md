@@ -302,3 +302,7 @@ ChatGPT command-turn snapshot construction, synthetic turn IDs, user/assistant a
 ### Native turn discovery and complete generation-state settlement (queue ABI 16; browser ABI 11)
 
 The Rust browser engine selects combined DOM-order turn discovery or individual-selector fallback and deduplicates results using opaque DOM identities. The Rust queue engine now combines native text observations with stop, streaming, spinner, error and retry signals to settle generation state for all three providers in one batch. The already removed standalone adapter stays removed; remaining browser bindings live in the bridge. Native compilation and live browser parity remain unverified.
+
+### Native bounded turn metadata cache (queue ABI 17)
+
+Completed-turn fingerprints, normalized-prefix error detection, text presence and memoization now run in Rust. The native cache retains at most 4,096 metadata records keyed by weak browser identity tokens; no complete prompt or DOM node is retained by it. Mutation callbacks invalidate affected tokens, and structural/periodic reconciliation drops the scope. Streaming text processing uses fixed-size UTF-16 buffers and avoids allocating normalized copies of unrelated turns. Exact matching still uses the actual normalized browser text. Last-assistant error/completion settlement also uses native policy. Browser engine ABI remains 11. Native compilation and browser parity are unverified.

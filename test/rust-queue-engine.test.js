@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 16);
+    assert.equal(e.cpo_queue_abi(), 17);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -559,4 +559,25 @@ test('native provider generation state resolves errors, capacity, retry and prog
     assert.equal(external.hasKnownError,true);
     assert.equal(external.deepResearchActive,false);
     assert.equal(external.research,'thinking');
+});
+
+test('native turn metadata streams fingerprints and avoids reading cached DOM text',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    let reads=0;
+    const source='  Something    went wrong. '+('large text '.repeat(2000));
+    const metadata=engine.providerTurnMetadata(7,1,2,()=>{reads++;return source;});
+    assert.equal(metadata.fingerprint,engine.fingerprint(source));
+    assert.equal(metadata.errorSignal,'something went wrong');
+    assert.equal(metadata.hasText,true);
+    assert.deepEqual(engine.providerTurnMetadata(7,1,2,()=>{throw Error('cache miss');}),metadata);
+    assert.equal(reads,1);
+    assert.equal(engine.invalidateProviderTurn(7,1),true);
+    assert.equal(engine.providerTurnMetadata(7,1,2,()=>{reads++;return 'changed';}).errorSignal,'');
+    assert.equal(reads,2);
+    assert.equal(engine.providerTurnMetadata(7,1,1,()=>source).errorSignal,'');
+    assert.equal(engine.invalidateProviderTurn(7),true);
+    assert.equal(engine.providerTurnMetadata(7,1,2,()=> '  ').hasText,false);
+    assert.deepEqual(engine.providerLastAssistant(4,'',''),{hasError:false,hasDeliveryTimeout:false,hasCompletedText:true,errorSignal:''});
+    assert.equal(engine.providerLastAssistant(4,'Message delivery timed out','').hasCompletedText,false);
 });

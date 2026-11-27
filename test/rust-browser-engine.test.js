@@ -204,7 +204,7 @@ test('Rust mutation engine skips streaming and banner changes, invalidates provi
     assert.equal(bridge.mutations([attr], 0), true);
     assert.equal(bridge.mutations([stream], 0, true), true);
     const cache = new WeakMap([[parent, 1], [target, 2]]);
-    assert.equal(bridge.mutations([stream], 1, false, {_turnScanCache: cache}), false);
+    assert.equal(bridge.mutations([stream], 1, false, {invalidateNativeTurn: node=>cache.delete(node)}), false);
     assert.equal(cache.has(parent), false);
     assert.equal(cache.has(target), false);
     assert.equal(bridge.context, null);
