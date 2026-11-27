@@ -23,7 +23,7 @@ async function engine(optimizer = owner()) {
         cpo: { host: (op, a, b, c) => bridge.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
     });
     bridge.exports = result.instance.exports;
-    assert.equal(bridge.exports.cpo_browser_abi(), 1);
+    assert.equal(bridge.exports.cpo_browser_abi(), 2);
     return bridge;
 }
 
@@ -131,4 +131,81 @@ test('browser bridge clears temporary references on a host failure', () => {
     assert.equal(bridge.media({}, 0), null);
     assert.equal(bridge.context, null);
     assert.equal(bridge.status, 'unavailable');
+});
+
+test('Rust window execution hides, reveals, restores and protects recent turns', { skip }, async () => {
+    const bridge = await engine();
+    const turns = Array.from({ length: 12 }, () => {
+        const classes = new Set();
+        const image = element({ src: 'image.png' }, { naturalWidth: 10, naturalHeight: 10 });
+        return { image, classList: { contains: key => classes.has(key),
+            add: key => classes.add(key), remove: key => classes.delete(key) },
+            querySelectorAll: selector => selector === 'img' ? [image] : [] };
+    });
+    assert.equal(bridge.applyWindow(turns, 10, true, false), true);
+    assert.equal(turns[0].classList.contains('cpo-hidden'), true);
+    assert.equal(turns[0].image.hasAttribute('src'), false);
+    assert.equal(turns[2].classList.contains('cpo-offscreen'), true);
+    assert.equal(turns[4].classList.contains('cpo-offscreen'), false);
+    assert.equal(bridge.applyWindow(turns, 12, false, false), true);
+    assert.equal(turns[0].image.getAttribute('src'), 'image.png');
+    assert.equal(turns[0].classList.contains('cpo-hidden'), false);
+    assert.equal(bridge.context, null);
+});
+
+test('Rust capture bounds text and excludes controls', { skip }, async () => {
+    const bridge = await engine();
+    const original = global.document;
+    const node = { isConnected: true, matches: () => true, getAttribute: () => 'assistant' };
+    const control = { length: 10, parentElement: { closest: () => ({}) },
+        substringData() { throw new Error('must skip controls'); } };
+    const long = { length: 40000, substringData: (_start, count) => 'x'.repeat(count) };
+    try {
+        global.document = { createTreeWalker: () => treeWalker([control, long]) };
+        const result = bridge.captureHistory(Array(20).fill(node), 0);
+        assert.equal(result.ok, true);
+        assert.equal(result.next, 16);
+        assert.equal(result.records.length, 16);
+        assert.equal(result.records[0].role, 'assistant');
+        assert.equal(result.records[0].text.length, 32768);
+        assert.equal(result.records[0].truncated, true);
+        assert.equal(bridge.captureHistory([{ isConnected: false }], 0).ok, false);
+        assert.equal(bridge.context, null);
+    } finally {
+        if (original === undefined) delete global.document;
+        else global.document = original;
+    }
+});
+
+test('Rust cache validity checks expiry before touching nodes', { skip }, async () => {
+    const bridge = await engine();
+    const connected = { isConnected: true };
+    const disconnected = { isConnected: false };
+    const expired = { get isConnected() { throw new Error('expired cache must not be traversed'); } };
+    assert.equal(bridge.cacheTtl(0), 800);
+    assert.equal(bridge.cacheTtl(1), 8000);
+    assert.equal(bridge.cacheNodesValid(0, 1000, [connected], 1799), true);
+    assert.equal(bridge.cacheNodesValid(0, 1000, [expired], 1800), false);
+    assert.equal(bridge.cacheNodesValid(1, 1000, [connected, disconnected], 1001), false);
+    assert.equal(bridge.cacheNodesValid(1, 1000, [connected], 999), false);
+    assert.equal(bridge.mutationDelay(), 700);
+});
+
+test('Rust mutation engine skips streaming and banner changes, invalidates provider ancestors', { skip }, async () => {
+    const bridge = await engine();
+    const parent = { parentElement: null };
+    const target = { nodeType: 1, parentElement: parent, closest: () => target };
+    const stream = { target, addedNodes: [{nodeType: 3}], removedNodes: [] };
+    const banner = { target: parent, addedNodes: [{nodeType: 1, classList: {contains: () => true}}], removedNodes: [] };
+    const turn = { target: parent, addedNodes: [{nodeType: 1, matches: () => true}], removedNodes: [] };
+    const attr = { target, type: 'attributes', attributeName: 'data-message-id' };
+    assert.equal(bridge.mutations([stream, banner], 0), false);
+    assert.equal(bridge.mutations([stream, turn], 0), true);
+    assert.equal(bridge.mutations([attr], 0), true);
+    assert.equal(bridge.mutations([stream], 0, true), true);
+    const cache = new WeakMap([[parent, 1], [target, 2]]);
+    assert.equal(bridge.mutations([stream], 1, false, {_turnScanCache: cache}), false);
+    assert.equal(cache.has(parent), false);
+    assert.equal(cache.has(target), false);
+    assert.equal(bridge.context, null);
 });
