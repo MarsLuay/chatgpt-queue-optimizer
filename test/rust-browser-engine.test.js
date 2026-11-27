@@ -23,7 +23,7 @@ async function engine(optimizer = owner()) {
         cpo: { host: (op, a, b, c) => bridge.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
     });
     bridge.exports = result.instance.exports;
-    assert.equal(bridge.exports.cpo_browser_abi(), 3);
+    assert.equal(bridge.exports.cpo_browser_abi(), 4);
     return bridge;
 }
 
@@ -229,5 +229,30 @@ test('Rust provider selector traversal preserves priority, deduplicates and supp
     queries=0;
     assert.deepEqual(bridge.providerSelectors(root,selectors,'composer',null,true),[{element:a,selector:'.first',signalKey:'composer'}]);
     assert.equal(queries,1);
+    assert.equal(bridge.context,null);
+});
+
+test('native composer operations and submission stages preserve draft and route guards', {skip}, async () => {
+    const bridge=await engine();
+    const actions=[];
+    const input={tagName:'TEXTAREA',value:'draft',focus(){actions.push('focus');}};
+    assert.equal(bridge.composerRead(1,input),'draft');
+    assert.equal(bridge.composerWrite(1,input,'',0),true);
+    assert.equal(input.value,'');
+    assert.equal(bridge.composerWrite(1,input,'queued',1),true);
+    assert.equal(input.value,'queued');
+    assert.deepEqual(actions,['focus','focus']);
+    assert.equal(bridge.submitStage(0,1|2|32|64),1);
+    assert.equal(bridge.submitStage(1,1|4|8|16|32|64),6);
+    assert.equal(bridge.submitStage(1,1|4|8|16|64),7);
+    assert.equal(bridge.submitStage(2,4|64),3);
+    let clicks=0;
+    const button={isConnected:true,disabled:false,click(){clicks++;}};
+    assert.equal(bridge.click(button),true);
+    assert.equal(bridge.click({...button,disabled:true}),false);
+    assert.equal(clicks,1);
+    const latest={},old={},child={parentElement:old};
+    assert.equal(bridge.activeSurface(child,new Set([old,latest]),latest),false);
+    assert.equal(bridge.activeSurface({parentElement:latest},new Set([old,latest]),latest),true);
     assert.equal(bridge.context,null);
 });
