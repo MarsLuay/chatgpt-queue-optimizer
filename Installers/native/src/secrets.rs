@@ -4,6 +4,7 @@ const PREFIX:&[u8]=b"-----BEGIN ";
 const SUFFIX:&[u8]=b"-----";
 const LABEL:&[u8]=b"PRIVATE KEY";
 
+#[cfg(test)]
 fn header(line:&[u8])->bool{
     let start=line.iter().position(|b|!b.is_ascii_whitespace()).unwrap_or(line.len());
     let end=line.iter().rposition(|b|!b.is_ascii_whitespace()).map_or(start,|i|i+1);
@@ -29,7 +30,7 @@ fn scan(reader:impl BufRead)->io::Result<bool>{
     }
 }
 #[derive(Default)]
-struct HeaderState{prefix:usize,started:bool,invalid:bool,label_len:usize,matched:usize,found:bool,dashes:usize,trailing:bool}
+struct HeaderState{prefix:usize,started:bool,invalid:bool,matched:usize,found:bool,dashes:usize,trailing:bool}
 impl HeaderState{
     fn push(&mut self,b:u8){
         if self.invalid{return;}
@@ -45,7 +46,6 @@ impl HeaderState{
             return;
         }
         if !(b==b' '||b.is_ascii_digit()||b.is_ascii_uppercase()){self.invalid=true;return;}
-        self.label_len+=1;
         if !self.found{
             if b==LABEL[self.matched]{self.matched+=1;if self.matched==LABEL.len(){self.found=true;}}
             else{self.matched=usize::from(b==LABEL[0]);}
@@ -118,7 +118,7 @@ mod tests{
         assert!(scan(BufReader::new([b"\t".as_slice(),marker("PRIVATE KEY").as_slice(),b" \r\n"].concat().as_slice())).unwrap());
     }
     #[test]fn tracked_only_and_redacted_reports(){
-        let root=std::env::temp_dir().join(format!("cpo-secrets-{}-{}",std::process::id(),super::super::stamp()));
+        let root=std::env::temp_dir().join(format!("cpo-secrets-{}-{}",std::process::id(),super::super::fixture_stamp()));
         fs::create_dir_all(&root).unwrap();let _cleanup=super::super::Cleanup(root.clone());
         assert!(Command::new("git").current_dir(&root).args(["init","--quiet"]).status().unwrap().success());
         let name="local-signing-key.pem";

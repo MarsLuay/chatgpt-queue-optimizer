@@ -50,7 +50,7 @@ fn platform_launchers_use_rust(){
 struct Fixture{_cleanup:Cleanup,root:PathBuf,remote:PathBuf}
 impl Fixture{
     fn new()->Self{
-        let dir=env::temp_dir().join(format!("cpo-release-flow-{}-{}",std::process::id(),stamp()));
+        let dir=env::temp_dir().join(format!("cpo-release-flow-{}-{}",std::process::id(),fixture_stamp()));
         fs::create_dir_all(&dir).unwrap();
         let root=dir.join("local");let remote=dir.join("remote.git");
         fs::create_dir(&root).unwrap();
@@ -98,4 +98,19 @@ fn failed_push_preserves_local_release_commit(){
     }).is_err());
     assert_eq!(f.version(),"1.0.8");assert_ne!(f.head(),before);
     assert!(git_output(&f.root,&["log","-1","--format=%s"]).unwrap().contains("1.0.8"));
+}
+
+#[test]
+fn upload_settlement_preserves_local_and_remote_outcomes(){
+    let events=std::cell::RefCell::new(Vec::new());
+    let credential=||{events.borrow_mut().push("credentials");Ok(("issuer".into(),"secret".into()))};
+    let submit=|_values|{events.borrow_mut().push("submit");Ok(())};
+    assert!(finish_upload(false,false,true,credential,submit).is_err());
+    assert_eq!(*events.borrow(),vec!["credentials","submit"]);
+    events.borrow_mut().clear();
+    assert!(finish_upload(false,true,true,credential,submit).is_ok());
+    assert_eq!(*events.borrow(),vec!["credentials","submit"]);
+    assert!(finish_upload(true,false,false,||panic!("credentials for local-only"),|_|panic!("local-only submitted")).is_ok());
+    assert!(finish_upload(true,false,true,||panic!("credentials for local-only"),|_|panic!("local-only submitted")).is_err());
+    assert!(finish_upload(false,false,false,||Err(err("missing credentials")),|_|panic!("submitted without credentials")).is_err());
 }

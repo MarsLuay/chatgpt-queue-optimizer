@@ -12,6 +12,11 @@ const FILES: &[&str] = &["manifest.json","background.js","rust-queue-bridge.js",
 const MODULES: &[(&str,&str)] = &[("optimizer_core","optimizer_core.rs"),("optimizer_browser","browser_engine.rs"),("optimizer_history","history_engine.rs"),("optimizer_queue","queue_engine.rs")];
 fn err(message: impl Into<String>) -> Box<dyn std::error::Error> { io::Error::new(io::ErrorKind::Other,message.into()).into() }
 fn stamp()->u128 {SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()}
+#[cfg(test)]
+fn fixture_stamp()->String{
+    static NEXT:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
+    format!("{}-{}",stamp(),NEXT.fetch_add(1,std::sync::atomic::Ordering::Relaxed))
+}
 fn checked(command:&mut Command)->Result<()> {
     let status=command.status()?;
     if !status.success(){return Err(err(format!("Child process failed: {status}")));}
@@ -219,6 +224,13 @@ fn read_credentials_with(mut key:String,mut secret:String,interactive:bool,mut p
     if key.trim().is_empty()||secret.trim().is_empty(){return Err(err("Both AMO credentials are required"));}
     Ok((key.trim().to_owned(),secret.trim().to_owned()))
 }
+fn finish_upload(local_only:bool,managed:bool,local_failed:bool,credentials:impl FnOnce()->Result<(String,String)>,submit:impl FnOnce((String,String))->Result<()>)->Result<()>{
+    if local_only{return if local_failed{Err(err("Temporary Firefox test failed"))}else{Ok(())};}
+    let values=credentials()?;
+    submit(values)?;
+    if local_failed&&!managed{return Err(err("AMO submission accepted, but temporary Firefox test failed; inspect logs before retrying."));}
+    Ok(())
+}
 fn publish(repo:&Path,local_only:bool,configured:Option<(String,String)>)->Result<()>{
     let version=package(repo)?;
     let source=repo.join("build/firefox-src");let artifacts=repo.join("build/amo-artifacts");
@@ -243,9 +255,8 @@ fn publish(repo:&Path,local_only:bool,configured:Option<(String,String)>)->Resul
         }
     };
     if local_failed{eprintln!("Temporary Firefox test failed; see build/logs/upload-firefox-test.log.");}
-    if local_only{return if local_failed{Err(err("Temporary Firefox test failed"))}else{Ok(())};}
+    finish_upload(local_only,managed,local_failed,||match configured{Some(values)=>Ok(values),None=>credentials()},|(key,secret)|{
     // Never expose signing secrets on a command line or in raw logs.
-    let (key,secret)=match configured{Some(values)=>values,None=>credentials()?};
     if key.trim().is_empty()||secret.trim().is_empty(){return Err(err("Set WEB_EXT_API_KEY and WEB_EXT_API_SECRET before explicit publishing."));}
     let result=amo_command(repo,&source,&artifacts,&key,&secret).output()?;
     let redact=|bytes:&[u8]|redact_release_output(bytes,&key,&secret);
@@ -253,8 +264,8 @@ fn publish(repo:&Path,local_only:bool,configured:Option<(String,String)>)->Resul
     fs::write(logs.join("upload.log"),&message)?;println!("{message}");
     if !result.status.success(){return Err(err("AMO submission failed; see redacted upload.log"));}
     println!("AMO accepted the submission request; approval may remain pending.");
-    if local_failed{return Err(err("AMO submission accepted, but temporary Firefox test failed; inspect logs before retrying."));}
     Ok(())
+    })
 }
 fn git_output(repo:&Path,args:&[&str])->Result<String>{
     let result=Command::new("git").current_dir(repo).args(args).output()?;
@@ -420,7 +431,7 @@ mod tests{
         assert_eq!(manifest,json!({"name":"Demo","version":"1.0.8","other":true}));
     }
     #[test]fn managed_publish_refuses_invalid_checkout_before_any_external_effect(){
-        let root=env::temp_dir().join(format!("cpo-release-guard-{}-{}",std::process::id(),stamp()));
+        let root=env::temp_dir().join(format!("cpo-release-guard-{}-{}",std::process::id(),fixture_stamp()));
         fs::create_dir_all(&root).unwrap();
         let _cleanup=Cleanup(root.clone());
         let root=root.canonicalize().unwrap();
