@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 4);
+    assert.equal(e.cpo_queue_abi(), 5);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -219,4 +219,86 @@ test('tab lifecycle rejects protected tabs and requires final safety confirmatio
     assert.equal(e.cpo_tab_reload_next(3,1),4);
     assert.equal(e.cpo_tab_recover_poll(1,30000,2),0);
     assert.equal(e.cpo_tab_recover_poll(1,30000,1),2);
+});
+
+test('native durable projection and restoration preserve the complete checkpoint schema', {skip}, async () => {
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    const now=1800000000000;
+    const source={
+        tabId:42,provider:'chatgpt',conversationId:'abc',conversationType:'existing',targetKey:'chatgpt:c:abc',
+        queue:['next','later'],currentMessage:'active',isRunning:true,isPaused:false,isStopped:false,
+        runId:'run',totalMessages:5,completedCount:2,currentCommandNumber:3,currentPhase:'awaiting-response',
+        deliveryState:'confirmed-submission',commandId:'command',commandFingerprint:'fnv1a:a:len:6',
+        submittedUserTurnId:'user-turn',assistantTurnId:'assistant-turn',
+        retryMode:'unlimited',retryAttemptCount:2,nextRetryAt:now+1000,
+        rolloverInProgress:true,rolloverStage:'handoff-waiting',rolloverReason:'capacity',
+        rolloverFromConversationId:'old',rolloverToConversationId:'abc',rolloverNavigationStarted:true,
+        rolloverRebindApplied:true,handoffSubmitted:true,handoffEstablished:false,handoffFingerprint:'handoff',
+        conversationGeneration:3,startedAt:now-1000,updatedAt:now,
+        isProcessing:true,internalTransient:'never persist'
+    };
+    const result=engine.projectDurable(source);
+    assert.equal(result.ok,true);
+    const stored=result.value;
+    assert.equal(Object.keys(stored).length,51);
+    assert.equal(stored.isProcessing,undefined);
+    assert.equal(stored.internalTransient,undefined);
+    assert.notEqual(stored.queue,source.queue);
+    for(const key of Object.keys(source)){
+        if(key==='isProcessing'||key==='internalTransient')continue;
+        assert.deepEqual(stored[key],source[key],key);
+    }
+    const decoded=engine.deserializeDurable(JSON.parse(JSON.stringify(stored)),now,()=>{throw Error('existing run ID must survive');});
+    assert.equal(decoded.ok,true);
+    assert.deepEqual(decoded.value,stored);
+    assert.equal(engine.confirmed(decoded.value),1);
+    assert.equal(engine.next(decoded.value,true),3);
+});
+
+test('native deserialization reconstructs legacy defaults and trims long prompts without damaging Unicode', {skip}, async () => {
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    const now=1800000000000;
+    const body='a'.repeat(5000)+'😀'+'\ud800';
+    const raw={tabId:'7',targetKey:'chatgpt:new',queue:['\uFEFF'+ ' '.repeat(2048)+body+'\u2003'.repeat(2050),'\t\n','  next  '],
+        currentMessage:'  active  ',completedCount:'2',isPaused:true,waitForIdleBeforeSend:true,retryMode:'legacy'};
+    const restored=engine.deserializeDurable(raw,now,()=> 'generated-run');
+    assert.equal(restored.ok,true);
+    const job=restored.value;
+    assert.equal(job.tabId,7);
+    assert.equal(job.provider,'chatgpt');
+    assert.equal(job.conversationType,'new');
+    assert.equal(job.targetKey,'chatgpt:new');
+    assert.deepEqual(job.queue,[body,'next']);
+    assert.equal(job.currentMessage,'active');
+    assert.equal(job.currentCommandNumber,3);
+    assert.equal(job.totalMessages,5);
+    assert.equal(job.currentPhase,'waiting-for-idle');
+    assert.equal(job.isRunning,false);
+    assert.equal(job.isPaused,true);
+    assert.equal(job.retryMode,'');
+    assert.equal(job.startedAt,now);
+    assert.equal(job.updatedAt,now);
+    assert.equal(job.runId,'generated-run');
+    assert.equal(job.conversationId,null);
+    assert.equal(engine.projectDurable({...job,currentMessage:null}).value.currentMessage,'');
+    assert.equal(engine.deserializeDurable({tabId:8,queue:['next']},now,()=> 'run').value.currentMessage,null);
+    const e=instance.exports;
+    assert.ok(new Uint16Array(e.memory.buffer,e.cpo_fingerprint_buffer(),e.cpo_fingerprint_capacity()).every(n=>n===0));
+});
+
+test('native deserialization rejects malformed or non-runnable durable jobs', {skip}, async () => {
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    const base={tabId:7,queue:['next'],runId:'run'};
+    for(const patch of [
+        {tabId:0},{tabId:1.5},{tabId:Number.MAX_SAFE_INTEGER+1},{queue:[]},
+        {queue:[{text:'unexpected'}]},{queue:'not an array'},{isStopped:true},
+        {currentMessage:{}},{isPaused:'true'},{completedCount:-1},
+        {nextRetryAt:Infinity},{startedAt:'invalid'},{submittedUserTurnId:17}
+    ]){
+        const result=engine.deserializeDurable({...base,...patch},1800000000000,()=> 'run');
+        assert.equal(result.ok,false,JSON.stringify(patch));
+    }
 });
