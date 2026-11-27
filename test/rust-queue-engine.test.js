@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 2);
+    assert.equal(e.cpo_queue_abi(), 3);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -104,4 +104,78 @@ test('scheduler keeps full epoch precision and rejects early or duplicate claims
         {type:'existing',provider:'chatgpt',conversationId:'b'}),0);
     assert.equal(engine.scheduleIdentity({type:'existing',provider:'chatgpt',conversationId:'a'},
         {type:'existing',provider:'chatgpt',conversationId:'a'}),1);
+});
+
+test('native provider routing and marker matching preserve legacy identities', {skip}, async () => {
+    const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
+    const registry = require('../provider-adapter.js');
+    const urls = [
+        'https://chatgpt.com/', 'https://chat.openai.com/c/abc-1',
+        'https://chatgpt.com/g/tool/c/abc', 'https://chatgpt.com/g/my_gpt/',
+        'https://chatgpt.com/settings', 'https://chatgpt.com/c/',
+        'https://gemini.google.com/', 'https://gemini.google.com/app/abc',
+        'https://gemini.google.com/u/12/app/', 'https://gemini.google.com/u/2/app/xyz',
+        'https://gemini.google.com/app/app', 'https://gemini.google.com/app/abc/extra',
+        'https://claude.ai/new', 'https://claude.ai/chat/abc', 'https://claude.ai/chat/abc/',
+        'https://claude.ai/chat/abc/extra', 'https://claude.ai/settings',
+        'http://chatgpt.com/', 'https://chatgpt.com.evil.example/'
+    ];
+    const oldEngine = globalThis.CpoQueueEngine;
+    try {
+        globalThis.CpoQueueEngine = undefined;
+        const expected = urls.map(url => registry.getConversationIdentity(url));
+        engine.install(instance.exports);
+        globalThis.CpoQueueEngine = engine;
+        assert.deepEqual(urls.map(url => registry.getConversationIdentity(url)), expected);
+        const marker = 'deep research';
+        for (const offset of [0, 1000, 1010, 1020, 2030, 10000]) {
+            assert.equal(engine.contains('x'.repeat(offset)+marker+'x',marker),true);
+        }
+        assert.equal(engine.contains('x'.repeat(6000),marker),false);
+        assert.equal(engine.contains('',''),true);
+    } finally { globalThis.CpoQueueEngine = oldEngine; }
+});
+
+test('native response classifier prioritizes failure and active tool turns over terminal text', {skip}, async () => {
+    const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
+    const e = instance.exports;
+    assert.equal(e.cpo_response_class(1|256|512),1);
+    assert.equal(e.cpo_response_class(2|8),2);
+    assert.equal(e.cpo_response_class(8|16),3);
+    assert.equal(e.cpo_response_class(64|512),7);
+    assert.equal(e.cpo_response_class(128),8);
+    assert.equal(e.cpo_response_class(4096|256),9);
+    assert.equal(e.cpo_response_class(256),13);
+    assert.equal(e.cpo_response_class(0),0);
+    assert.equal(e.cpo_generation_state(1|32),35);
+    assert.equal(e.cpo_generation_state(1|8|32),8);
+    assert.equal(e.cpo_wait_failure(1|2|4),1);
+    assert.equal(e.cpo_wait_settle(8|16|32),4);
+    assert.equal(e.cpo_wait_settle(8|16|32|256),0);
+    assert.equal(e.cpo_wait_settle(8|16|32|2),0);
+    assert.equal(e.cpo_wait_settle(64),5);
+});
+
+test('native rollover decisions respect persisted stage checkpoints', {skip}, async () => {
+    const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
+    const e = instance.exports;
+    const owned = 1|2;
+    assert.equal(e.cpo_rollover_next(0,0),0);
+    assert.equal(e.cpo_rollover_next(0,1),1);
+    assert.equal(e.cpo_rollover_next(0,owned),2);
+    assert.equal(e.cpo_rollover_next(1,owned|4),3);
+    assert.equal(e.cpo_rollover_next(2,owned|4),4);
+    assert.equal(e.cpo_rollover_next(2,owned|4|64),5);
+    assert.equal(e.cpo_rollover_next(2,owned|4|32),6);
+    assert.equal(e.cpo_rollover_next(3,owned|4|8|16),7);
+    assert.equal(e.cpo_rollover_next(4,owned),8);
+    assert.equal(e.cpo_rollover_next(4,owned|512),9);
+    assert.equal(e.cpo_rollover_next(3,owned|128),10);
+    assert.equal(e.cpo_rollover_next(3,owned|256),11);
+    assert.equal(e.cpo_rollover_fresh(1,1|2|4),1);
+    assert.equal(e.cpo_rollover_fresh(1,1|2),0);
+    assert.equal(e.cpo_rollover_fresh(2,1|16),1);
+    assert.equal(e.cpo_rollover_fresh(2,16),0);
+    assert.equal(e.cpo_rollover_generation(3,0),4);
+    assert.equal(e.cpo_rollover_generation(4,1),4);
 });
