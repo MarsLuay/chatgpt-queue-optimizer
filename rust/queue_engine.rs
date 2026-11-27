@@ -5,7 +5,7 @@
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! { core::arch::wasm32::unreachable() }
 
 #[no_mangle]
-pub extern "C" fn cpo_queue_abi() -> u32 { 2 }
+pub extern "C" fn cpo_queue_abi() -> u32 { 3 }
 
 const OFFSET: u32 = 2166136261;
 const PRIME: u32 = 16777619;
@@ -236,9 +236,211 @@ pub extern "C" fn cpo_schedule_identity(stored: u32, current: u32, flags: u32) -
     (flags & 8 != 0) as u32
 }
 
+// Provider routing and marker matching use the bounded UTF-16 input buffer.
+// Browser URL parsing stays with the platform; Rust classifies parsed hosts
+// and paths. Packed route: kind in low 2 bits, ID start in bits 2..12,
+// ID length in bits 13..23. 0 unsupported, 1 new, 2 existing.
+fn ascii_eq(s: &[u16], text: &[u8]) -> bool {
+    s.len() == text.len() && s.iter().zip(text).all(|(&a,&b)| a == u16::from(b))
+}
+fn provider_host(s: &[u16]) -> u32 {
+    if ascii_eq(s,b"chatgpt.com") || ascii_eq(s,b"chat.openai.com") { 1 }
+    else if ascii_eq(s,b"gemini.google.com") { 2 }
+    else if ascii_eq(s,b"claude.ai") { 3 }
+    else { 0 }
+}
+fn id_char(c: u16) -> bool { matches!(c, 45 | 48..=57 | 65..=90 | 95 | 97..=122) }
+fn id_end(s: &[u16], start: usize) -> usize {
+    let mut end = start;
+    while end < s.len() && id_char(s[end]) { end += 1; }
+    end
+}
+fn route_id(start: usize, end: usize) -> u32 {
+    if end <= start { 0 } else { 2 | ((start as u32)<<2) | (((end-start) as u32)<<13) }
+}
+fn route(provider: u32, s: &[u16]) -> u32 {
+    let slash = 47;
+    if provider == 1 {
+        for i in 0..s.len().saturating_sub(1) {
+            if (i == 0 || s[i-1] == slash) && s[i] == 99 && s[i+1] == slash {
+                let start = i+2;
+                let end = id_end(s,start);
+                if end > start { return route_id(start,end); }
+            }
+        }
+        if s.is_empty() || s == [slash] { return 1; }
+        if s.starts_with(&[slash,103,slash]) {
+            let end = id_end(s,3);
+            if end > 3 && (end == s.len() || (end+1 == s.len() && s[end] == slash)) { return 1; }
+        }
+    } else if provider == 2 {
+        if s.is_empty() || s == [slash] { return 1; }
+        let mut start = 0;
+        if s.starts_with(&[slash]) { start = 1; }
+        // Preserve the old suffix match for app/ID and anchored new routes.
+        for i in 0..s.len() {
+            if (i == 0 || s[i-1] == slash) && s[i..].starts_with(&[97,112,112,slash]) {
+                let begin = i+4;
+                let end = id_end(s,begin);
+                let is_app = end-begin == 3 && s[begin..end].iter().zip(b"app").all(|(&a,&b)| a == b as u16 || a == (b-32) as u16);
+                if end > begin && !is_app && (end == s.len() || (end+1 == s.len() && s[end] == slash)) { return route_id(begin,end); }
+            }
+        }
+        if s[start..].starts_with(&[117,slash]) {
+            start += 2;
+            let begin = start;
+            while start < s.len() && matches!(s[start],48..=57) { start += 1; }
+            if start == begin || s.get(start) != Some(&slash) { return 0; }
+            start += 1;
+        }
+        if ascii_eq(&s[start..],b"app") || ascii_eq(&s[start..],b"app/") { return 1; }
+    } else if provider == 3 {
+        if s.is_empty() || ascii_eq(s,b"/") || ascii_eq(s,b"/new") || ascii_eq(s,b"/new/") ||
+            ascii_eq(s,b"/chat") || ascii_eq(s,b"/chat/") { return 1; }
+        if s.starts_with(&[slash,99,104,97,116,slash]) {
+            let end = id_end(s,6);
+            if end > 6 && (end == s.len() || (end+1 == s.len() && s[end] == slash)) { return route_id(6,end); }
+        }
+    }
+    0
+}
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_provider_host(len: u32) -> u32 {
+    if len as usize > CHUNK { return 0; }
+    provider_host(unsafe { core::slice::from_raw_parts(cpo_fingerprint_buffer() as *const u16,len as usize) })
+}
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_provider_route(provider: u32, len: u32) -> u32 {
+    if len as usize > CHUNK { return 0; }
+    route(provider,unsafe { core::slice::from_raw_parts(cpo_fingerprint_buffer() as *const u16,len as usize) })
+}
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_marker_contains(hay: u32, needle: u32) -> u32 {
+    let h = hay as usize; let n = needle as usize;
+    if h > CHUNK || n > CHUNK-h { return 0; }
+    if n == 0 { return 1; }
+    let data = unsafe { core::slice::from_raw_parts(cpo_fingerprint_buffer() as *const u16,h+n) };
+    data[..h].windows(n).any(|part| part == &data[h..]) as u32
+}
+
+// Generation observations: stop=1 streaming=2 tool=4 error=8 retry=16
+// deep marker=32 capacity=64. Output generating=1 deep=2 unknown=4
+// error=8 retry=16 active compatibility=32.
+#[no_mangle]
+pub extern "C" fn cpo_generation_state(flags: u32) -> u32 {
+    let working = flags & 7 != 0;
+    let error = flags & (8|64) != 0;
+    let retry = flags & 16 != 0 && flags & 64 == 0;
+    let active = !error && working;
+    (active as u32) | (((active && flags & 32 != 0) as u32)<<1) |
+        (((!error && !retry && !working) as u32)<<2) |
+        ((error as u32)<<3) | ((retry as u32)<<4) |
+        (((working && !error && !retry) as u32)<<5)
+}
+
+// Response classification priority matches provider adapter branches.
+// flags: capacity=1 error-stop=2 general error=4 timeout=8 retry=16
+// assistant error marker=32 waiting user=64 interrupted=128 completed=256
+// generating=512 deep=1024 streaming=2048 incomplete tool=4096.
+#[no_mangle]
+pub extern "C" fn cpo_response_class(flags: u32) -> u32 {
+    if flags & 1 != 0 { 1 }
+    else if flags & 2 != 0 { 2 }
+    else if flags & 8 != 0 { 3 }
+    else if flags & 16 != 0 { 4 }
+    else if flags & 4 != 0 { 5 }
+    else if flags & 32 != 0 { 6 }
+    else if flags & 64 != 0 { 7 }
+    else if flags & 128 != 0 && flags & 256 == 0 { 8 }
+    else if flags & 4096 != 0 { 9 }
+    else if flags & 1024 != 0 { 10 }
+    else if flags & 2048 != 0 { 11 }
+    else if flags & 512 != 0 { 12 }
+    else if flags & 256 != 0 { 13 }
+    else { 0 }
+}
+
+// Queue wait: failure precedence and terminal confirmation classification.
+#[no_mangle]
+pub extern "C" fn cpo_wait_failure(flags: u32) -> u32 {
+    if flags & 1 != 0 { 1 } else if flags & 2 != 0 { 2 }
+    else if flags & 4 != 0 { 3 } else if flags & 8 != 0 { 4 }
+    else if flags & 16 != 0 { 5 } else { 0 }
+}
+// flags: waiting existing=1, active=2, transient idle=4, bound=8,
+// phase terminal=16, bound IDs compatible=32, saw activity=64,
+// phase absent=128, incomplete tool=256.
+#[no_mangle]
+pub extern "C" fn cpo_wait_settle(flags: u32) -> u32 {
+    if flags & 1 != 0 { if flags & 2 != 0 { 1 } else { 2 } }
+    else if flags & 256 == 0 && (flags & 4 != 0 ||
+        (flags & (8|128) == (8|128) && flags & (2|64) == 0)) { 3 }
+    else if flags & (8|16|32) == (8|16|32) && flags & (2|256) == 0 { 4 }
+    else if flags & 8 == 0 && flags & 64 != 0 && flags & 2 == 0 { 5 }
+    else { 0 }
+}
+
+// Rollover execution stages. flags: owned=1 supported=2 started=4
+// identity checkpoint=8 rebound=16 fresh=32 navigation issued=64
+// handoff submitted=128 established=256 handoff present=512.
+// 0 stop, 1 unsupported, 2 initialize, 3 inspect identity, 4 navigate,
+// 5 await identity, 6 rebind, 7 inspect handoff, 8 submit handoff,
+// 9 checkpoint handoff, 10 wait handoff, 11 resume.
+#[no_mangle]
+pub extern "C" fn cpo_rollover_next(stage: u32, flags: u32) -> u32 {
+    if flags & 1 == 0 { return 0; }
+    if flags & 2 == 0 { return 1; }
+    match stage {
+        0 if flags & 4 == 0 => 2,
+        0 | 1 if flags & (8|16) != (8|16) => 3,
+        2 if flags & 32 == 0 && flags & 64 == 0 => 4,
+        2 if flags & 32 == 0 => 5,
+        2 if flags & 16 == 0 => 6,
+        3 if flags & 256 != 0 => 11,
+        3 if flags & 128 == 0 => 7,
+        4 if flags & 512 == 0 => 8,
+        4 => 9,
+        0..=4 => 10,
+        _ => 11,
+    }
+}
+// existing=1, new=2, other=0; flags provider correct=1, new ID present=2,
+// ID differs=4, old ID present=8, navigation started=16.
+#[no_mangle]
+pub extern "C" fn cpo_rollover_fresh(kind: u32, flags: u32) -> u32 {
+    (flags & 1 != 0 && ((kind == 1 && flags & 6 == 6) ||
+        (kind == 2 && flags & (8|16) != 0))) as u32
+}
+#[no_mangle]
+pub extern "C" fn cpo_rollover_generation(generation: u32, rebound: u32) -> u32 {
+    generation.saturating_add((rebound == 0) as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn provider_routes_and_response_priority() {
+        let units = |s: &str| s.encode_utf16().collect::<Vec<_>>();
+        assert_eq!(provider_host(&units("chatgpt.com")),1);
+        assert_eq!(route(1,&units("/g/tool/c/abc")),route_id(10,13));
+        assert_eq!(route(2,&units("/u/2/app/abc")),route_id(9,12));
+        assert_eq!(route(2,&units("/u/2/app/")),1);
+        assert_eq!(route(3,&units("/chat/abc")),route_id(6,9));
+        assert_eq!(route(3,&units("/chat/abc/extra")),0);
+        assert_eq!(cpo_response_class(1|512|256),1);
+        assert_eq!(cpo_response_class(4096|256),9);
+        assert_eq!(cpo_response_class(256),13);
+        assert_eq!(cpo_generation_state(1|32),35);
+        assert_eq!(cpo_wait_settle(8|16|32|256),0);
+        assert_eq!(cpo_rollover_next(2,1|2|4),4);
+        assert_eq!(cpo_rollover_next(4,1|2|512),9);
+        assert_eq!(cpo_rollover_fresh(1,1|2),0);
+        assert_eq!(cpo_rollover_generation(4,1),4);
+    }
     #[test]
     fn fingerprint_chunks_and_ecmascript_whitespace() {
         let mut a = Fingerprint::new();
