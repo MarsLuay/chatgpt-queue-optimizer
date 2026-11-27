@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 23);
+    assert.equal(e.cpo_queue_abi(), 24);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -692,4 +692,23 @@ test('native wait leases isolate concurrent jobs and reject retired completions'
     const restore=e.cpo_background_restore(0,0);assert.ok(restore);
     assert.equal(e.cpo_background_restore(0,0),0);e.cpo_background_restore(3,0);
     assert.equal(e.cpo_background_restore(1,restore),0);
+});
+
+
+test('native recovery transitions preserve prompt ownership and atomic revision',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    const jobs=engine.createLiveJobs();
+    jobs.set(1,{tabId:1,isRunning:true,queue:['next'],currentMessage:'current',currentCommandNumber:1,provider:'chatgpt',conversationId:'old',conversationType:'existing'});
+    const job=jobs.get(1);
+    assert.equal(jobs.rollover(job,0,1),2);
+    let rev=jobs.revision();jobs.transaction(job,12,0);assert.equal(jobs.revision(),rev+1);
+    assert.equal(job.rolloverFromConversationId,'old');assert.equal(job.rolloverStage,'detected');
+    jobs.transaction(job,12,1);jobs.transaction(job,12,2);
+    jobs.transaction(job,9,0,{provider:'chatgpt',conversationId:'new',conversationType:'existing',targetKey:'chatgpt:c:new'});
+    jobs.transaction(job,12,3,{handoffFingerprint:'test'});jobs.transaction(job,12,4);jobs.transaction(job,12,5);
+    rev=jobs.revision();jobs.transaction(job,12,6);assert.equal(jobs.revision(),rev+1);
+    assert.deepEqual([...job.queue],['current','next']);assert.equal(job.currentMessage,null);
+    assert.equal(job.rolloverInProgress,false);assert.equal(job.currentPhase,'queued');
+    assert.equal(instance.exports.cpo_background_schedule_guard(2,3),1);
 });

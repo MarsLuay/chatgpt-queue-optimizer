@@ -364,7 +364,7 @@ async function confirmFreshConversationIdentity(tabId, job, adapter, fromConvers
     const pollMs = Math.max(20, Number(QUEUE_WAIT_POLICY.submissionAckPollMs) || 50);
 
     while (Date.now() <= deadline) {
-        if (!jobs.has(tabId) || !job || job.isStopped || job.isPaused || !job.isRunning) {
+        if (jobs.processing(job,2)!==1) {
             return { ok: false, interrupted: true, identity: null };
         }
         const identity = await resolveTabConversationIdentity(tabId);
@@ -390,16 +390,10 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
         : { ok: false, url: '', method: 'unsupported' };
     const newConversationUrl = startPlan?.url || (typeof adapter?.getNewConversationUrl === 'function' ? adapter.getNewConversationUrl() : '');
 
-    const identityStages = new Set(['identity-confirmed','handoff-sending','handoff-waiting','handoff-established','resumed']);
     const supported = !!(adapter && typeof adapter.isFreshConversationIdentity === 'function' && newConversationUrl);
-    const owned = () => jobs.get(tabId) === job && job.isRunning && !job.isStopped && !job.isPaused;
-    const rolloverNext = (stage, fresh = false, present = false) => {
-        const flags = Number(owned()) | (Number(supported)<<1) | (Number(!!job.rolloverInProgress)<<2) |
-            (Number(identityStages.has(job.rolloverStage))<<3) | (Number(!!job.rolloverRebindApplied)<<4) |
-            (Number(fresh)<<5) | (Number(!!job.rolloverNavigationStarted)<<6) |
-            (Number(!!job.handoffSubmitted)<<7) | (Number(!!job.handoffEstablished)<<8) | (Number(present)<<9);
-        return requiredQueueDecision(globalThis.CpoQueueEngine?.call('cpo_rollover_next',[stage,flags]));
-    };
+    const owned = () => jobs.processing(job,2)===1;
+    const rolloverNext = (stage, fresh = false, present = false) =>
+        jobs.rollover(job,stage,Number(supported)|(Number(fresh)<<1)|(Number(present)<<2));
     const initialAction = rolloverNext(0);
     if (initialAction === 0) return { action: 'return' };
     if (initialAction === 1) {
@@ -410,8 +404,8 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
         return { action: 'return' };
     }
 
+    jobs.transaction(job,12,0);
     if (initialAction === 2) {
-        jobs.transaction(job,0,0,{rolloverInProgress:true,rolloverStage:'detected',rolloverReason:'conversation-max-length',rolloverFromConversationId:job.conversationId||job.rolloverFromConversationId||null,rolloverToConversationId:null,rolloverNavigationStarted:false,rolloverRebindApplied:false,handoffSubmitted:false,handoffEstablished:false,handoffFingerprint:'',currentPhase:'rollover-in-progress',retryClass:'conversation-max-length'});
         await updateRunningJobsStorage({ force: true });
         logQueueEvent(tabId, 'warn', 'Conversation capacity reached; starting automatic rollover.', {
             event: 'conversation-capacity-reached',
@@ -424,12 +418,8 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
             currentMessageLength: String(job.currentMessage || '').length
         });
     } else {
-        job.currentPhase = 'rollover-in-progress';
-        job.retryClass = 'conversation-max-length';
+        await updateRunningJobsStorage({ force: true });
     }
-
-    jobs.transaction(job,1,7);
-    await updateRunningJobsStorage({ force: true });
 
     const fromConversationId = job.rolloverFromConversationId || null;
     if (!owned()) return { action: 'return' };
@@ -441,9 +431,7 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
         const identityAction = rolloverNext(2, alreadyFresh);
         if (identityAction === 4 || identityAction === 5) {
             if (identityAction === 4) {
-                job.rolloverNavigationStarted = true;
-                job.rolloverStage = 'navigating';
-                job.updatedAt = Date.now();
+                jobs.transaction(job,12,1);
                 await updateRunningJobsStorage({ force: true });
                 logQueueEvent(tabId, 'info', 'Opening a fresh ChatGPT conversation for rollover.', {
                     event: 'rollover-started',
@@ -456,8 +444,8 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
                 await updateTabUrl(tabId, newConversationUrl);
             }
 
-            job.rolloverStage = 'awaiting-new-identity';
-            job.updatedAt = Date.now();
+            if(!owned())return {action:'return'};
+            jobs.transaction(job,12,2);
             await updateRunningJobsStorage({ force: true });
 
             const confirmed = await confirmFreshConversationIdentity(tabId, job, adapter, fromConversationId);
@@ -506,18 +494,18 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
             conversationGeneration: job.conversationGeneration,
             pendingMessageLength: String(job.currentMessage || job.queue?.[0] || '').length
         });
-        job.handoffFingerprint = job.handoffFingerprint || fingerprintCommandTextForJob(handoffText);
+        const handoffFingerprint=job.handoffFingerprint||fingerprintCommandTextForJob(handoffText);
 
         if (handoffAction === 7) {
             const inspect = await inspectTabCommandTurns(tabId, {
                 expectedText: handoffText,
-                expectedFingerprint: job.handoffFingerprint
+                expectedFingerprint: handoffFingerprint
             });
             const alreadyPresent = !!(inspect?.snapshot?.matchedUserTurnId ||
                 (inspect?.snapshot?.userTurns || []).some(turn => turn.matchedExpected));
 
-            job.rolloverStage = 'handoff-sending';
-            job.updatedAt = Date.now();
+            if(!owned())return {action:'return'};
+            jobs.transaction(job,12,3,{handoffFingerprint});
             await updateRunningJobsStorage({ force: true });
 
             if (!owned()) return { action: 'return' };
@@ -541,10 +529,8 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
                 }
             }
 
-            job.handoffSubmitted = true;
-            job.rolloverStage = 'handoff-waiting';
-            job.updatedAt = Date.now();
-            jobs.transaction(job,1,6);
+            if(!owned())return {action:'return'};
+            jobs.transaction(job,12,4);
             await updateRunningJobsStorage({ force: true });
         }
 
@@ -568,9 +554,7 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
             return { action: 'return' };
         }
 
-        job.handoffEstablished = true;
-        job.rolloverStage = 'handoff-established';
-        job.updatedAt = Date.now();
+        jobs.transaction(job,12,5);
         await updateRunningJobsStorage({ force: true });
         logQueueEvent(tabId, 'success', 'Continuation handoff established in the new conversation.', {
             event: 'handoff-established',
@@ -582,25 +566,8 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
     }
 
     if (!owned() || rolloverNext(3) !== 11) return { action: 'return' };
-    const preservedCurrent = job.currentMessage || null;
     const preservedCommandNumber = Number(job.currentCommandNumber || 0);
-    if (preservedCurrent) {
-        job.queue.unshift(preservedCurrent);
-        job.currentMessage = null;
-        job.currentCommandNumber = 0;
-    }
-
-    jobs.transaction(job,1,7);
-    job.rolloverInProgress = false;
-    job.rolloverStage = 'resumed';
-    job.rolloverNavigationStarted = false;
-    job.rolloverRebindApplied = false;
-    job.handoffSubmitted = false;
-    job.handoffEstablished = false;
-    job.handoffFingerprint = '';
-    job.currentPhase = 'queued';
-    job.lastError = '';
-    job.updatedAt = Date.now();
+    jobs.transaction(job,12,6);
     await updateRunningJobsStorage({ force: true });
     logQueueEvent(tabId, 'success', 'Queue resumed after conversation rollover.', {
         event: 'queue-resumed-after-rollover',
@@ -2156,13 +2123,13 @@ async function interruptibleSleep(tabId, job, ms) {
     const sliceMs = Math.max(5, Number(QUEUE_RETRY_POLICY.sleepSliceMs) || 250);
 
     while (Date.now() < deadline) {
-        if (!jobs.has(tabId) || !job || job.isStopped || job.isPaused || !job.isRunning) {
+        if (jobs.processing(job,2)!==1) {
             return true;
         }
         await sleep(Math.min(sliceMs, deadline - Date.now()));
     }
 
-    return !jobs.has(tabId) || !job || job.isStopped || job.isPaused || !job.isRunning;
+    return jobs.processing(job,2)!==1;
 }
 
 async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnostics = {}) {
@@ -2189,13 +2156,12 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
     const maxAttempts = unlimited ? Number.POSITIVE_INFINITY : Number(QUEUE_RETRY_POLICY.maxAutomaticAttempts);
     const attemptCount = Number(job.retryAttemptCount || 0);
 
-    const canRetry = globalThis.CpoQueueEngine?.call('cpo_queue_can_retry', [attemptCount,
-        Number(QUEUE_RETRY_POLICY.maxAutomaticAttempts), Number(unlimited)]);
-    if (canRetry !== 1) {
-        job.retryExhausted = true;
-        job.retryMode = unlimited ? 'unlimited' : 'finite';
-        job.lastError = getRetryExhaustionReason(job, classification.reason);
-        job.updatedAt = Date.now();
+    const delayMs=jobs.retryPlan(job,unlimited,Number(QUEUE_RETRY_POLICY.maxAutomaticAttempts),
+        Number(QUEUE_RETRY_POLICY.backoffBaseMs),Number(QUEUE_RETRY_POLICY.backoffFactor)||2,
+        Number(QUEUE_RETRY_POLICY.backoffMaxMs),Math.max(1,Number(QUEUE_RETRY_POLICY.unlimitedDelayMs)||UNLIMITED_RETRY_DELAY_MS));
+    if(delayMs==null)return false;
+    if (delayMs === 0) {
+        jobs.transaction(job,14,Number(unlimited),{lastError:getRetryExhaustionReason(job,classification.reason)});
         logQueueEvent(tabId, 'error', job.lastError, {
             phase,
             retryClass: classification.class,
@@ -2210,7 +2176,6 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
         return false;
     }
 
-    const delayMs = getRetryBackoffDelayMs(attemptCount, unlimited);
     jobs.transaction(job,8,delayMs,{retryMode:unlimited?'unlimited':'finite',lastError:classification.reason,retryClass:classification.class,lastRetryableReason:classification.reason});
     updateRunningJobsStorage({ force: true });
 
@@ -2293,14 +2258,13 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
         return { action: 'return' };
     }
 
-    job.deliveryTimeoutAttempts = Number(job.deliveryTimeoutAttempts || 0) + 1;
+    if(jobs.processing(job,2)!==1)return {action:'return'};
+    jobs.transaction(job,13,0);
     const attempt = job.deliveryTimeoutAttempts;
     const maxAttempts = queueSettings.queueUnlimitedRetryWait ? Number.POSITIVE_INFINITY : 3;
 
-    const initialRecovery = globalThis.CpoQueueEngine?.call('cpo_delivery_recovery', [0,
-        1 | (Number(!!waitResult?.details?.state?.hasTryAgainButton) << 1) |
-        (Number(!!queueSettings.queueUnlimitedRetryWait) << 6), attempt, 3]) ??
-        8;
+    const initialRecovery=jobs.delivery(job,0,Number(!!waitResult?.details?.state?.hasTryAgainButton)|(Number(!!queueSettings.queueUnlimitedRetryWait)<<3));
+    if(initialRecovery===0)return {action:'return'};
     if (initialRecovery === 8) {
         logQueueEvent(tabId, 'error', `Exceeded maximum delivery timeout recovery attempts (${maxAttempts}) for command ${job.currentCommandNumber || '?'}/${totalMessages}.`, {
             commandNumber: job.currentCommandNumber || 0,
@@ -2311,8 +2275,7 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
         return { action: 'fail' };
     }
 
-    job.currentPhase = 'recovering';
-    job.updatedAt = Date.now();
+    jobs.transaction(job,13,1);
     await updateRunningJobsStorage({ force: true });
 
     // Stage 1: In-page retry if a retry/regenerate button is currently present
@@ -2328,7 +2291,7 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
             if (clickRes && clickRes.ok) {
                 await sleep(2000);
 
-                if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+                if (jobs.processing(job,2)!==1) {
                     return { action: 'return' };
                 }
 
@@ -2339,10 +2302,8 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
                         totalMessages
                     });
 
-                    job.currentPhase = 'awaiting-response';
-                    job.sawGenerating = job.sawGenerating || !!check?.state?.generating;
-                    job.sawDeepResearch = job.sawDeepResearch || !!check?.state?.deepResearchActive;
-                    job.updatedAt = Date.now();
+                    if(jobs.processing(job,2)!==1)return {action:'return'};
+                    jobs.transaction(job,13,2,{sawGenerating:!!check?.state?.generating,sawDeepResearch:!!check?.state?.deepResearchActive});
                     await updateRunningJobsStorage({ force: true });
 
                     const retryWait = await waitForTabResponse(tabId, {
@@ -2352,12 +2313,12 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
                         commandBinding: getCommandBinding(job)
                     });
 
-                    if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+                    if (jobs.processing(job,2)!==1) {
                         return { action: 'return' };
                     }
 
                     if (retryWait.ok) {
-                        job.deliveryTimeoutAttempts = 0;
+                        jobs.transaction(job,13,4);
                         return { action: 'complete', details: retryWait.details || {} };
                     }
                 }
@@ -2367,7 +2328,7 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
         }
     }
 
-    if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+    if (jobs.processing(job,2)!==1) {
         return { action: 'return' };
     }
 
@@ -2399,7 +2360,7 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
     // Allow DOM to settle after reloaded content script responds
     await sleep(2500);
 
-    if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+    if (jobs.processing(job,2)!==1) {
         return { action: 'return' };
     }
 
@@ -2407,15 +2368,10 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
     const reloadedState = inspect?.state || {};
     const lastAssistant = inspect?.lastAssistant || null;
 
-    const recoveryFlags = () => Number(jobs.get(tabId) === job && job.isRunning && !job.isStopped && !job.isPaused) |
-        (Number(!!(reloadedState.hasTryAgainButton || lastAssistant?.hasRetry)) << 1) |
-        (Number(!!(reloadedState.generating || reloadedState.deepResearchActive)) << 2) |
-        (Number(!!lastAssistant?.hasCompletedText) << 3) |
-        (Number(isSubmissionConfirmed(job)) << 4) | (Number(!!job.currentMessage) << 5);
-    const recoveryDecision = stage => {
-        const flags = recoveryFlags();
-        return requiredQueueDecision(globalThis.CpoQueueEngine?.call('cpo_delivery_recovery', [stage, flags, attempt, 3]));
-    };
+    const recoveryDecision=stage=>jobs.delivery(job,stage,
+        Number(!!(reloadedState.hasTryAgainButton||lastAssistant?.hasRetry))|
+        (Number(!!(reloadedState.generating||reloadedState.deepResearchActive))<<1)|
+        (Number(!!lastAssistant?.hasCompletedText)<<2));
     // Case 0: Page reloaded and is actively generating
     if (recoveryDecision(1) === 3) {
         logQueueEvent(tabId, 'info', `ChatGPT resumed generating after reload for command ${job.currentCommandNumber || '?'}/${totalMessages}. Waiting for completion...`, {
@@ -2423,10 +2379,7 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
             totalMessages
         });
 
-        job.currentPhase = 'awaiting-response';
-        job.sawGenerating = job.sawGenerating || !!reloadedState.generating;
-        job.sawDeepResearch = job.sawDeepResearch || !!reloadedState.deepResearchActive;
-        job.updatedAt = Date.now();
+        jobs.transaction(job,13,2,{sawGenerating:!!reloadedState.generating,sawDeepResearch:!!reloadedState.deepResearchActive});
         await updateRunningJobsStorage({ force: true });
 
         const postReloadWait = await waitForTabResponse(tabId, {
@@ -2436,12 +2389,12 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
             commandBinding: getCommandBinding(job)
         });
 
-        if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+        if (jobs.processing(job,2)!==1) {
             return { action: 'return' };
         }
 
         if (postReloadWait.ok) {
-            job.deliveryTimeoutAttempts = 0;
+            jobs.transaction(job,13,4);
             return { action: 'complete', details: postReloadWait.details || {} };
         }
     }
@@ -2453,7 +2406,7 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
             totalMessages,
             recoveredTurnPreview: previewText(lastAssistant.text, 140)
         });
-        job.deliveryTimeoutAttempts = 0;
+        jobs.transaction(job,13,4);
         return {
             action: 'complete',
             details: {
@@ -2476,12 +2429,11 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
             if (clickResult && clickResult.ok) {
                 await sleep(2000);
 
-                if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+                if (jobs.processing(job,2)!==1) {
                     return { action: 'return' };
                 }
 
-                job.currentPhase = 'awaiting-response';
-                job.updatedAt = Date.now();
+                jobs.transaction(job,13,2);
                 await updateRunningJobsStorage({ force: true });
 
                 const retryWait = await waitForTabResponse(tabId, {
@@ -2491,12 +2443,12 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
                     commandBinding: getCommandBinding(job)
                 });
 
-                if (!jobs.has(tabId) || job.isStopped || job.isPaused || !job.isRunning) {
+                if (jobs.processing(job,2)!==1) {
                     return { action: 'return' };
                 }
 
                 if (retryWait.ok) {
-                    job.deliveryTimeoutAttempts = 0;
+                    jobs.transaction(job,13,4);
                     return { action: 'complete', details: retryWait.details || {} };
                 }
             }
@@ -2514,8 +2466,7 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
             totalMessages,
             ...collectDeliveryDiagnostics(job)
         });
-        job.currentPhase = 'awaiting-response';
-        job.updatedAt = Date.now();
+        jobs.transaction(job,13,2);
         await updateRunningJobsStorage({ force: true });
         return { action: 'retry' };
     }
@@ -2527,12 +2478,7 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
             messagePreview: previewText(job.currentMessage, 140)
         });
 
-        job.queue.unshift(job.currentMessage);
-        job.currentMessage = null;
-        job.currentCommandNumber = 0;
-        job.currentPhase = 'queued';
-        job.updatedAt = Date.now();
-        resetCommandDeliveryState(job);
+        jobs.transaction(job,13,3);
         await updateRunningJobsStorage({ force: true });
 
         return { action: 'retry' };
@@ -3733,9 +3679,10 @@ async function persistScheduledItem(nextItem) {
         const items = await readScheduledMessages();
         const previous=findScheduledItem(items,nextItem.id);
         const index=items.indexOf(previous);
-        if(nextItem.status==='completed'||nextItem.status==='failed'){
-            if(!previous||previous.status!=='firing')throw new Error('Scheduled claim changed before settlement; no record overwritten.');
-        }
+        const terminal=nextItem.status==='completed'||nextItem.status==='failed';
+        if(globalThis.CpoQueueEngine?.call('cpo_background_schedule_guard',[2,
+            Number(terminal)|(Number(!!previous)<<1)|(Number(previous?.status==='firing')<<2)])!==0)
+            throw new Error('Scheduled claim changed before settlement; no record overwritten.');
         if(index>=0)items[index]=nextItem;
         else items.push(nextItem);
         await writeScheduledMessages(items);
@@ -3768,17 +3715,9 @@ async function createScheduledMessage({ text, dueTs, tabId, conversationIdentity
     const normalizedTabId = Number(tabId || 0);
     const normalizedDueTs = Number(dueTs);
 
-    if (!message) {
-        return { ok: false, error: 'Message text is required.' };
-    }
-
-    if (!normalizedTabId) {
-        return { ok: false, error: 'A supported target tab is required.' };
-    }
-
-    if (globalThis.CpoQueueEngine?.timestampValid?.(normalizedDueTs)!==true) {
-        return { ok: false, error: 'A valid due date/time is required.' };
-    }
+    const guard=requiredQueueDecision(globalThis.CpoQueueEngine?.call('cpo_background_schedule_guard',[0,
+        Number(!!message)|(Number(!!normalizedTabId)<<1)|(Number(globalThis.CpoQueueEngine?.timestampValid?.(normalizedDueTs)===true)<<2)]));
+    if(guard!==0)return {ok:false,error:['','Message text is required.','A supported target tab is required.','A valid due date/time is required.'][guard]||'Invalid scheduled request.'};
 
     let tab;
     try {
@@ -3985,11 +3924,10 @@ async function claimScheduledMessageForFire(id, now = Date.now()) {
 
 async function validateScheduledTarget(item) {
     const tabId = Number(item.tabId || 0);
-    if (!tabId) {
-        return { ok: false, reason: 'Scheduled item is missing a target tab.' };
-    }
-
-    if (!['existing', 'new'].includes(item.conversationType) || !item.provider) {
+    const guard=requiredQueueDecision(globalThis.CpoQueueEngine?.call('cpo_background_schedule_guard',[1,
+        Number(!!tabId)|(Number(['existing','new'].includes(item.conversationType)&&!!item.provider)<<1)]));
+    if(guard===1)return {ok:false,reason:'Scheduled item is missing a target tab.'};
+    if (guard!==0) {
         return {
             ok: false,
             reason: 'Scheduled message has no confirmed conversation identity. It was not sent to another chat.'

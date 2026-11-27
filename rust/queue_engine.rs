@@ -5,6 +5,8 @@ mod queue_schema;
 mod background_controller;
 pub use background_controller::*;
 mod background_runtime;
+mod background_schedule;
+pub use background_schedule::cpo_background_schedule_guard;
 pub use background_runtime::{cpo_background_grant,cpo_background_restore,cpo_background_poll_gate};
 use queue_schema::DURABLE_FIELDS;
 use browser_api::API_EVENTS;
@@ -1104,6 +1106,29 @@ mod live_state {
                 _=>0
             }
         }
+        fn rollover_decision(&self,id:u32,stage:u32,observed:u32)->u32{
+            let Some(j)=self.jobs.get(&id)else{return 0;};
+            let flags=(j.truth("isRunning")&&!j.truth("isPaused")&&!j.truth("isStopped")) as u32
+                |((observed&1)<<1)|((j.truth("rolloverInProgress") as u32)<<2)
+                |((matches!(j.get("rolloverStage"),b"\"identity-confirmed\""|b"\"handoff-sending\""|b"\"handoff-waiting\""|b"\"handoff-established\""|b"\"resumed\"") as u32)<<3)
+                |((j.truth("rolloverRebindApplied") as u32)<<4)|((observed&2)<<4)
+                |((j.truth("rolloverNavigationStarted") as u32)<<6)
+                |((j.truth("handoffSubmitted") as u32)<<7)|((j.truth("handoffEstablished") as u32)<<8)|((observed&4)<<7);
+            super::cpo_rollover_next(stage,flags)
+        }
+        fn delivery_decision(&self,id:u32,stage:u32,observed:u32)->u32{
+            let Some(j)=self.jobs.get(&id)else{return 0;};
+            let flags=(j.truth("isRunning")&&!j.truth("isPaused")&&!j.truth("isStopped")) as u32
+                |((observed&7)<<1)|((j.confirmed() as u32)<<4)|((j.truth("currentMessage") as u32)<<5)|((observed&8)<<3);
+            super::cpo_delivery_recovery(stage,flags,j.num("deliveryTimeoutAttempts"),3)
+        }
+        fn retry_plan(&self,id:u32,unlimited:u32,limit:u32,base:u32,factor:u32,max:u32,unlimited_delay:u32)->u32{
+            let Some(j)=self.jobs.get(&id)else{return u32::MAX;};
+            if !j.truth("isRunning")||j.truth("isPaused")||j.truth("isStopped")||!j.truth("currentMessage"){return u32::MAX;}
+            let attempt=j.num("retryAttemptCount");
+            if super::cpo_queue_can_retry(attempt,limit,unlimited)!=1{return 0;}
+            if unlimited!=0{unlimited_delay.max(1)}else{super::cpo_queue_backoff(attempt,base,factor,max).max(1)}
+        }
         fn decision(&self,id:u32,kind:u32,confirmed:u32)->u32 {
             let Some(j)=self.jobs.get(&id) else{return u32::MAX;};
             match kind {
@@ -1231,6 +1256,65 @@ mod live_state {
                         _=>return false
                     }
                 },
+                12=>{ // atomic conversation rollover checkpoints
+                    if !job.truth("isRunning")||job.truth("isPaused")||job.truth("isStopped"){return false;}
+                    if arg!=0&&!job.truth("rolloverInProgress"){return false;}
+                    match arg{
+                        0=>{
+                            if !job.truth("rolloverInProgress"){
+                                let from=if job.truth("conversationId"){job.get("conversationId")}else{job.get("rolloverFromConversationId")}.to_vec();
+                                job.set("rolloverFromConversationId",&from);
+                                job.set("rolloverToConversationId",NULL);
+                                job.set("rolloverInProgress",TRUE);job.set("rolloverStage",b"\"detected\"");
+                                job.set("rolloverReason",b"\"conversation-max-length\"");
+                                for n in ["rolloverNavigationStarted","rolloverRebindApplied","handoffSubmitted","handoffEstablished"]{job.set(n,FALSE);}
+                                job.set("handoffFingerprint",EMPTY);
+                            }
+                            job.set("currentPhase",b"\"rollover-in-progress\"");job.set("retryClass",b"\"conversation-max-length\"");
+                            job.reset(7);
+                            // Preserve the rollover failure class after resetting retry fields.
+                            job.set("retryClass",b"\"conversation-max-length\"");
+                        },
+                        1=>{if job.truth("rolloverNavigationStarted")||job.truth("rolloverRebindApplied"){return false;}
+                            job.set("rolloverNavigationStarted",TRUE);job.set("rolloverStage",b"\"navigating\"");},
+                        2=>{if !job.truth("rolloverNavigationStarted"){return false;}job.set("rolloverStage",b"\"awaiting-new-identity\"");},
+                        3=>{if !job.truth("rolloverRebindApplied")||job.truth("handoffSubmitted"){return false;}
+                            job.set("rolloverStage",b"\"handoff-sending\"");
+                            if !job.truth("handoffFingerprint"){
+                                let Some(fp)=value("handoffFingerprint")else{return false;};
+                                if !present(fp){return false;}job.set("handoffFingerprint",fp);
+                            }
+                        },
+                        4=>{if !job.truth("rolloverRebindApplied"){return false;}job.set("handoffSubmitted",TRUE);job.set("rolloverStage",b"\"handoff-waiting\"");job.reset(6);},
+                        5=>{if !job.truth("handoffSubmitted"){return false;}job.set("handoffEstablished",TRUE);job.set("rolloverStage",b"\"handoff-established\"");},
+                        6=>{if !job.truth("handoffEstablished"){return false;}
+                            job.requeue();job.reset(7);job.set("rolloverInProgress",FALSE);job.set("rolloverStage",b"\"resumed\"");
+                            for n in ["rolloverNavigationStarted","rolloverRebindApplied","handoffSubmitted","handoffEstablished"]{job.set(n,FALSE);}
+                            job.set("handoffFingerprint",EMPTY);job.set("currentPhase",b"\"queued\"");job.set("lastError",EMPTY);
+                        },
+                        _=>return false
+                    }
+                },
+                13=>{ // delivery recovery entry, resume or safe requeue
+                    if !job.truth("isRunning")||job.truth("isPaused")||job.truth("isStopped"){return false;}
+                    match arg{
+                        0=>{let n=job.num("deliveryTimeoutAttempts").saturating_add(1);job.set("deliveryTimeoutAttempts",n.to_string().as_bytes());},
+                        1=>job.set("currentPhase",b"\"recovering\""),
+                        2=>{job.set("currentPhase",b"\"awaiting-response\"");
+                            if value("sawGenerating")==Some(TRUE){job.set("sawGenerating",TRUE);}
+                            if value("sawDeepResearch")==Some(TRUE){job.set("sawDeepResearch",TRUE);}
+                        },
+                        3=>{if job.confirmed()||!job.truth("currentMessage"){return false;}job.requeue();job.set("currentPhase",b"\"queued\"");job.reset(4);},
+                        4=>job.set("deliveryTimeoutAttempts",ZERO),
+                        _=>return false
+                    }
+                },
+                14=>{ // retry exhaustion: a single revision
+                    if !job.truth("isRunning")||job.truth("isPaused")||job.truth("isStopped")||!job.truth("currentMessage"){return false;}
+                    let Some(reason)=value("lastError")else{return false;};
+                    job.set("retryExhausted",TRUE);job.set("retryMode",if arg!=0{b"\"unlimited\"".as_slice()}else{b"\"finite\"".as_slice()});
+                    job.set("lastError",reason);
+                },
                 _=>return false
             }
             if op==0{for (i,v) in fields{job.fields[i]=v;}}
@@ -1309,6 +1393,18 @@ mod live_state {
     #[no_mangle]
     pub extern "C" fn cpo_live_wait(id:u32,token:u32,op:u32,a:u32,b:u32,now:f64)->u32{
         STORE.with(|s|s.borrow_mut().wait_control(id,token,op,a,b,now))
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_live_rollover(id:u32,stage:u32,observed:u32)->u32{
+        STORE.with(|s|s.borrow().rollover_decision(id,stage,observed))
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_live_delivery(id:u32,stage:u32,observed:u32)->u32{
+        STORE.with(|s|s.borrow().delivery_decision(id,stage,observed))
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_live_retry_plan(id:u32,unlimited:u32,limit:u32,base:u32,factor:u32,max:u32,unlimited_delay:u32)->u32{
+        STORE.with(|s|s.borrow().retry_plan(id,unlimited,limit,base,factor,max,unlimited_delay))
     }
     #[no_mangle]
     pub extern "C" fn cpo_live_processing(id:u32,op:u32)->u32{

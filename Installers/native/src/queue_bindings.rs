@@ -416,6 +416,24 @@ const HOST:&str=r####"(() => {
                     return result===0xffffffff?null:result;
                 });
             },
+            rollover(job,stage,observed){
+                const id=ids.get(job);
+                if(!id||handles.get(ownerTabs.get(job))!==job)return 0;
+                return native(e=>e.cpo_live_rollover(id,stage,observed)>>>0);
+            },
+            delivery(job,stage,observed){
+                const id=ids.get(job);
+                if(!id||handles.get(ownerTabs.get(job))!==job)return 0;
+                return native(e=>e.cpo_live_delivery(id,stage,observed)>>>0);
+            },
+            retryPlan(job,unlimited,limit,base,factor,max,unlimitedDelay){
+                const id=ids.get(job);
+                if(!id||handles.get(ownerTabs.get(job))!==job)return null;
+                return native(e=>{
+                    const result=e.cpo_live_retry_plan(id,Number(unlimited),limit,base,factor,max,unlimitedDelay)>>>0;
+                    return result===0xffffffff?null:result;
+                });
+            },
             processing(job,op){
                 const id=ids.get(job);
                 if(!id||handles.get(ownerTabs.get(job))!==job)return null;
