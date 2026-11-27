@@ -25,6 +25,7 @@ ADDON_ID = "chatgpt-queue-optimizer@marsluay.local"
 REPO_FILES = [
     "manifest.json",
     "background.js",
+    "rust-queue-bridge.js",
     "content.js",
     "rust-browser-bridge.js",
     "provider-adapter.js",
@@ -57,6 +58,7 @@ def copy_source(repo_dir, target_dir):
     shutil.copy2(wasm, target_dir / wasm.name)
     shutil.copy2(repo_dir / 'optimizer_browser.wasm', target_dir / 'optimizer_browser.wasm')
     shutil.copy2(repo_dir / 'optimizer_history.wasm', target_dir / 'optimizer_history.wasm')
+    shutil.copy2(repo_dir / 'optimizer_queue.wasm', target_dir / 'optimizer_queue.wasm')
     icons = repo_dir / "icons"
     if icons.exists():
         shutil.copytree(icons, target_dir / "icons")
@@ -75,7 +77,7 @@ def build_firefox_source(repo_dir, target_dir):
         "offline_enabled": base.get("offline_enabled", True),
         "browser_action": browser_action,
         "background": {
-            "scripts": ["utils.js", "provider-adapter.js", "background.js"],
+            "scripts": ["utils.js", "rust-queue-bridge.js", "provider-adapter.js", "background.js"],
             "persistent": True,
         },
         "options_ui": {
@@ -90,6 +92,7 @@ def build_firefox_source(repo_dir, target_dir):
         "web_accessible_resources": [
             "optimizer_core.wasm",
             "optimizer_browser.wasm",
+            "optimizer_queue.wasm",
             "icon_16.png",
             "icon_48.png",
             "icon_128.png",
