@@ -32,3 +32,4 @@ node_modules/
 /history-viewer.js
 /history-store.js
 /rust-queue-bridge.js
+/content.js

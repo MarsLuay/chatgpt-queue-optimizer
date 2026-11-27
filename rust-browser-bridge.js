@@ -234,6 +234,11 @@
             return this.invoke({element},core=>core.cpo_dom_click(flags)===1);
         }
         submitStage(stage, flags) { return this.invoke({},core=>core.cpo_dom_submit_stage(stage,flags)>>>0); }
+        contentControl(op,a=0,b=0){return this.invoke({},core=>core.cpo_content_control(op,a,b)>>>0);}
+        contentRoute(flags){return this.invoke({},core=>core.cpo_content_route(flags)>>>0);}
+        contentGuard(kind,flags){return this.invoke({},core=>core.cpo_content_guard(kind,flags)===1);}
+        contentHistoryOffset(offset,total){return this.invoke({},core=>core.cpo_content_history_offset(offset,total)===1);}
+        contentMutation(flags,count=0,previous=0){return this.invoke({},core=>core.cpo_content_mutation(flags,count,previous)>>>0);}
         activeSurface(node, members, latest) {
             if(!node)return false;
             // The selector walker may call this pure ancestry walker through

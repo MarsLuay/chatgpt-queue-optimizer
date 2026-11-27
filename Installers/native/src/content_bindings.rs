@@ -1,7 +1,18 @@
-(() => {
+//! Generate the content script's browser-effect adapter. Lifecycle,
+//! submission, route, mutation, history and observer policy is Rust-owned.
+use super::Result;
+use std::{fs,path::Path};
+pub const OUTPUT:&str="content.js";
+pub fn generate(stage:&Path)->Result<()>{
+    fs::write(stage.join(OUTPUT),String::from("// @generated Rust content controller host. DO NOT EDIT.\n")+HOST)?;
+    println!("Generated {OUTPUT} from Rust content controller");
+    Ok(())
+}
+const HOST:&str=r####"(() => {
   'use strict';
 
   let cpoHistoryPatched = false;
+  const facts=(...values)=>values.reduce((flags,value,index)=>flags|(Number(!!value)<<index),0);
 
   class ChatGPTOptimizer {
     constructor() {
@@ -27,9 +38,6 @@
         mutationObserver: null,
         isInitialized: false,
         lastMessageCount: 0,
-        _autoArmed: true,
-        _autoWasIntersecting: false,
-        _autoLoadInProgress: false,
         enterQueueListenerAttached: false,
         submissionObserverAttached: false,
         inlineQueueInFlight: false,
@@ -53,7 +61,6 @@
       this.mediaJournalFinalizer = typeof FinalizationRegistry==='function' ? new FinalizationRegistry(ref=>this.mediaJournal.delete(ref)) : null;
       this.mediaStats = { imagesEvicted: 0, playbackEvicted: 0, restored: 0, estimatedImageBytes: 0 };
       this._loggedSelector = null;
-      this._isRefreshing = false;
       this._lastNoMessageLog = 0;
       this.refreshTimeout = null;
       /** @type {Record<string, (...args: number[]) => number> | null} */
@@ -61,7 +68,6 @@
       this.nativeCoreState = 'not loaded';
       this.browserEngine = null;
       this.browserEngineReady = null;
-      this.nativeSubmissionActive = false;
       this.nativeMemoryBytes = 0;
       /** @type {ReturnType<ChatGPTOptimizer['sampleResources']> | null} */
       this.resourceSample = null;
@@ -382,21 +388,21 @@
     // Explicit snapshot requests only. No HTML, attachments, source attributes,
     // or React state are serialized; visible message text may be sensitive.
     captureHistoryBatch(request) {
-      if (!this.provider?.supportsOptimizer || !this.canDiscardInactiveTab()) {
+      if (this.browserEngine?.contentGuard(4,facts(this.provider?.supportsOptimizer,this.canDiscardInactiveTab()))!==true) {
         return { ok: false, error: 'Chat must be inactive, idle and free of drafts or uploads.' };
       }
       const surface = this.getCurrentSurface();
-      if (!surface.conversationId || !surface.optimizerEligible) {
+      if (this.browserEngine?.contentGuard(5,facts(surface.conversationId,surface.optimizerEligible))!==true) {
         return { ok: false, error: 'Open a saved ChatGPT conversation first.' };
       }
       const messages = this.getMessageNodes();
       const total = messages.length;
       const offset = Number(request.offset || 0);
-      if (!Number.isSafeInteger(offset) || offset < 0 || offset > total) return { ok: false, error: 'Invalid history offset.' };
+      if (!Number.isSafeInteger(offset)||offset<0||offset>0xffffffff||this.browserEngine?.contentHistoryOffset(offset,total)!==true) return { ok: false, error: 'Invalid history offset.' };
       // A route or count change aborts the snapshot rather than mixing chats.
       const identity = surface.key;
       if (typeof identity !== 'string' || !identity) return { ok: false, error: 'Unknown conversation identity.' };
-      if (request.identity != null && (request.identity !== identity || request.total !== total)) {
+      if (this.browserEngine?.contentGuard(6,facts(identity,request.identity==null||(request.identity===identity&&request.total===total)))!==true) {
         return { ok: false, error: 'Conversation changed during capture. Start again.' };
       }
       const native = this.browserEngine?.captureHistory(messages, offset);
@@ -405,27 +411,25 @@
     }
 
     canDiscardInactiveTab() {
-      // Fail closed for active responses, drafts, uploads, media and unknown state.
-      if (typeof document === 'undefined' || document.visibilityState !== 'hidden' ||
-          !this.provider?.supportsOptimizer || !this.getCurrentSurface().optimizerEligible ||
-          this.state.inlineQueueInFlight || this.nativeSubmissionActive) return false;
-      try {
-        const composer = this.provider.getComposerMatch?.(document)?.element;
-        if (!composer || String(this.provider.getComposerText(composer) || '').trim()) return false;
-        const state = this.provider.getGenerationState?.(document);
-        if (!state || state.generating || state.deepResearchActive ||
-            state.hasActiveStopButton || state.hasResultStreaming ||
-            state.hasActiveToolOrResearch) return false;
-        if (document.querySelector('[role="dialog"], [aria-modal="true"]')) return false;
-        if (Array.from(document.querySelectorAll('input[type="file"]')).some(input =>
-          /** @type {HTMLInputElement} */ (input).files?.length)) return false;
-        if (Array.from(document.querySelectorAll('audio,video')).some(media =>
-          /** @type {HTMLMediaElement} */ (media).paused === false)) return false;
-        if (document.querySelector('[data-state="uploading"], [data-testid*="upload-progress"], [aria-label*="Uploading"]')) return false;
-        return true;
-      } catch {
-        return false;
-      }
+      const engine=this.browserEngine;
+      // Reject before DOM inspection when the tab or native state is unsafe.
+      if(engine?.contentGuard(0,facts(typeof document!=='undefined'&&document.visibilityState==='hidden',
+        this.provider?.supportsOptimizer,this.getCurrentSurface().optimizerEligible,
+        !this.state.inlineQueueInFlight,engine?.contentControl(8)===0))!==true)return false;
+      try{
+        const composer=this.provider.getComposerMatch?.(document)?.element;
+        if(engine.contentGuard(1,facts(composer,composer&&!String(this.provider.getComposerText(composer)||'').trim()))!==true)return false;
+        const state=this.provider.getGenerationState?.(document);
+        if(engine.contentGuard(2,facts(state,!state?.generating,!state?.deepResearchActive,!state?.hasActiveStopButton,!state?.hasResultStreaming,!state?.hasActiveToolOrResearch))!==true)return false;
+        const noModal=!document.querySelector('[role="dialog"], [aria-modal="true"]');
+        if(!noModal)return false;
+        const noFiles=!Array.from(document.querySelectorAll('input[type="file"]')).some(input=>input.files?.length);
+        if(!noFiles)return false;
+        const noPlayback=!Array.from(document.querySelectorAll('audio,video')).some(media=>media.paused===false);
+        if(!noPlayback)return false;
+        const noUpload=!document.querySelector('[data-state="uploading"], [data-testid*="upload-progress"], [aria-label*="Uploading"]');
+        return engine.contentGuard(3,facts(noModal,noFiles,noPlayback,noUpload))===true;
+      }catch{return false;}
     }
 
     getCurrentSurface() {
@@ -499,15 +503,11 @@
       const surface = this.getCurrentSurface();
       const nextKey = surface.key;
       const containerDetached = !!(this.state.container && typeof document !== 'undefined' && typeof document.contains === 'function' && !document.contains(this.state.container));
-      if (!force && nextKey === this.state.routeKey && !containerDetached) {
-        return;
-      }
-
-      this.state.routeKey = nextKey;
+      const action=this.browserEngine?.contentRoute(facts(this.provider?.supportsOptimizer,force,nextKey===this.state.routeKey,containerDetached,surface.optimizerEligible,this.config.enabled));
+      if(action===0)return;
+      this.state.routeKey=nextKey;
       this.unbindOptimizer();
-      if (surface.optimizerEligible && this.config.enabled) {
-        this.bindOptimizer();
-      }
+      if(action===2)this.bindOptimizer();
     }
 
     // Only scalar counts cross the WASM boundary. Never pass DOM nodes or
@@ -667,12 +667,15 @@
       return this.browserEngineReady;
     }
 
+    get nativeSubmissionActive() {
+      return (this.browserEngine?.contentControl(8)??0)!==0;
+    }
+
     async performNativeSubmission(message) {
       if (this.nativeSubmissionActive) return { ok:false,error:'Another native submission is pending.' };
       if (!await this.loadRustBrowserEngine() || !this.browserEngine?.exports) return {ok:false,error:'Native execution unavailable before submission.'};
-      if (this.nativeSubmissionActive) return {ok:false,error:'Another native submission is pending.'};
-      this.nativeSubmissionActive=true;
       const engine=this.browserEngine;
+      if(engine.contentControl(5)!==1)return {ok:false,error:'Another native submission is pending or native controller unavailable.'};
       const provider=this.provider;
       const code={chatgpt:1,gemini:2,claude:3}[provider?.id]||0;
       const queued=String(message.text||'');
@@ -680,14 +683,14 @@
       const identityValid=()=>!!message.expectedKey && provider?.getConversationIdentity(location.href)?.key===message.expectedKey;
       const connected=node=>!!node&&node.isConnected!==false;
       const describe=element=>({tagName:element?.tagName||'',id:element?.id||'',disabled:!!element?.disabled});
-      let composer=null,original='',written=false,clicked=false;
+      let composer=null,original='';
       let composerMatch=null,buttonMatch=null;
       const failure=(signal,error,extra={})=>({ok:false,error,details:{
         compatibilityFailure:signal,signalKey:signal,provider:provider?.name||'',url:location.href,title:document.title,
         composerSelector:composerMatch?.selector||'',composerSignal:composerMatch?.signalKey||'composer',
         composer:describe(composer),...extra}});
       const restore=()=>{
-        if(!written||clicked||!composer)return {restored:false};
+        if(engine.contentControl(8)!==2||!composer)return {restored:false};
         const current=engine.composerRead(code,composer);
         const flags=(Number(current!=null&&normalize(current)===normalize(queued))<<2)|
           (Number(identityValid())<<5)|(Number(connected(composer))<<6);
@@ -695,7 +698,7 @@
         return {restored:engine.composerWrite(code,composer,original,1)===true};
       };
       try {
-        if(!code||!queued||!identityValid())return failure('submission','Conversation changed before native submission.');
+        if(engine.contentGuard(7,facts(code,queued,identityValid()))!==true)return failure('submission','Conversation changed before native submission.');
         composerMatch=provider.getSelectorMatch(document,'composer',(node,selector)=>
           !node.closest?.('#cpo-root')&&provider.isComposerElement(node,{selector,source:'document'})&&
           (code===1||provider.getComposerFromEventTarget(node)===node));
@@ -705,7 +708,7 @@
         const action=engine.submitStage(0,flags);
         if(action===1)return failure('composer','Canonical composer contains pending user content; queued send deferred to preserve the draft.',{composerConflict:true,deferred:true,pendingTextLength:original.length});
         if(action!==2)return failure('composer','Required composer signal or conversation identity unavailable.');
-        written=true;
+        if(engine.contentControl(6)!==1)return failure('submission','Native write authorization unavailable.');
         if(engine.composerWrite(code,composer,queued,1)!==true)return failure('submission','Native composer write failed.',restore());
         await new Promise(resolve=>setTimeout(resolve,700));
         const current=engine.composerRead(code,composer);
@@ -721,19 +724,18 @@
           return failure('sendButton','Send action unavailable, disabled, or target changed.',restore());
         }
         const authorized=await globalThis.CpoBrowserApi.invoke('runtimeSend',{action:'authorizeNativeQueueClick',token:message.token});
-        if(!authorized?.ok||engine.submitStage(1,stageFlags())!==6||
-          provider.getSendActionMatch(document)?.element!==button)
+        if(engine.contentGuard(8,facts(authorized?.ok,provider.getSendActionMatch(document)?.element===button))!==true||engine.submitStage(1,stageFlags())!==6)
           return failure('submission','Queue authorization or composer state changed before click.',restore());
         // From this point the outcome may be uncertain; never restore or
         // invoke a second submission implementation after a click attempt.
-        clicked=true;
+        if(engine.contentControl(7)!==1)return failure('submission','Native click authorization unavailable.',restore());
         if(engine.click(button)!==true)return failure('submission','Native click could not be confirmed.',{failureClass:'submission-unconfirmed'});
         return {ok:true,details:{composerSelector:composerMatch.selector,composerSignal:composerMatch.signalKey,
           sendButtonSelector:buttonMatch.selector,sendButtonSignal:buttonMatch.signalKey,
           messageLength:queued.length,url:location.href,title:document.title,provider:provider.name}};
       } catch(error) {
         return failure('submission',error?.message||'Native submission failed.',restore());
-      } finally { this.nativeSubmissionActive=false; }
+      } finally { engine.contentControl(9); }
     }
 
     async bindOptimizer() {
@@ -744,9 +746,11 @@
         return;
       }
 
-      const epoch=(this.optimizerBindEpoch||0)+1;this.optimizerBindEpoch=epoch;
+      if(!this.browserEngine?.exports){if(!await this.loadRustBrowserEngine())return;}
+      const epoch=this.browserEngine.contentControl(0);
+      if(!epoch)return;
       const ready=await Promise.all([this.loadRustCore(),this.loadRustBrowserEngine()]);
-      if(this.optimizerBindEpoch!==epoch)return;
+      if(this.browserEngine?.contentControl(1,epoch)!==1)return;
       if(!ready.every(Boolean)||!this.nativeCore||!this.browserEngine?.exports){
         this.unbindOptimizer();
         console.warn('CPO: Optimizer disabled because required Rust engines are unavailable.');
@@ -758,11 +762,11 @@
       this.provider?.setTurnScanCacheEnabled?.(true);
       this.setupObservers();
       this.refresh();
-      this.state.optimizerBound = true;
+      if(this.browserEngine?.contentControl(1,epoch)===1)this.state.optimizerBound = true;
     }
 
     unbindOptimizer() {
-      this.optimizerBindEpoch=(this.optimizerBindEpoch||0)+1;
+      this.browserEngine?.contentControl(2);
       this.provider?.setTurnScanCacheEnabled?.(false);
       this.disable();
       this.clearConversationRoot();
@@ -1346,9 +1350,10 @@
       // A normal streaming token changes the contents of an existing turn,
       // but not the number or order of turns. Do not rescan the entire chat.
       const structuralChange=this.browserEngine?.mutations(mutations,0,this.state.lastMessageCount===0);
-      if(structuralChange==null){this.unbindOptimizer();return;}
+      const decision=this.browserEngine?.contentMutation(facts(this.config.enabled,this.state.optimizerBound,structuralChange!=null,structuralChange));
+      if(decision==null||decision===3){this.unbindOptimizer();return;}
 
-      if (!structuralChange) {
+      if (decision===0) {
         this.state.perf.mutationSkips++;
         return;
       }
@@ -1359,7 +1364,7 @@
       this.refreshTimeout = setTimeout(() => {
         if (!this.config.enabled || !this.state.optimizerBound) return;
         const count = this.getMessageNodes().length;
-        if (count !== this.state.lastMessageCount || count > 0) {
+        if (this.browserEngine?.contentMutation(31,count,this.state.lastMessageCount)===2) {
           this.state.lastMessageCount = count;
           this.refresh();
         }
@@ -1679,25 +1684,15 @@
       if (this.state.observer) return;
       if (typeof IntersectionObserver === 'undefined') return;
 
-      this.state._autoArmed = true;
-      this.state._autoWasIntersecting = false;
-      this.state._autoLoadInProgress = false;
-
+      const epoch=this.browserEngine?.contentControl(10);
+      if(!epoch)return;
       this.state.observer = new IntersectionObserver(([entry]) => {
         if(!this.state.optimizerBound)return;
-        const flags=Number(!!entry?.isIntersecting)|
-            (Number(this.state._autoWasIntersecting)<<1)|
-            (Number(this.state._autoArmed)<<2)|
-            (Number(this.state._autoLoadInProgress)<<3)|
-            (Number(this.state.hiddenCount>0)<<4);
-        const action=this.browserEngine?.intersection(flags);
+        const action=this.browserEngine?.contentControl(11,epoch,Number(!!entry?.isIntersecting)|(Number(this.state.hiddenCount>0)<<4));
         if(action==null){this.unbindOptimizer();return;}
-        this.state._autoArmed=!!(action&1);
-        this.state._autoWasIntersecting=!!(action&2);
         if(action&4){
-            this.state._autoLoadInProgress=true;
             try{this.showOlderMessages();}
-            finally{requestAnimationFrame(()=>{this.state._autoLoadInProgress=false;});}
+            finally{requestAnimationFrame(()=>{this.browserEngine?.contentControl(12,epoch);});}
         }
       }, {
         root: null,
@@ -1714,13 +1709,12 @@
         if(this.state.optimizerBound)this.unbindOptimizer();
         return;
       }
-      if (this._isRefreshing) return;
       if (this.provider?.supportsOptimizer && !this.getCurrentSurface().optimizerEligible) {
         this.unbindOptimizer();
         return;
       }
 
-      this._isRefreshing = true;
+      if(this.browserEngine.contentControl(3)!==1)return;
 
       try {
         // Refresh the list once, then reuse that exact result while selecting
@@ -1744,7 +1738,7 @@
         console.warn('CPO: Native optimization failed; restoring conversation.',error);
         this.unbindOptimizer();
       } finally {
-        this._isRefreshing = false;
+        this.browserEngine?.contentControl(4);
       }
     }
 
@@ -1835,3 +1829,4 @@
     };
   }
 })();
+"####;

@@ -528,3 +528,21 @@ test('native journal restoration retains new application attributes',{skip},asyn
     assert.equal(optimizer.mediaOriginals.has(first),false);
     assert.equal(optimizer.mediaOriginals.has(second),false);
 });
+
+
+test('native content controller rejects concurrent submissions and stale bind generations',{skip},async()=>{
+    const bridge=await engine();
+    const first=bridge.contentControl(0),second=bridge.contentControl(0);
+    assert.equal(bridge.contentControl(1,first),0);
+    assert.equal(bridge.contentControl(1,second),1);
+    assert.equal(bridge.contentControl(5),1);
+    assert.equal(bridge.contentControl(5),0);
+    assert.equal(bridge.contentControl(6),1);
+    assert.equal(bridge.contentControl(7),1);
+    assert.equal(bridge.contentControl(8),3);
+    assert.equal(bridge.contentControl(9),1);
+    bridge.contentControl(2);
+    assert.equal(bridge.contentControl(1,second),0);
+    assert.equal(bridge.contentRoute(1|4|16|32),0);
+    assert.equal(bridge.contentRoute(1|4|8|16|32),2);
+});

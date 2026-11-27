@@ -23,6 +23,10 @@ fn h(op: u32, a: u32, b: u32, c: u32) -> u32 {
 pub extern "C" fn cpo_browser_abi() -> u32 { browser_abi::VERSION }
 #[path="browser_abi.rs"]
 mod browser_abi;
+mod content_controller;
+pub use content_controller::{cpo_content_route,cpo_content_guard,cpo_content_history_offset,cpo_content_mutation};
+#[cfg(target_arch="wasm32")]
+pub use content_controller::cpo_content_control;
 #[path="dom_facts.rs"]
 mod dom_facts;
 
