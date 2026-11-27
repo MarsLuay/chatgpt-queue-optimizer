@@ -427,4 +427,4 @@ declare var CpoRustBrowserBridge: any;
 declare var CpoQueueEngine: any;
 
 /** Shared browser API effect transport. */
-declare var CpoBrowserApi: { invoke(operation: string, ...args: any[]): Promise<any> };
+declare var CpoBrowserApi: { invoke(operation: string, ...args: any[]): Promise<any>; listen(handler: (message: any, sender: chrome.runtime.MessageSender, reply: (value?: any)=>void)=>any): void };
