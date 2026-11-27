@@ -27,6 +27,29 @@
         return 0;
     }
 
+    // Read CPO2 rows even when WASM is unavailable. Bound expansion before allocation.
+    function decodeCompressed(input, length) {
+        if (length > 111000 || length <= input.length) throw new Error('Corrupt compressed snapshot row.');
+        const out = new Uint8Array(length);
+        let i = 0, o = 0;
+        while (i < input.length) {
+            const token = input[i++];
+            const n = token < 128 ? token + 1 : (token & 127) + 3;
+            if (n > length - o) throw new Error('Corrupt compressed snapshot row.');
+            if (token < 128) {
+                if (n > input.length - i) throw new Error('Corrupt compressed snapshot row.');
+                out.set(input.subarray(i, i+n), o); i += n; o += n;
+            } else {
+                if (input.length-i < 2) throw new Error('Corrupt compressed snapshot row.');
+                const distance = input[i] | (input[i+1] << 8); i += 2;
+                if (!distance || distance > o) throw new Error('Corrupt compressed snapshot row.');
+                for (let j = 0; j < n; j++) { out[o] = out[o-distance]; o++; }
+            }
+        }
+        if (o !== length) throw new Error('Corrupt compressed snapshot row.');
+        return out;
+    }
+
     class CpoHistoryStore {
         constructor(db) {
             this.db = db;
@@ -43,10 +66,11 @@
                 const core = result.instance.exports;
                 const required = ['cpo_history_abi','cpo_history_buffer','cpo_history_capacity',
                     'cpo_history_encode','cpo_history_decode','cpo_history_wipe',
+                    'cpo_history_compress','cpo_history_decompress','cpo_history_output','cpo_history_wipe_output',
                     'cpo_history_row_decision','cpo_history_meta_valid','cpo_history_next',
                     'cpo_history_page_start','cpo_history_page_size'];
                 if (!required.every(name => typeof core[name] === 'function') ||
-                    core.cpo_history_abi() !== 1 || !(core.memory instanceof WebAssembly.Memory)) {
+                    core.cpo_history_abi() !== 2 || !(core.memory instanceof WebAssembly.Memory)) {
                     throw new Error('History module ABI mismatch');
                 }
                 this.core = core;
@@ -129,9 +153,11 @@
                     if (decision === 2) return null;
                     const length = core.cpo_history_encode(row.index, role, Number(row.truncated === true), written) >>> 0;
                     if (length !== HEADER + written) throw new Error('Rust snapshot codec rejected row.');
-                    binary = buffer.slice(0, length);
+                    const compressed = core.cpo_history_compress(length) >>> 0;
+                    binary = compressed ? new Uint8Array(core.memory.buffer, core.cpo_history_output() >>> 0, compressed).slice() : buffer.slice(0, length);
                 } finally {
                     core.cpo_history_wipe(wipeSize);
+                    core.cpo_history_wipe_output(wipeSize);
                 }
             } else {
                 size = this.encoder.encode(row.text).byteLength + 128;
@@ -151,26 +177,38 @@
             }
             if (value.length < HEADER || value.length > 111016) throw new Error('Corrupt snapshot row.');
             let flags;
+            let textBytes = value.subarray(HEADER);
+            const compressed = value[0] === 67 && value[1] === 80 && value[2] === 79 && value[3] === 50;
             const core = this.core;
             if (core) {
                 const ptr = core.cpo_history_buffer() >>> 0;
                 const buffer = new Uint8Array(core.memory.buffer, ptr, value.length);
                 try {
                     buffer.set(value);
-                    flags = core.cpo_history_decode(index, value.length) >>> 0;
-                    if (!flags) throw new Error('Corrupt snapshot row.');
+                    if (compressed) {
+                        const length = core.cpo_history_decompress(index, value.length) >>> 0;
+                        if (!length || length > 111016) throw new Error('Corrupt compressed snapshot row.');
+                        const decoded = new Uint8Array(core.memory.buffer, core.cpo_history_output() >>> 0, length);
+                        flags = decoded[8] | (decoded[9] << 8);
+                        textBytes = decoded.slice(HEADER);
+                    } else {
+                        flags = core.cpo_history_decode(index, value.length) >>> 0;
+                        if (!flags) throw new Error('Corrupt snapshot row.');
+                    }
                 } finally {
                     core.cpo_history_wipe(value.length);
+                    if (compressed) core.cpo_history_wipe_output(core.cpo_history_capacity());
                 }
             } else {
                 const view = new DataView(value.buffer, value.byteOffset, value.byteLength);
-                if (view.getUint32(0, false) !== 0x43504f31 || view.getUint32(4, true) !== index ||
+                if ((!compressed && view.getUint32(0, false) !== 0x43504f31) || view.getUint32(4, true) !== index ||
                     value[8] < 1 || value[8] > 3 || value[9] > 1 || value[10] || value[11] ||
-                    view.getUint32(12, true) !== value.length - HEADER) throw new Error('Corrupt snapshot row.');
+                    (!compressed && view.getUint32(12, true) !== value.length - HEADER)) throw new Error('Corrupt snapshot row.');
+                if (compressed) textBytes = decodeCompressed(textBytes, view.getUint32(12, true));
                 flags = value[8] | (value[9] << 8);
             }
             return { index, role: ROLES[flags & 255], truncated: !!(flags & 256),
-                text: this.decoder.decode(value.subarray(HEADER)) };
+                text: this.decoder.decode(textBytes) };
         }
 
         execute(kind, options = {}) {
