@@ -252,21 +252,20 @@
             if(!this.exports)return null;
             try{return this.exports.cpo_dom_candidate(mode,flags)===1;}catch(error){this.fail(error);return null;}
         }
-        assistantError(node,attrs,values) {
+        assistantError(node,attrs) {
             if(!node||typeof node.getAttribute!=='function')return false;
-            return this.invoke({node,attrs,values},(core,ctx)=>{
+            return this.invoke({node,attrs},(core,ctx)=>{
                 ctx.candidates=[node];
                 try{for(const candidate of node.querySelectorAll?.(attrs.map(attr=>'['+attr+']').join(','))||[])ctx.candidates.push(candidate);}catch{}
                 return core.cpo_dom_error_stop(ctx.candidates.length,attrs.length)===1;
             });
         }
-        incompleteTool(node,selectors,states,normalize) {
+        incompleteTool(node,selectors,attrs) {
             if(!node||typeof node.getAttribute!=='function')return false;
-            return this.invoke({node,selectors,states,normalize},(core,ctx)=>{
+            return this.invoke({node,selectors,attrs},(core,ctx)=>{
                 ctx.candidates=[node];
-                ctx.attrs=selectors.flatMap(selector=>selector.match(/\[([^=\]]+)/g)||[]).map(attr=>attr.slice(1));
                 try{for(const candidate of node.querySelectorAll?.(selectors.join(','))||[])ctx.candidates.push(candidate);}catch{}
-                return core.cpo_dom_incomplete_tool(ctx.candidates.length)===1;
+                return core.cpo_dom_incomplete_tool(ctx.candidates.length,selectors.length,attrs.length)===1;
             });
         }
 
@@ -322,14 +321,13 @@
             let flags = 0;
             if (ctx.root.contains(node)) flags |= 1;
             if (node.closest('#cpo-root') || node.classList?.contains('cpo-more-banner')) flags |= 2;
-            if (['script','style','nav','aside','header','footer'].includes((node.tagName || '').toLowerCase())) flags |= 4;
             const marker = ctx.markers.some(selector => node.matches?.(selector)) ||
                 !!(ctx.markers.length && node.querySelector(ctx.markerQuery));
             if (marker) flags |= 8;
             if (node.querySelector(ctx.composerForm)) flags |= 16;
             if (node.querySelector(ctx.composerInput)) flags |= 32;
             if (node.id?.includes('thread-bottom')) flags |= 64;
-            if (marker || node.querySelector('p, pre, code, ul, ol, h1, h2, h3, h4, h5, h6, [data-message-author-role]')) flags |= 128;
+            if (node.querySelector('p, pre, code, ul, ol, h1, h2, h3, h4, h5, h6, [data-message-author-role]')) flags |= 128;
             ctx.flags.set(id, flags);
             return flags;
         }
@@ -346,7 +344,7 @@
             const composer=adapter.selectors.composer.join(',');
             return this.invoke({handles:[null,node],flags:new Map(),adapter,root,markers,markerQuery:markers.join(','),
                 composerForm:composer+', form',composerInput:composer+', input, form'},core=>{
-                const flags=this.nodeFlags(1);
+                const flags=core.cpo_dom_message_flags(1);
                 if(!core.cpo_message_predicate(mode,flags,mode===1?15:80))return false;
                 const text=(node.textContent||'').trim().length;
                 return core.cpo_message_predicate(mode,flags,Math.min(0xffffffff,text))===1;
@@ -356,6 +354,13 @@
             return this.invoke({},core=>core.cpo_intersection_transition(flags)>>>0);
         }
 
+        copyDomFact(value,pointer){
+            const text=String(value??'');
+            const target=new Uint16Array(this.exports.memory.buffer,pointer,128);
+            const count=Math.min(text.length,target.length);
+            for(let i=0;i<count;i++)target[i]=text.charCodeAt(i);
+            return text.length;
+        }
         host(op, a, b, c) {
             const ctx = this.context;
             if (!ctx) throw new Error('Browser operation outside scoped call');
@@ -368,18 +373,9 @@
                     ctx.node = root;
                     return 1;
                 }
-                case 2: {
-                    const node = ctx.node;
-                    if (node.nodeType === 3) return 1;
-                    if (node.nodeType !== 1) return 0;
-                    if (node.localName === 'img') return 2;
-                    if (node.localName === 'video' || node.localName === 'audio') return 3;
-                    if (node.localName === 'canvas' || node.localName === 'iframe') return 4;
-                    return 0;
-                }
+                case 2:return ctx.node.nodeType||0;
                 case 3: return Math.min(0xffffffff, ctx.node.length || 0);
                 case 4: ctx.node = ctx.walker.nextNode(); return Number(!!ctx.node);
-                case 5: ctx.output[a] = b; return 1;
                 case 10: {
                     ctx.fallback = !!a;
                     ctx.selector = null;
@@ -405,15 +401,10 @@
                     }
                     if (!ctx.fallback && !ctx.selector) ctx.selector = ctx.adapter.findMatchingSelector(ctx.handles[b], 'messages');
                     return 1;
-                case 16: return ctx.accepted.length;
-                case 17: return ctx.accepted[a] || 0;
                 case 19: {
                     const node = ctx.handles[a];
-                    return Number(node.tagName?.toLowerCase() === 'article' ||
-                        (node.getAttribute?.('data-testid') || '').startsWith('conversation-turn') ||
-                        !!node.getAttribute?.('data-message-author-role') || !!node.getAttribute?.('data-message-id'));
+                    return Number(!!node.getAttribute?.('data-message-author-role')||!!node.getAttribute?.('data-message-id'));
                 }
-                case 20: ctx.redundant.add(a); return 1;
                 case 21: ctx.accepted = ctx.accepted.filter(id => !ctx.redundant.has(id)); return ctx.accepted.length;
                 case 22: {
                     const left = ctx.accepted[a], right = ctx.accepted[b];
@@ -422,7 +413,6 @@
                     if (position & 2) return 1;
                     return Number(ctx.order.get(left) > ctx.order.get(right));
                 }
-                case 23: [ctx.accepted[a], ctx.accepted[b]] = [ctx.accepted[b], ctx.accepted[a]]; return 1;
                 case 30: ctx.targets = ctx.root.querySelectorAll(a >= 2 ? 'video, audio' : 'img'); return ctx.targets.length;
                 case 31: {
                     const target = ctx.targets[a];
@@ -704,7 +694,6 @@
                         }
                     }finally{this.context=outer;}
                 }
-                case 180:return ctx.accepted[a]||0;
                 case 80: {
                     const selector = ctx.selectors[a];
                     try {
@@ -762,26 +751,18 @@
                     try{ctx.element.click();return 1;}catch{return 0;}
                 case 100: return !ctx.node?0:ctx.node===ctx.latest?1:ctx.members.has(ctx.node)?2:3;
                 case 101: ctx.node=ctx.node.parentElement||ctx.node.parentNode||null;return 1;
-                case 102: {
-                    const attr=ctx.attrs[b];
-                    const value=String(ctx.candidates[a].getAttribute?.(attr)||'').trim().toLowerCase();
-                    return Number(ctx.values.has(value))|(Number(attr==='data-error')<<1)|(Number(['true','1','yes'].includes(value))<<2);
+                case 102:
+                case 104:{
+                    const value=String(ctx.candidates[a].getAttribute?.(ctx.attrs[b])||'').trim();
+                    return this.copyDomFact(value,c);
                 }
                 case 103:
-                    return Number(ctx.selectors.some(selector=>{try{return !!ctx.candidates[a].matches?.(selector);}catch{return false;}}));
-                case 104: {
-                    const candidate=ctx.candidates[a];
-                    for(const attr of ctx.attrs){
-                        const value=String(candidate.getAttribute?.(attr)||'').trim().toLowerCase();
-                        if(value)return Number(ctx.states.has(value));
-                    }
-                    return 0;
-                }
-                case 105: {
-                    const turn=ctx.normalize(ctx.node.innerText||ctx.node.textContent||'');
-                    if(!turn)return 1;
+                    try{return Number(!!ctx.candidates[a].matches?.(ctx.selectors[b]));}catch{return 0;}
+                case 105:{
+                    ctx.rawText=String(ctx.node.innerText||ctx.node.textContent||'');
                     const tool=ctx.candidates[a];
-                    return Number(turn===ctx.normalize(tool.innerText||tool.textContent||''));
+                    ctx.expectedText=String(tool.innerText||tool.textContent||'');
+                    return 1;
                 }
                 case 110: {
                     const tag=['div','span','article','h2','button','option','br','strong','p'][a];
@@ -805,7 +786,6 @@
                     ctx.uiNodes[a].textContent=String(value);
                     return 1;
                 }
-                case 115: ctx.uiNodes[a].appendChild(ctx.uiNodes[b]);return 1;
                 case 116: return ctx.rows[a]?.flags||0;
                 case 117: {
                     const dispatch=ctx.onAction;
@@ -814,13 +794,13 @@
                 }
                 case 118: ctx.uiNodes[a].value=String(ctx.rows[b]?.fields?.[c]??'');return 1;
                 case 119: ctx.uiNodes[a].disabled=!!(b&1);ctx.uiNodes[a].selected=!!(b&2);return 1;
-                case 121: {
-                    const value=String(ctx.rows[b]?.fields?.[c]??'');
-                    // Only a single safe class token may cross the boundary.
-                    if(/^[a-z0-9_-]+$/.test(value))ctx.uiNodes[a].classList.add(value);
-                    return 1;
+                case 121:ctx.uiNodes[a].classList.add(ctx.classToken);ctx.classToken='';return 1;
+                case 181:ctx.classToken=String(ctx.rows[a]?.fields?.[b]??'');return ctx.classToken.length;
+                case 182:return ctx.classToken.charCodeAt(a)||0;
+                case 183:{
+                    const node=a===0?ctx.node:ctx.handles[b];
+                    return this.copyDomFact(a===0?node?.localName:a===1?node?.tagName:node?.getAttribute?.('data-testid'),c);
                 }
-                case 122: ctx.root.replaceChildren(ctx.uiNodes[0]);return 1;
                 case 123:
                     if(a===0)ctx.messages.push(ctx.value);
                     else if(a===1)ctx.messages[b]=ctx.value;
@@ -828,15 +808,12 @@
                     else if(a===3)ctx.messages.length=0;
                     else return 0;
                     return 1;
-                case 124: return ctx.value.charCodeAt(a)||0;
-                case 125: ctx.spans.push([a,b]);return 1;
                 case 126:
                     if(a===0)Object.defineProperty(ctx.sequences,ctx.name,{value:ctx.messages.slice(),writable:true,enumerable:true,configurable:true});
                     else if(a===1)ctx.result=ctx.sequences[ctx.name].slice();
                     else if(a===2)delete ctx.sequences[ctx.name];
                     else return 0;
                     return 1;
-                case 130:return ctx.value.charCodeAt(a)||0;
                 case 131:ctx.values.push([]);return ctx.values.length-1;
                 case 132:ctx.values[a].push(ctx.value.slice(b,c));return 1;
                 case 133:ctx.values[a].push(String.fromCharCode(b));return 1;
@@ -859,7 +836,6 @@
                     if(!obj||!Object.hasOwn(obj,key))return 0;
                     ctx.values.push(obj[key]);return ctx.values.length-1;
                 }
-                case 140:return ctx.values[a].length;
                 case 141:ctx.values.push(ctx.values[a][b]);return ctx.values.length-1;
                 case 142:{
                     const raw=ctx.values[a];
@@ -872,10 +848,8 @@
                 case 143:return Number(!!ctx.values[a]);
                 case 144:ctx.values.length=1;ctx.result={name:'',messages:[]};return 1;
                 case 145:ctx.result.messages.push(ctx.value.slice(a,b));return 1;
-                case 146:return ctx.result.messages.length;
                 case 147:return ctx.value.indexOf(ctx.needle,a)>>>0;
                 case 148:ctx.parts.push(ctx.value.slice(a,b));return 1;
-                case 149:ctx.parts.push(ctx.replacement);return 1;
                 case 150: {
                     ctx.journalNode=ctx.entries[a]?.deref();
                     const node=ctx.journalNode;
@@ -912,7 +886,11 @@
                     const id=ctx.ids.get(parent);
                     return id&&ctx.acceptedSet.has(id)?id:0xffffffff;
                 }
-                default: throw new Error('Unknown Rust browser host operation: ' + op);
+                default:{
+                    const bindings=globalThis.CpoBrowserWasmBindings;
+                    if(!bindings)throw new Error('Generated DOM primitives unavailable');
+                    return bindings.dispatchHostPrimitive(op,a,b,c,ctx);
+                }
             }
         }
     }
@@ -1001,11 +979,11 @@
     }
     function hasAssistantErrorStop(node,engine=null){
         const facts=providerFacts();
-        return requireNative(engine?.assistantError(node,facts.assistantErrorAttributes,new Set(facts.assistantErrorValues)));
+        return requireNative(engine?.assistantError(node,facts.assistantErrorAttributes));
     }
     function hasIncompleteToolTurn(node,engine=null){
         const facts=providerFacts();
-        return requireNative(engine?.incompleteTool(node,facts.toolTurnSelectors,new Set(facts.toolIncompleteStates),normalizeCommandText));
+        return requireNative(engine?.incompleteTool(node,facts.toolTurnSelectors,facts.toolAttributes));
     }
 
     function summarizeSelectorMatch(match) {

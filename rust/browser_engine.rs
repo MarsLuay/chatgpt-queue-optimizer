@@ -23,6 +23,8 @@ fn h(op: u32, a: u32, b: u32, c: u32) -> u32 {
 pub extern "C" fn cpo_browser_abi() -> u32 { browser_abi::VERSION }
 #[path="browser_abi.rs"]
 mod browser_abi;
+#[path="dom_facts.rs"]
+mod dom_facts;
 
 #[cfg(target_arch = "wasm32")]
 mod sequence;
@@ -95,7 +97,7 @@ pub extern "C" fn cpo_collect_resources(total: u32) -> u32 {
         if h(1, index, 0, 0) == 0 { continue; }
         let mut visited = 0;
         while visited < MAX_NODES {
-            let kind = h(2, 0, 0, 0);
+            let kind = resource_kind();
             let len = if kind == 1 { h(3, 0, 0, 0) } else { 0 };
             sample.node(kind, len);
             visited += 1;
@@ -188,13 +190,13 @@ fn discover_pass(fallback: bool, selectors: u32) -> u32 {
     for i in 0..count {
         let raw = h(11, i, 0, 0);
         if raw == 0 { continue; }
-        let raw_flags = h(13, raw, 0, 0);
+        let raw_flags = message_flags(raw);
         if raw_flags & IN_ROOT == 0 || raw_flags & EXCLUDED != 0 { continue; }
         if fallback && (raw_flags & (THREAD_BOTTOM | HAS_INPUT_OR_FORM) != 0 || trimmed_dom_length(raw,15) < 15) {
             continue;
         }
         let node = normalized(raw, selectors);
-        let flags = h(13, node, 0, 0);
+        let flags = message_flags(node);
         let threshold = if fallback { 15 } else if flags & HAS_FORM != 0 { 80 } else { 1 };
         if !(if fallback { fallback_valid(flags,threshold) } else { primary_valid(flags,threshold) }) { continue; }
         let text = trimmed_dom_length(node,threshold);
@@ -205,10 +207,10 @@ fn discover_pass(fallback: bool, selectors: u32) -> u32 {
     let count = h(16, 0, 0, 0);
     for i in 0..count {
         let node = h(17, i, 0, 0);
-        let canonical = h(19, node, 0, 0) != 0;
+        let canonical = canonical_turn(node);
         let mut parent = accepted_parent(node);
         while parent != 0 {
-            if canonical && h(19, parent, 0, 0) == 0 {
+            if canonical && !canonical_turn(parent) {
                 h(20, parent, 0, 0);
             } else {
                 h(20, node, 0, 0);
@@ -597,26 +599,38 @@ pub extern "C" fn cpo_dom_candidate(mode: u32, flags: u32) -> u32 {
 #[cfg(target_arch = "wasm32")]
 #[no_mangle]
 pub extern "C" fn cpo_dom_error_stop(count: u32, attrs: u32) -> u32 {
+    if attrs!=dom_facts::ERROR_ATTRIBUTES.len() as u32{return 0;}
     for node in 0..count {
         for attr in 0..attrs {
-            let value = h(102,node,attr,0);
-            if value & 1 != 0 || value & 6 == 6 { return 1; }
+            let value=DomFact::read(102,node,attr);
+            if value.one_of(dom_facts::ERROR_VALUES)||
+                (dom_facts::ERROR_ATTRIBUTES[attr as usize]=="data-error"&&value.one_of(&["true","1","yes"])){return 1;}
         }
     }
     0
 }
 #[cfg(target_arch = "wasm32")]
 #[no_mangle]
-pub extern "C" fn cpo_dom_incomplete_tool(count: u32) -> u32 {
-    let mut tool = u32::MAX;
-    for node in 0..count {
-        if h(103,node,0,0) != 0 { tool = node; break; }
+pub extern "C" fn cpo_dom_incomplete_tool(count:u32,selectors:u32,attrs:u32)->u32{
+    if selectors!=dom_facts::TOOL_SELECTORS.len() as u32||attrs!=dom_facts::TOOL_ATTRIBUTES.len() as u32{return 0;}
+    let mut tool=u32::MAX;
+    'find:for node in 0..count{
+        for selector in 0..selectors{
+            if h(103,node,selector,0)!=0{tool=node;break 'find;}
+        }
     }
-    if tool == u32::MAX { return 0; }
-    for node in 0..count {
-        if h(104,node,0,0) != 0 { return 1; }
+    if tool==u32::MAX{return 0;}
+    for node in 0..count{
+        for attr in 0..attrs{
+            let state=DomFact::read(104,node,attr);
+            if state.len!=0{
+                if state.one_of(dom_facts::TOOL_STATES){return 1;}
+                break;
+            }
+        }
     }
-    h(105,tool,0,0)
+    if h(105,tool,0,0)==0{return 0;}
+    provider_text::host_empty_or_equal() as u32
 }
 
 // UI rendering primitives. Rust defines the tree, classes, order, controls
@@ -631,6 +645,10 @@ mod ui {
     fn text(n:u32,s:&str){literal(112,n,s)}
     fn style(n:u32,s:&str){literal(113,n,s)}
     fn dynamic(n:u32,row:u32,field:u32){h(114,n,row,field);}
+    fn dynamic_class(n:u32,row:u32,field:u32){
+        let len=h(181,row,field,0);
+        if len!=0&&(0..len).all(|i|super::class_token_char(h(182,i,0,0))){h(121,n,row,field);}
+    }
     fn append(parent:u32,child:u32){h(115,parent,child,0);}
     fn flags(row:u32)->u32{h(116,row,0,0)}
     fn button(parent:u32,row:u32,action:u32,label:&str,css:&str,styles:&str){
@@ -684,7 +702,7 @@ mod ui {
                     let info=dynamic_item(main,0,"scheduled-info",i,0);
                     append(info,node(6));
                     let badge=dynamic_item(info,1,"scheduled-status-badge",i,1);
-                    h(121,badge,i,2);
+                    dynamic_class(badge,i,2);
                     let actions=node(0);class(actions,"scheduled-actions");append(main,actions);
                     let mask=flags(i);
                     if mask&1!=0{button(actions,i,4,"Cancel","","");}
@@ -707,7 +725,7 @@ mod ui {
             4=>{
                 if count==0{item(0,0,"queue-log-empty","No automation logs yet");}
                 for i in (count.saturating_sub(30)..count).rev(){
-                    let entry=node(0);class(entry,"queue-log-entry");h(121,entry,i,3);
+                    let entry=node(0);class(entry,"queue-log-entry");dynamic_class(entry,i,3);
                     dynamic_item(entry,0,"queue-log-meta",i,0);
                     dynamic_item(entry,0,"queue-log-message",i,1);
                     if flags(i)&1!=0{dynamic_item(entry,0,"queue-log-details",i,2);}
@@ -947,6 +965,11 @@ mod provider_text {
     }
     #[cfg(target_arch="wasm32")]
     pub fn host_equal()->bool{equal(Source::new(0),Source::new(1))}
+    #[cfg(target_arch="wasm32")]
+    pub fn host_empty_or_equal()->bool{
+        let mut left=Normalized::new(Source::new(0)).peekable();
+        left.peek().is_none()||left.eq(Normalized::new(Source::new(1)))
+    }
     #[cfg(test)]
     mod tests{
         use super::*;
@@ -1054,13 +1077,75 @@ pub extern "C" fn cpo_provider_diagnostics(optimizer:u32)->u32{
 pub extern "C" fn cpo_provider_deduplicate(count:u32)->u32{
     for i in 0..count{
         let node=h(180,i,0,0);
-        let canonical=h(19,node,0,0)!=0;
+        let canonical=canonical_turn(node);
         let mut parent=accepted_parent(node);
         while parent!=0{
-            if canonical&&h(19,parent,0,0)==0{h(20,parent,0,0);}
+            if canonical&&!canonical_turn(parent){h(20,parent,0,0);}
             else{h(20,node,0,0);}
             parent=accepted_parent(parent);
         }
     }
     h(21,0,0,0)
+}
+
+
+// Fixed-size host fact transport; long values cannot masquerade as short
+// exact markers. Prefix checks still see their leading code units.
+#[cfg(target_arch="wasm32")]
+struct DomFact{units:[u16;128],len:u32}
+#[cfg(target_arch="wasm32")]
+impl DomFact{
+    fn read(op:u32,a:u32,b:u32)->Self{
+        let mut value=Self{units:[0;128],len:0};
+        value.len=h(op,a,b,value.units.as_mut_ptr() as u32);value
+    }
+    fn one_of(&self,values:&[&str])->bool{
+        self.len<=self.units.len() as u32&&values.iter().any(|v|fact_eq(&self.units[..self.len as usize],v))
+    }
+    fn starts(&self,prefix:&str)->bool{
+        self.len>=prefix.len() as u32&&prefix.bytes().enumerate().all(|(i,b)|self.units.get(i)==Some(&(b as u16)))
+    }
+}
+#[cfg(target_arch="wasm32")]
+impl Drop for DomFact{fn drop(&mut self){for unit in &mut self.units{unsafe{core::ptr::write_volatile(unit,0);}}}}
+fn fact_eq(units:&[u16],ascii:&str)->bool{
+    units.len()==ascii.len()&&units.iter().zip(ascii.bytes()).all(|(&a,b)|{
+        let lower=if (65..=90).contains(&a){a+32}else{a};lower==b as u16
+    })
+}
+fn class_token_char(c:u32)->bool{matches!(c,45|48..=57|95|97..=122)}
+#[cfg(target_arch="wasm32")]
+fn resource_kind()->u32{
+    match h(2,0,0,0){
+        3=>1,
+        1=>{
+            let tag=DomFact::read(183,0,0);
+            if tag.one_of(&["img"]){2}else if tag.one_of(&["video","audio"]){3}
+            else if tag.one_of(&["canvas","iframe"]){4}else{0}
+        }
+        _=>0
+    }
+}
+#[cfg(target_arch="wasm32")]
+fn message_flags(node:u32)->u32{
+    let mut flags=h(13,node,0,0);
+    if DomFact::read(183,1,node).one_of(&["script","style","nav","aside","header","footer"]){flags|=FORBIDDEN_TAG;}
+    if flags&HAS_MARKER!=0{flags|=FALLBACK_CONTENT;}
+    flags
+}
+#[cfg(target_arch="wasm32")]
+fn canonical_turn(node:u32)->bool{
+    h(19,node,0,0)!=0||DomFact::read(183,1,node).one_of(&["article"])||
+        DomFact::read(183,2,node).starts("conversation-turn")
+}
+#[cfg(target_arch="wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_dom_message_flags(node:u32)->u32{message_flags(node)}
+#[cfg(test)]
+#[test]
+fn raw_fact_matching_and_css_tokens(){
+    assert!(fact_eq(&[69,82,82,79,82],"error"));
+    assert!(!fact_eq(&[101,114,114,111,114,45],"error"));
+    assert!(b"queue-active_12".iter().all(|&c|class_token_char(c as u32)));
+    assert!(!b"bad class".iter().all(|&c|class_token_char(c as u32)));
 }

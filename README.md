@@ -334,3 +334,7 @@ Generic-provider response settlement and the decision to inspect the last assist
 ### Generated browser WASM bindings
 
 The Rust build and package commands now generate `rust-browser-bindings.js` directly from the compiled `optimizer_browser.wasm` type, import, function and export sections. The generated loader validates the native host import, exported function arities and shared ABI version; the build fails if the handwritten DOM bridge references a missing native export. Generated output is ignored by Git and packaged with its matching WASM binary. Run the normal native build before loading an unpacked checkout. Browser DOM primitives still require JavaScript host code; this change removes the handwritten loader and export allowlist, not the remaining host callbacks. No new dependencies are required.
+
+### Native DOM fact policy and generated host primitives (browser ABI 16)
+
+Resource classification, canonical-turn recognition, forbidden-tag checks, assistant error and incomplete-tool state matching, streamed tool-only text comparison and dynamic CSS token validation now execute in Rust. The bridge transfers bounded raw UTF-16 facts and applies browser effects. Fourteen mechanical host callbacks are generated from typed Rust descriptors. Remaining DOM queries, media journal operations and high-level host adapters still require browser-side implementation. Native compilation and live browser verification remain outstanding.

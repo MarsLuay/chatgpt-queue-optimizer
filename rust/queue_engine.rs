@@ -1358,16 +1358,19 @@ const CATALOG_4: &[(&str, &[&str])] = &[
 ];
 
 // DOM fact catalogs used by the shared provider binding.
+#[path="dom_facts.rs"]
+mod dom_facts;
 const CATALOG_5: &[(&str,&[&str])]=&[
     ("geminiEditorClasses",&["ql-editor"]),
     ("geminiExcludedAncestors",&["model-response, .model-response, .response-container, message-content"]),
     ("claudeEditorClasses",&["ProseMirror"]),
     ("claudeExcludedAncestors",&["[data-testid=\"user-message\"], .font-claude-response, .font-user-message"]),
     ("claudeInputIds",&["chat-input"]),
-    ("assistantErrorAttributes",&["data-message-status","data-message-state","data-stop-reason","data-finish-reason","data-status","data-state","data-error"]),
-    ("assistantErrorValues",&["error","failed","failure","assistant-error","assistant_error","error-stop","error_stop"]),
-    ("toolTurnSelectors",&["[data-tool-call]","[data-tool-result]","[data-tool-state]","[data-tool-status]","[data-testid*=\"tool-call\"]","[data-testid*=\"tool-result\"]"]),
-    ("toolIncompleteStates",&["active","incomplete","pending","running","waiting"]),
+    ("assistantErrorAttributes",dom_facts::ERROR_ATTRIBUTES),
+    ("assistantErrorValues",dom_facts::ERROR_VALUES),
+    ("toolTurnSelectors",dom_facts::TOOL_SELECTORS),
+    ("toolAttributes",dom_facts::TOOL_ATTRIBUTES),
+    ("toolIncompleteStates",dom_facts::TOOL_STATES),
 ];
 fn catalog(id:u32)-> &'static [(&'static str, &'static [&'static str])] {
     match id {1=>CATALOG_1,2=>CATALOG_2,3=>CATALOG_3,4=>CATALOG_4,5=>CATALOG_5,_=>&[]}

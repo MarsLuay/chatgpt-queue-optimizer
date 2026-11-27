@@ -463,3 +463,34 @@ test('generated browser bindings match the compiled native export contract',{ski
     assert.throws(()=>bindings.instantiateModule(new WebAssembly.Module(Uint8Array.of(0,97,115,109,1,0,0,0)),()=>0),/import mismatch/);
     assert.equal(core.cpo_browser_abi(),bindings.abi);
 });
+
+test('native DOM error markers and tool attributes use raw facts and streamed text',{skip},async()=>{
+    const bridge=await engine();
+    const queue=require('../rust-queue-bridge.js');
+    queue.install(new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(path.join(__dirname,'..','optimizer_queue.wasm'))),{}).exports);
+    const facts=queue.providerCatalog(5);
+    const error=(value,attribute='data-message-status')=>element({[attribute]:value});
+    assert.equal(bridge.assistantError(error('  ERROR_STOP  '),facts.assistantErrorAttributes),true);
+    assert.equal(bridge.assistantError(error('errorish'),facts.assistantErrorAttributes),false);
+    assert.equal(bridge.assistantError(error('yes','data-error'),facts.assistantErrorAttributes),true);
+    assert.equal(bridge.assistantError(error('yes'),facts.assistantErrorAttributes),false);
+    const tool=element({'data-tool-state':'pending'},{matches:s=>s==='[data-tool-state]',innerText:'tool work'});
+    const turn=element({}, {innerText:'response text',matches:()=>false,querySelectorAll:()=>[tool]});
+    assert.equal(bridge.incompleteTool(turn,facts.toolTurnSelectors,facts.toolAttributes),true);
+    tool.setAttribute('data-tool-state','complete');
+    assert.equal(bridge.incompleteTool(turn,facts.toolTurnSelectors,facts.toolAttributes),false);
+    turn.innerText='  tool\n work  ';
+    assert.equal(bridge.incompleteTool(turn,facts.toolTurnSelectors,facts.toolAttributes),true);
+    assert.equal(bridge.context,null);
+});
+test('generated host primitives perform only scoped browser operations',{skip},()=>{
+    const bindings=require('../rust-browser-bindings.js');
+    const ctx={accepted:[2,3],output:[],redundant:new Set(),spans:[],value:'ab'};
+    assert.equal(bindings.dispatchHostPrimitive(16,0,0,0,ctx),2);
+    bindings.dispatchHostPrimitive(23,0,1,0,ctx);
+    assert.deepEqual(ctx.accepted,[3,2]);
+    bindings.dispatchHostPrimitive(5,0,42,0,ctx);
+    assert.deepEqual(ctx.output,[42]);
+    assert.equal(bindings.dispatchHostPrimitive(124,1,0,0,ctx),98);
+    assert.throws(()=>bindings.dispatchHostPrimitive(999,0,0,0,ctx),/Unknown Rust browser host operation/);
+});
