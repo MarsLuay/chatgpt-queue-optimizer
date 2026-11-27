@@ -4019,46 +4019,11 @@ async function openExtensionPopupPage() {
 }
 
 function executeScript(details, callback) {
-    const promise = extensionApiPromise(
-        (done) => {
-            if (chrome.scripting && chrome.scripting.executeScript) {
-                return chrome.scripting.executeScript(details, done);
-            }
-
-            if (chrome.tabs && chrome.tabs.executeScript) {
-                const tabId = details?.target?.tabId;
-                const legacyDetails = {};
-
-                if (Array.isArray(details.files) && details.files[0]) {
-                    legacyDetails.file = details.files[0];
-                } else if (details.func) {
-                    legacyDetails.code = `(${details.func}).apply(null, ${JSON.stringify(details.args || [])});`;
-                } else {
-                    throw new Error('No script file or function was provided.');
-                }
-
-                return chrome.tabs.executeScript(tabId, legacyDetails, done);
-            }
-
-            throw new Error('Script injection is not available in this browser.');
-        },
-        () => {
-            if (!chrome.scripting || !chrome.scripting.executeScript) {
-                throw new Error('Script injection is not available in this browser.');
-            }
-
-            return chrome.scripting.executeScript(details);
-        }
-    );
-
-    if (typeof callback === 'function') {
-        promise.then(
-            (results) => callback(results, null),
-            (error) => callback(null, error)
-        );
+    const promise=globalThis.CpoBrowserApi.inject(details);
+    if(typeof callback==='function'){
+        promise.then(results=>callback(results,null),error=>callback(null,error));
         return undefined;
     }
-
     return promise;
 }
 
