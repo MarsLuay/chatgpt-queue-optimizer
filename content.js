@@ -57,6 +57,8 @@
       this.nativeCore = null;
       this.nativeCoreState = 'not loaded';
       this.browserEngine = null;
+      this.browserEngineReady = null;
+      this.nativeSubmissionActive = false;
       this.nativeMemoryBytes = 0;
       /** @type {ReturnType<ChatGPTOptimizer['sampleResources']> | null} */
       this.resourceSample = null;
@@ -145,6 +147,17 @@
         this.loadRustBrowserEngine();
       }
       switch (message.type) {
+        case 'GET_NATIVE_SUBMISSION_CAPABILITY':
+          Promise.resolve(this.loadRustBrowserEngine()).then(ready =>
+            sendResponse({ ok: !!ready && !!this.provider, nativeSubmission: !!ready && !!this.provider }),
+            () => sendResponse({ ok: false, nativeSubmission: false }));
+          break;
+
+        case 'NATIVE_SUBMIT_PROMPT':
+          this.performNativeSubmission(message).then(sendResponse, () =>
+            sendResponse({ ok: false, error: 'Native submission failed.', details: { failureClass: 'submission-unconfirmed' } }));
+          break;
+
         case 'TOGGLE_OPTIMIZER':
           if (!this.provider?.supportsOptimizer) {
             sendResponse({ success: false, enabled: false, unsupported: true, provider: this.provider?.id || null });
@@ -407,7 +420,7 @@
       // Fail closed for active responses, drafts, uploads, media and unknown state.
       if (typeof document === 'undefined' || document.visibilityState !== 'hidden' ||
           !this.provider?.supportsOptimizer || !this.getCurrentSurface().optimizerEligible ||
-          this.state.inlineQueueInFlight) return false;
+          this.state.inlineQueueInFlight || this.nativeSubmissionActive) return false;
       try {
         const composer = this.provider.getComposerMatch?.(document)?.element;
         if (!composer || String(this.provider.getComposerText(composer) || '').trim()) return false;
@@ -684,11 +697,12 @@
     }
 
     loadRustBrowserEngine() {
-      if (this.browserEngine || typeof globalThis.CpoRustBrowserBridge !== 'function') return;
+      if (this.browserEngineReady) return this.browserEngineReady;
+      if (typeof globalThis.CpoRustBrowserBridge !== 'function') return Promise.resolve(false);
       const engine = new globalThis.CpoRustBrowserBridge(this);
       this.browserEngine = engine;
-      engine.load().then(ready => {
-        if (!ready) return;
+      this.browserEngineReady = engine.load().then(ready => {
+        if (!ready) return false;
         this.provider?.setNativeMessageDiscovery?.((adapter, doc, root) =>
           engine.discover(adapter, doc, root));
         this.provider?.setNativeLifecycle?.(engine);
@@ -696,7 +710,80 @@
         this.clearMessageCache();
         this.resourceSample = null;
         if (this.state.optimizerBound && this.config.enabled) this.refresh();
-      }).catch(error => engine.fail(error));
+        return true;
+      }).catch(error => { engine.fail(error); return false; });
+      return this.browserEngineReady;
+    }
+
+    async performNativeSubmission(message) {
+      if (this.nativeSubmissionActive) return { ok:false,error:'Another native submission is pending.' };
+      if (!await this.loadRustBrowserEngine() || !this.browserEngine?.exports) return {ok:false,error:'Native execution unavailable before submission.'};
+      if (this.nativeSubmissionActive) return {ok:false,error:'Another native submission is pending.'};
+      this.nativeSubmissionActive=true;
+      const engine=this.browserEngine;
+      const provider=this.provider;
+      const code={chatgpt:1,gemini:2,claude:3}[provider?.id]||0;
+      const queued=String(message.text||'');
+      const normalize=value=>String(value||'').replace(/\u200b/g,'').trim();
+      const identityValid=()=>!!message.expectedKey && provider?.getConversationIdentity(location.href)?.key===message.expectedKey;
+      const connected=node=>!!node&&node.isConnected!==false;
+      const describe=element=>({tagName:element?.tagName||'',id:element?.id||'',disabled:!!element?.disabled});
+      let composer=null,original='',written=false,clicked=false;
+      let composerMatch=null,buttonMatch=null;
+      const failure=(signal,error,extra={})=>({ok:false,error,details:{
+        compatibilityFailure:signal,signalKey:signal,provider:provider?.name||'',url:location.href,title:document.title,
+        composerSelector:composerMatch?.selector||'',composerSignal:composerMatch?.signalKey||'composer',
+        composer:describe(composer),...extra}});
+      const restore=()=>{
+        if(!written||clicked||!composer)return {restored:false};
+        const current=engine.composerRead(code,composer);
+        const flags=(Number(current!=null&&normalize(current)===normalize(queued))<<2)|
+          (Number(identityValid())<<5)|(Number(connected(composer))<<6);
+        if(engine.submitStage(2,flags)!==8)return {restored:false,draftPreserved:true};
+        return {restored:engine.composerWrite(code,composer,original,1)===true};
+      };
+      try {
+        if(!code||!queued||!identityValid())return failure('submission','Conversation changed before native submission.');
+        composerMatch=provider.getSelectorMatch(document,'composer',(node,selector)=>
+          !node.closest?.('#cpo-root')&&provider.isComposerElement(node,{selector,source:'document'})&&
+          (code===1||provider.getComposerFromEventTarget(node)===node));
+        composer=composerMatch?.element;
+        original=engine.composerRead(code,composer)??'';
+        const flags=Number(!!composer)|(Number(!!normalize(original))<<1)|(Number(identityValid())<<5)|(Number(connected(composer))<<6);
+        const action=engine.submitStage(0,flags);
+        if(action===1)return failure('composer','Canonical composer contains pending user content; queued send deferred to preserve the draft.',{composerConflict:true,deferred:true,pendingTextLength:original.length});
+        if(action!==2)return failure('composer','Required composer signal or conversation identity unavailable.');
+        written=true;
+        if(engine.composerWrite(code,composer,queued,1)!==true)return failure('submission','Native composer write failed.',restore());
+        await new Promise(resolve=>setTimeout(resolve,700));
+        const current=engine.composerRead(code,composer);
+        buttonMatch=provider.getSendActionMatch(document);
+        const button=buttonMatch?.element;
+        const enabled=connected(button)&&!button.disabled&&button.getAttribute?.('aria-disabled')!=='true';
+        const stageFlags=()=>Number(!!composer)|(Number(current!=null&&normalize(engine.composerRead(code,composer))===normalize(queued))<<2)|
+          (Number(!!button)<<3)|(Number(enabled&&!button.disabled&&button.getAttribute?.('aria-disabled')!=='true')<<4)|
+          (Number(identityValid())<<5)|(Number(connected(composer)&&connected(button||composer))<<6);
+        const next=engine.submitStage(1,stageFlags());
+        if(next!==6){
+          if(next===3)return failure('composer','Composer changed while queued message was pending; draft preserved.',{composerConflict:true,deferred:true,draftPreserved:true});
+          return failure('sendButton','Send action unavailable, disabled, or target changed.',restore());
+        }
+        const authorized=await extensionApiPromise(
+          done=>chrome.runtime.sendMessage({action:'authorizeNativeQueueClick',token:message.token},done),
+          ()=>chrome.runtime.sendMessage({action:'authorizeNativeQueueClick',token:message.token}));
+        if(!authorized?.ok||engine.submitStage(1,stageFlags())!==6||
+          provider.getSendActionMatch(document)?.element!==button)
+          return failure('submission','Queue authorization or composer state changed before click.',restore());
+        // From this point the outcome may be uncertain; never restore or
+        // invoke a second submission implementation after a click attempt.
+        clicked=true;
+        if(engine.click(button)!==true)return failure('submission','Native click could not be confirmed.',{failureClass:'submission-unconfirmed'});
+        return {ok:true,details:{composerSelector:composerMatch.selector,composerSignal:composerMatch.signalKey,
+          sendButtonSelector:buttonMatch.selector,sendButtonSignal:buttonMatch.signalKey,
+          messageLength:queued.length,url:location.href,title:document.title,provider:provider.name}};
+      } catch(error) {
+        return failure('submission',error?.message||'Native submission failed.',restore());
+      } finally { this.nativeSubmissionActive=false; }
     }
 
     bindOptimizer() {
