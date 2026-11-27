@@ -10,6 +10,8 @@ mod content_bindings;
 mod popup_bindings;
 mod browser_bridge_bindings;
 mod background_bindings;
+mod local_artifacts;
+mod installer;
 #[cfg(test)]
 mod release_tests;
 use serde_json::{json, Value};
@@ -169,7 +171,7 @@ fn logged_child(command:&mut Command, log:&mut fs::File)->Result<i32>{
     let code=child.wait()?.code().unwrap_or(1);
     if let Some(e)=log_error{return Err(e.into());}Ok(code)
 }
-fn install(repo:&Path, browser:&str, paths:&[Option<String>;3], legacy_ui:bool)->Result<()>{
+fn install(repo:&Path, browser:&str, paths:&[Option<String>;3])->Result<()>{
     if !cfg!(windows){return Err(err("Local UI installation is Windows-only"));}
     let browser=if browser.is_empty(){
         println!("1. Firefox\n2. Chromium");let mut line=String::new();io::stdin().read_line(&mut line)?;
@@ -187,22 +189,10 @@ fn install(repo:&Path, browser:&str, paths:&[Option<String>;3], legacy_ui:bool)-
         if logged_child(&mut build,&mut log)?!=0{return Err(err("Packaging failed; no browser modified"));}
         let mut installed=0;let mut failed=false;
         for target in targets{
-            let mut cmd=if legacy_ui{
-                let mut cmd=Command::new("powershell.exe");
-                cmd.args(["-NoProfile","-STA","-ExecutionPolicy","RemoteSigned","-File"]);
-                if target=="Firefox"{cmd.arg(repo.join("Installers/install_firefox_locally.ps1"));if let Some(p)=&paths[0]{cmd.args(["-FirefoxPath",p]);}}
-                else{
-                    cmd.arg(repo.join("Installers/install_chromium_locally.ps1")).args(["-ProductName",if target=="Chrome"{"Google Chrome"}else{"Chromium"}]);
-                    if let Some(p)=&paths[if target=="Chrome"{2}else{1}]{cmd.args(["-BrowserPath",p]);}
-                }
-                cmd
-            }else{
-                let mut cmd=Command::new(env::current_exe()?);
-                cmd.arg("native-ui").arg("--repo-dir").arg(repo).args(["--browser",target]);
-                let index=if target=="Firefox"{0}else if target=="Chromium"{1}else{2};
-                if let Some(p)=&paths[index]{cmd.arg(["--firefox-path","--chromium-path","--chrome-path"][index]).arg(p);}
-                cmd
-            };
+            let mut cmd=Command::new(env::current_exe()?);
+            cmd.arg("native-ui").arg("--repo-dir").arg(repo).args(["--browser",target]);
+            let index=if target=="Firefox"{0}else if target=="Chromium"{1}else{2};
+            if let Some(p)=&paths[index]{cmd.arg(["--firefox-path","--chromium-path","--chrome-path"][index]).arg(p);}
             let code=logged_child(&mut cmd,&mut log)?;writeln!(log,"{target} exit code: {code}")?;
             if code==0{installed+=1;}else if !(code==2&&browser=="All"){failed=true;}
         }
@@ -425,14 +415,17 @@ fn run()->Result<()>{
         }
     }
     let action=args.next().unwrap_or_else(||"package".into());
-    let mut repo=None;let mut browser=String::new();let mut paths=[None,None,None];let mut local_only=false;let mut legacy_ui=false;
+    let mut repo=None;let mut browser=String::new();let mut paths=[None,None,None];let mut local_only=false;let mut installer_options=installer::Options::default();
     while let Some(arg)=args.next(){match arg.as_str(){
         "--repo-dir"|"--repo-root"=>repo=Some(PathBuf::from(args.next().ok_or_else(||err("Missing repository path"))?)),
         "--browser"|"-Browser"=>browser=args.next().ok_or_else(||err("Missing browser"))?,
         "--firefox-path"|"-FirefoxPath"=>paths[0]=Some(args.next().ok_or_else(||err("Missing Firefox path"))?),
         "--chromium-path"|"-ChromiumPath"=>paths[1]=Some(args.next().ok_or_else(||err("Missing Chromium path"))?),
         "--chrome-path"|"-ChromePath"=>paths[2]=Some(args.next().ok_or_else(||err("Missing Chrome path"))?),
-        "--local-only"=>local_only=true,"--legacy-ui"|"-LegacyUI"=>legacy_ui=true,_=>return Err(err(format!("Unknown argument: {arg}")))
+        "--local-only"=>local_only=true,"--update-repo"=>installer_options.update_repo=true,
+        "--skip-chrome"=>installer_options.skip_chrome=true,"--skip-firefox"=>installer_options.skip_firefox=true,
+        "--no-restart"=>installer_options.no_restart=true,"--no-temporary-loader"=>installer_options.no_temporary_loader=true,
+        "--no-dependencies"=>installer_options.no_dependencies=true,_=>return Err(err(format!("Unknown argument: {arg}")))
     }}
     let repo=repo.unwrap_or_else(||PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")).canonicalize()?;
     if action=="check-secrets"{
@@ -441,7 +434,8 @@ fn run()->Result<()>{
         return Ok(());
     }
     if !repo.join("manifest.json").is_file(){return Err(err("Missing extension manifest"));}
-    match action.as_str(){"package"=>{package(&repo)?;},"build"=>build_only(&repo)?,"install"=>install(&repo,&browser,&paths,legacy_ui)?,
+    match action.as_str(){"package"=>{package(&repo)?;},"build"=>build_only(&repo)?,"install"=>install(&repo,&browser,&paths)?,
+        "install-auto"=>installer::run(&repo,&browser,&paths,&installer_options)?,
         "native-ui"=>{
             #[cfg(windows)]{
                 let index=match browser.as_str(){"Firefox"=>0,"Chromium"=>1,"Chrome"=>2,_=>return Err(err("Select one browser for native UI"))};
@@ -450,7 +444,7 @@ fn run()->Result<()>{
             }
             #[cfg(not(windows))]{return Err(err("Native Windows UI Automation requires Windows"));}
         },
-        "publish"=>publish(&repo,local_only,None)?, "managed-publish"=>managed_publish(&repo)?, "install-upload-launcher"=>install_upload_launcher(&repo)?,_=>return Err(err("Expected build, package, install, native-ui, publish, managed-publish, install-upload-launcher or check-secrets"))}
+        "publish"=>publish(&repo,local_only,None)?, "managed-publish"=>managed_publish(&repo)?, "install-upload-launcher"=>install_upload_launcher(&repo)?,_=>return Err(err("Expected build, package, install, install-auto, native-ui, publish, managed-publish, install-upload-launcher or check-secrets"))}
     Ok(())
 }
 fn main(){if let Err(error)=run(){eprintln!("[ERROR] {error}");std::process::exit(1);}}

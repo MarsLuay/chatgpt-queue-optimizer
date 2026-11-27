@@ -9,7 +9,7 @@ For normal extension development you need:
 - Git.
 - Node.js 18+ with npm, including the built-in `node --test` test runner.
 - Google Chrome for testing the primary Manifest V3 build.
-- Rust (rustup, with the `wasm32-unknown-unknown` target) for building the optimizer WASM, browser/store packages, and native verification. Python is only needed by the remaining legacy installer helpers.
+- Rust (rustup, with the `wasm32-unknown-unknown` target) for building the optimizer WASM, browser/store packages, and native verification. Python is no longer required by the installers.
 - Firefox 140+ when testing the generated Firefox build.
 
 Install development dependencies from the repository root before running lint, typecheck, or the combined verification command:

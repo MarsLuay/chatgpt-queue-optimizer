@@ -1,13 +1,8 @@
 //! Native Windows UIA installer. Fail closed on ambiguous controls, windows or
 //! package identities. No keyboard injection, preference edits, or removal.
-use super::{err,Result,ID,copy_tree,publish_path,stamp,Cleanup};
-use std::{env,fs,path::{Path,PathBuf},process::Command,thread,time::{Duration,Instant},io::Read};
+use super::{err,Result,local_artifacts::prepare};
+use std::{env,fs,path::{Path,PathBuf},process::Command,thread,time::{Duration,Instant}};
 use windows::{core::BSTR,Win32::{Foundation::HWND,System::Com::*,UI::{Accessibility::*,WindowsAndMessaging::*}}};
-use sha2::{Digest,Sha256};
-use base64::Engine;
-use serde_json::Value;
-const NAME:&str="ChatGPT Queue + Optimizer";
-const KEY:&str="MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0cV7LPS/vHIVWJGrcghAd2TIgknmbP4Xdq+INlbS8W638gPxBGtZRe0pyh8op8zzg0JrtctPBk7+AKZEg/5Iaa3J8xzh10uWiPUg3w4cqS3FlKeDfCYTzXzUtY3BgX4XlUKy+D8lSBioarW02Q+tY8+TdVB3B0BE7mNIswKCkiKwKSA/2DlkboEE7BdhWnFu8C8XBI7u+uco2xDgvaGdUCn28MEwfI8lxgkTIW6+Sn99pKS4wDQEMKlCGpRevxAg3mD5MBYZoA2C2v8vDfCBNw+4TvlrWuKUb7X5cg0PME1SDq03lWqHxJgXYDm5XHrn6dNO7Wbc4MlstG0XzqxlyQIDAQAB";
 #[link(name="kernel32")]
 extern "system"{
     fn OpenProcess(access:u32,inherit:i32,pid:u32)->*mut core::ffi::c_void;
@@ -88,7 +83,7 @@ fn outside_document(u:&IUIAutomation,w:&IUIAutomationElement,e:&IUIAutomationEle
     let Ok(walker)= (unsafe{u.RawViewWalker()}) else{return false;};
     let mut node=e.clone();
     for _ in 0..32{
-        if control(&node,UIA_DocumentControlType){return false;}
+        if control(&node,UIA_DocumentControlTypeId){return false;}
         if unsafe{u.CompareElements(&node,w)}.map(|b|b.as_bool()).unwrap_or(false){return true;}
         match unsafe{walker.GetParentElement(&node)}{Ok(parent)=>node=parent,Err(_)=>return false}
     }
@@ -99,7 +94,7 @@ fn verified_page(u:&IUIAutomation,w:&IUIAutomationElement,firefox:bool)->Result<
     let url=if firefox{"about:debugging#/runtime/this-firefox"}else{"chrome://extensions"};
     let url_ok=list.iter().any(|e|{
         let n=name(e).to_lowercase();
-        outside_document(u,w,e)&&(control(e,UIA_EditControlType)||control(e,UIA_ComboBoxControlType))&&
+        outside_document(u,w,e)&&(control(e,UIA_EditControlTypeId)||control(e,UIA_ComboBoxControlTypeId))&&
         (n.contains("address")||n.contains("search or enter")||n.contains("search with"))&&
         value(e).trim_end_matches('/')==url
     });
@@ -113,7 +108,7 @@ fn assert_page(u:&IUIAutomation,w:&IUIAutomationElement,exe:&Path,firefox:bool)-
     }Ok(())
 }
 fn named(u:&IUIAutomation,w:&IUIAutomationElement,names:&[&str])->Result<Option<IUIAutomationElement>>{
-    unique(nodes(u,w,TreeScope_Descendants)?.into_iter().filter(|e|control(e,UIA_ButtonControlType)&&visible(e)&&enabled(e)&&names.contains(&name(e).as_str())).collect(),"named button")
+    unique(nodes(u,w,TreeScope_Descendants)?.into_iter().filter(|e|control(e,UIA_ButtonControlTypeId)&&visible(e)&&enabled(e)&&names.contains(&name(e).as_str())).collect(),"named button")
 }
 fn browser_exe(u:&IUIAutomation,target:&str,explicit:Option<&str>)->Result<Option<PathBuf>>{
     let expected=if target=="Firefox"{"firefox.exe"}else if target=="Chrome"{"chrome.exe"}else{"chromium.exe"};
@@ -136,37 +131,8 @@ fn browser_exe(u:&IUIAutomation,target:&str,explicit:Option<&str>)->Result<Optio
     if let Some(p)=paths.pop(){return Ok(Some(p));}
     let folders=if target=="Firefox"{vec!["Mozilla Firefox/firefox.exe","Firefox Developer Edition/firefox.exe","Firefox Nightly/firefox.exe","Firefox ESR/firefox.exe"]}else if target=="Chrome"{vec!["Google/Chrome/Application/chrome.exe","Google/Chrome Beta/Application/chrome.exe"]}else{vec!["Chromium/Application/chromium.exe","Chromium/Application/chrome.exe"]};
     for var in ["LOCALAPPDATA","ProgramFiles","ProgramFiles(x86)"]{
-        if let Some(base)=env::var_os(var){for folder in &folders{let p=PathBuf::from(&base).join(folder);if p.is_file(){return Ok(Some(p.canonicalize()?));}}}
+        if let Some(base)=env::var_os(var){for folder in &folders{for root in [PathBuf::from(&base),PathBuf::from(&base).join("Programs")]{let p=root.join(folder);if p.is_file(){return Ok(Some(p.canonicalize()?));}}}}
     }Ok(None)
-}
-fn prepare(repo:&Path,firefox:bool)->Result<(PathBuf,String)>{
-    let expected:Value=serde_json::from_slice(&fs::read(repo.join("manifest.json"))?)?;
-    let build=repo.join("build");
-    if firefox{
-        let bytes=fs::read(build.join("chatgpt-queue-optimizer-firefox-store.zip"))?;
-        let mut zip=zip::ZipArchive::new(std::io::Cursor::new(&bytes))?;
-        let mut entry=zip.by_name("manifest.json")?;
-        if entry.size()>1048576{return Err(err("Invalid XPI manifest"));}
-        let mut raw=String::new();entry.read_to_string(&mut raw)?;
-        let m:Value=serde_json::from_str(&raw)?;
-        if m["name"]!=NAME||m["manifest_version"]!=2||m["version"]!=expected["version"]||m["browser_specific_settings"]["gecko"]["id"]!=ID{return Err(err("Firefox package identity mismatch"));}
-        let dir=build.join("local-firefox");fs::create_dir_all(&dir)?;
-        let path=dir.join(format!("chatgpt-queue-optimizer-{:x}.xpi",Sha256::digest(&bytes)));
-        if path.exists(){if fs::read(&path)?!=bytes{return Err(err("Cached XPI mismatch"));}}else{let temp=dir.join(format!("stage-{}-{}",std::process::id(),stamp()));fs::write(&temp,&bytes)?;publish_path(&temp,&path)?;}
-        Ok((path.canonicalize()?,ID.into()))
-    }else{
-        let src=build.join("chrome-src");let mut m:Value=serde_json::from_slice(&fs::read(src.join("manifest.json"))?)?;
-        if m["name"]!=NAME||m["manifest_version"]!=3||m["version"]!=expected["version"]{return Err(err("Chromium manifest mismatch"));}
-        m["key"]=Value::String(KEY.into());
-        let hash=Sha256::digest(base64::engine::general_purpose::STANDARD.decode(KEY)?);
-        let id:String=hash[..16].iter().flat_map(|b|[char::from(b'a'+(b>>4)),char::from(b'a'+(b&15))]).collect();
-        let dir=build.join("local-chromium");fs::create_dir_all(&dir)?;
-        let stage=dir.join(format!("stage-{}-{}",std::process::id(),stamp()));
-        fs::create_dir(&stage)?;let _cleanup=Cleanup(stage.clone());
-        copy_tree(&src,&stage)?;fs::write(stage.join("manifest.json"),serde_json::to_vec_pretty(&m)?)?;
-        let path=dir.join("extension");publish_path(&stage,&path)?;
-        Ok((path.canonicalize()?,id))
-    }
 }
 fn id_name(s:&str,id:&str)->bool{s==id||s==format!("ID: {id}")||s==format!("Extension ID: {id}")}
 fn card(u:&IUIAutomation,w:&IUIAutomationElement,id:&str,firefox:bool)->Result<Option<IUIAutomationElement>>{
@@ -176,7 +142,7 @@ fn card(u:&IUIAutomation,w:&IUIAutomationElement,id:&str,firefox:bool)->Result<O
         let mut parent=e.clone();
         for _ in 0..12{
             parent=match unsafe{walker.GetParentElement(&parent)}{Ok(v)=>v,Err(_)=>break};
-            if control(&parent,UIA_DocumentControlType)||unsafe{u.CompareElements(&parent,w)?}.as_bool(){break;}
+            if control(&parent,UIA_DocumentControlTypeId)||unsafe{u.CompareElements(&parent,w)?}.as_bool(){break;}
             let sub=nodes(u,&parent,TreeScope_Descendants)?;
             let conflicting=sub.iter().any(|n|{
                 let s=name(n);let t=s.strip_prefix("ID: ").unwrap_or(&s);
@@ -223,7 +189,7 @@ fn install_picker(u:&IUIAutomation,w:&IUIAutomationElement,exe:&Path,firefox:boo
     let fields=nodes(u,&dialog,TreeScope_Descendants)?;
     let field=unique(fields.into_iter().filter(|e|{
         let n=name(e).trim_end_matches(':').to_owned();
-        control(e,UIA_EditControlType)&&visible(e)&&enabled(e)&&
+        control(e,UIA_EditControlTypeId)&&visible(e)&&enabled(e)&&
         (n=="File name"||(!firefox&&n=="Folder"))&&value_pattern(e).is_some()
     }).collect(),"file picker path field")?.ok_or_else(||err("No verified accessible path field; use manual selection"))?;
     let pattern=value_pattern(&field).ok_or_else(||err("Path field changed"))?;
