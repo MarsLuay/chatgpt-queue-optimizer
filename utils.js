@@ -42,103 +42,115 @@ function isChatGPTUrl(url) {
     return getUrlProvider(url) === 'chatgpt';
 }
 
+// Browser-owned Promise/callback objects. Native code decides whether an
+// outstanding call may settle; local state survives a missing/trapped module.
+function completionGate() {
+    let state=0;
+    return event=>{
+        const next=globalThis.CpoQueueEngine?.call('cpo_async_transition',[state,event]);
+        const accepted=next==null?(state===0?event:0):next;
+        if(state!==0||accepted!==event)return false;
+        state=event;return true;
+    };
+}
+
 function extensionApiPromise(callWithCallback, callWithoutCallback) {
-    return new Promise((resolve, reject) => {
-        let settled = false;
-
-        const settleResolve = (value) => {
-            if (settled) return;
-            settled = true;
-            resolve(value);
+    return new Promise((resolve,reject)=>{
+        const settle=completionGate();
+        const success=value=>{if(settle(1))resolve(value);};
+        const failure=error=>{if(settle(2))reject(error instanceof Error?error:new Error(String(error||'Extension API call failed.')));};
+        const callback=value=>{
+            const error=globalThis.chrome?.runtime?.lastError;
+            if(error)failure(error.message||'Extension API call failed.');
+            else success(value);
         };
-
-        const settleReject = (error) => {
-            if (settled) return;
-            settled = true;
-            reject(error instanceof Error ? error : new Error(String(error || 'Extension API call failed.')));
-        };
-
-        const finishFromCallback = (value) => {
-            if (settled) return;
-
-            const lastError = chrome.runtime.lastError;
-
-            if (lastError) {
-                settleReject(new Error(lastError.message || 'Extension API call failed.'));
-                return;
-            }
-
-            settleResolve(value);
-        };
-
-        let maybePromise;
-
-        try {
-            maybePromise = callWithCallback(finishFromCallback);
-        } catch (callbackError) {
-            if (!callWithoutCallback) {
-                settleReject(callbackError);
-                return;
-            }
-
-            try {
-                maybePromise = callWithoutCallback();
-            } catch (promiseError) {
-                settleReject(promiseError);
-                return;
-            }
-        }
-
-        if (maybePromise && typeof maybePromise.then === 'function') {
-            maybePromise.then(settleResolve, settleReject);
-        }
+        try{
+            // Choose the API form before invocation, never retry an uncertain effect.
+            const result=typeof globalThis.browser!=='undefined'&&callWithoutCallback
+                ?callWithoutCallback():callWithCallback(callback);
+            if(result&&typeof result.then==='function')result.then(success,failure);
+        }catch(error){failure(error);}
     });
 }
 
-// Shared host ABI for browser API effects. Keep method access on the
-// browser side; WASM owns decisions and never receives privileged API objects.
-const CpoBrowserApi = Object.freeze({
-    // Exactly one reply, including rejected asynchronous handlers.
-    listen(handler) {
+const CpoBrowserApi = (() => {
+    const emergency=Object.freeze(Object.assign(Object.create(null),{
+        localGet:['storage','local','get'],localSet:['storage','local','set'],
+        syncGet:['storage','sync','get'],syncSet:['storage','sync','set'],
+        tabGet:['tabs','get'],tabQuery:['tabs','query']
+    }));
+    const find=(root,path)=>{
+        const parent=path.slice(0,-1).reduce((value,key)=>value?.[key],root);
+        return [parent,parent?.[path[path.length-1]]];
+    };
+    function endpoints(path){
+        return [find(globalThis.browser,path),find(globalThis.chrome,path)];
+    }
+    function capabilities(pair){
+        return Number(typeof pair[0][1]==='function')|(Number(typeof pair[1][1]==='function')<<1);
+    }
+    function invokePath(engine,code,path,args){
+        const pair=endpoints(path);
+        const flags=capabilities(pair);
+        const mode=engine?.call('cpo_api_mode',[code,args.length,flags])??
+            (code===0&&args.length===1?(flags&1?1:flags&2?2:0):0);
+        if(mode===1){
+            const [parent,method]=pair[0];
+            return Promise.resolve(method.apply(parent,args));
+        }
+        if(mode===2){
+            const [parent,method]=pair[1];
+            return extensionApiPromise(done=>method.apply(parent,[...args,done]));
+        }
+        throw new Error('Browser API not authorized or unavailable.');
+    }
+    async function invoke(operation,...args){
+        const engine=globalThis.CpoQueueEngine;
+        if(await engine?.load()){
+            const code=engine.eventCode(2,operation);
+            const path=engine.apiPath(code);
+            if(code&&path)return invokePath(engine,code,path,args);
+            if(code!=null)throw new Error('Unknown browser API operation: '+operation);
+        }
+        if(Object.hasOwn(emergency,operation))return invokePath(null,0,emergency[operation],args);
+        throw new Error('Required native browser API router unavailable: '+operation);
+    }
+    async function inject(details,css=false){
+        const engine=globalThis.CpoQueueEngine;
+        if(!await engine?.load())throw new Error('Required native injection router unavailable.');
+        const modern=css?14:13,legacy=css?16:15;
+        const modernPath=engine.apiPath(modern),legacyPath=engine.apiPath(legacy);
+        if(!modernPath||!legacyPath)throw new Error('Native injection paths unavailable.');
+        const tabId=details?.target?.tabId;
+        const single=Array.isArray(details?.files)&&details.files.length===1&&typeof details.files[0]==='string';
+        const func=typeof details?.func==='function';
+        const flags=Number(!!capabilities(endpoints(modernPath)))|
+            (Number(!!capabilities(endpoints(legacyPath)))<<1)|(Number(single)<<2)|
+            (Number(func)<<3)|(Number(Number.isInteger(tabId)&&tabId>=0)<<4);
+        const code=engine.call('cpo_injection_route',[Number(css),flags]);
+        if(code===modern)return invokePath(engine,code,modernPath,[details]);
+        if(code===legacy){
+            const converted=single?{file:details.files[0]}:{code:`(${details.func}).apply(null, ${JSON.stringify(details.args||[])});`};
+            return invokePath(engine,code,legacyPath,[tabId,converted]);
+        }
+        throw new Error('No authorized script or CSS injection route.');
+    }
+    function listen(handler){
+        // Register synchronously: MV3 service workers must not await WASM
+        // startup before registering browser listeners.
         chrome.runtime.onMessage.addListener((message,sender,reply)=>{
-            let settled=false;
-            const respond=value=>{if(!settled){settled=true;reply(value);}};
+            const settle=completionGate();
+            const respond=value=>{if(settle(1))reply(value);};
+            const reject=error=>{if(settle(2))reply({ok:false,error:String(error?.message||error)});};
             try{
                 const result=handler(message,sender,respond);
-                if(result&&typeof result.then==='function')result.catch(error=>respond({ok:false,error:String(error?.message||error)}));
-            }catch(error){respond({ok:false,error:String(error?.message||error)});}
+                if(result&&typeof result.then==='function')result.catch(reject);
+            }catch(error){reject(error);}
             return true;
         });
-    },
-    async invoke(operation, ...args) {
-        // The platform bindings contain paths, not routing or retry policy.
-        const paths = [null,['storage','local','get'],['storage','local','set'],
-            ['storage','sync','get'],['storage','sync','set'],['tabs','get'],
-            ['tabs','query'],['tabs','update'],['tabs','create'],['tabs','sendMessage'],
-            ['runtime','sendMessage'],['tabs','discard'],['tabs','reload']];
-        const engine=globalThis.CpoQueueEngine;
-        const ready=await engine?.load();
-        let code=ready?engine.eventCode(2,operation):null;
-        // Storage reads/writes and read-only tab inspection must survive a
-        // missing engine so that a failed upgrade cannot destroy saved jobs.
-        // No tab navigation, submission, reload or discard is authorized here.
-        if(code==null)code=({localGet:1,localSet:2,syncGet:3,syncSet:4,tabGet:5,tabQuery:6})[operation]||0;
-        const path=paths[code];
-        if(!path)throw new Error('Browser operation unavailable: '+operation);
-        const find=root=>{
-            const parent=path.slice(0,-1).reduce((value,key)=>value?.[key],root);
-            return [parent,parent?.[path[path.length-1]]];
-        };
-        const [promiseParent,promiseMethod]=find(globalThis.browser);
-        const [callbackParent,callbackMethod]=find(globalThis.chrome);
-        const flags=Number(typeof promiseMethod==='function')|(Number(typeof callbackMethod==='function')<<1);
-        const mode=ready?engine.call('cpo_api_mode',[code,args.length,flags]):args.length===1?(flags&1?1:flags&2?2:0):0;
-        if(mode===1)return promiseMethod.apply(promiseParent,args);
-        if(mode===2)return extensionApiPromise(done=>callbackMethod.apply(callbackParent,[...args,done]));
-        throw new Error('Browser API not authorized or unavailable: '+operation);
     }
-
-});
+    return Object.freeze({invoke,inject,listen});
+})();
 
 function isGeminiUrl(url) {
     return getUrlProvider(url) === 'gemini';
