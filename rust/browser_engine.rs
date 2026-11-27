@@ -20,7 +20,7 @@ fn h(op: u32, a: u32, b: u32, c: u32) -> u32 {
 }
 
 #[no_mangle]
-pub extern "C" fn cpo_browser_abi() -> u32 { 1 }
+pub extern "C" fn cpo_browser_abi() -> u32 { 2 }
 
 const MAX_TURNS: u32 = 32;
 const MAX_NODES: u32 = 512;
@@ -225,9 +225,136 @@ pub extern "C" fn cpo_execute_media(mode: u32) -> u32 {
     changed_groups
 }
 
+// Cache TTLs and validity are shared by the optimizer and provider adapter.
+// Age is a clamped elapsed millisecond count; JS owns timers and DOM references.
+#[no_mangle]
+pub extern "C" fn cpo_cache_ttl(kind: u32) -> u32 {
+    match kind { 0 => 800, 1 | 2 => 8000, _ => 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn cpo_cache_valid(kind: u32, age: u32, flags: u32) -> u32 {
+    (flags & 3 == 3 && age < cpo_cache_ttl(kind)) as u32
+}
+
+#[no_mangle]
+pub extern "C" fn cpo_mutation_delay() -> u32 { 700 }
+
+fn window_action(index: u32, total: u32, visible: u32, offscreen: bool) -> u32 {
+    let start = total.saturating_sub(visible);
+    if index < start { 1 }
+    else if offscreen && index < total.saturating_sub(8) { 2 }
+    else { 0 }
+}
+
+// Window execution. Set media context to the current turn and use the same
+// native media execution routines, without recursive JS/WASM calls.
+// 50 selects a turn and reads its hidden bit; 51 updates class flags;
+// 52/53 are lazy-loading DOM primitives.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_apply_window(total: u32, visible: u32, flags: u32) -> u32 {
+    for index in 0..total {
+        let action = window_action(index, total, visible, flags & 1 != 0);
+        let was_hidden = h(50, index, 0, 0) != 0;
+        if action == 1 {
+            if !was_hidden {
+                // Set hidden only after media operations succeed; an interrupted
+                // native pass can safely be retried by the compatibility path.
+                cpo_execute_media(0);
+                if flags & 2 != 0 { cpo_execute_media(2); }
+            }
+        } else {
+            if was_hidden {
+                cpo_execute_media(1);
+                cpo_execute_media(3);
+            }
+            let count = h(52, 0, 0, 0);
+            for image in 0..count { h(53, image, 0, 0); }
+        }
+        h(51, action, 0, 0);
+    }
+    1
+}
+
+// Snapshot capture is explicit and bounded. Host holds the text fragments only
+// for the current call; Rust decides selection, traversal, role and truncation.
+// Ops 60..65: begin turn, next text, exclusion, length, append, emit row.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_capture_history(total: u32, offset: u32) -> u32 {
+    if offset > total { return 0; }
+    let end = total.min(offset.saturating_add(16));
+    for index in offset..end {
+        let role = h(60, index, 0, 0);
+        if role == 0 { return 0; }
+        let mut visited = 0u32;
+        let mut chars = 0u32;
+        let mut truncated = false;
+        while h(61, 0, 0, 0) != 0 {
+            visited += 1;
+            if visited > 4096 || chars >= 32768 { truncated = true; break; }
+            if h(62, 0, 0, 0) != 0 { continue; }
+            let length = h(63, 0, 0, 0);
+            let take = length.min(32768 - chars);
+            if take > 0 {
+                h(64, take, 0, 0);
+                chars += take;
+            }
+            if take < length { truncated = true; break; }
+        }
+        h(65, index, role, truncated as u32);
+    }
+    1
+}
+
+// Mutation flags: identity-attribute=1, target inside turn=2, child
+// count present=4; child flags: extension banner=1, turn marker=2.
+// Rust processes every provider mutation for weak-cache invalidation even
+// after a structural change has been found.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_process_mutations(count: u32, mode: u32, empty: u32) -> u32 {
+    let mut structural = false;
+    for index in 0..count {
+        let flags = h(70, index, mode, 0);
+        if mode == 1 {
+            while h(73, 0, 0, 0) != 0 {}
+        }
+        if flags & 1 != 0 { structural = true; }
+        if flags & 4 != 0 {
+            let children = h(71, 0, 0, 0);
+            let mut banner_only = true;
+            let mut changed_turns = false;
+            for child in 0..children {
+                let kind = h(72, child, mode, 0);
+                banner_only &= kind & 1 != 0;
+                changed_turns |= kind & 2 != 0;
+            }
+            if (mode == 1 || !banner_only) &&
+                (changed_turns || flags & 2 == 0 || (mode == 0 && empty != 0)) {
+                structural = true;
+            }
+        }
+        if mode == 0 && structural { break; }
+    }
+    structural as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn window_and_cache_policy() {
+        assert_eq!(window_action(89, 100, 10, true), 1);
+        assert_eq!(window_action(90, 100, 10, true), 2);
+        assert_eq!(window_action(92, 100, 10, true), 0);
+        assert_eq!(window_action(0, 4, 4, true), 0);
+        assert_eq!(cpo_cache_valid(0, 799, 3), 1);
+        assert_eq!(cpo_cache_valid(0, 800, 3), 0);
+        assert_eq!(cpo_cache_valid(1, 7999, 1), 0);
+        assert_eq!(cpo_cache_valid(2, 7999, 3), 1);
+    }
     #[test]
     fn candidate_validation() {
         assert!(primary_valid(IN_ROOT | HAS_MARKER, 1));
