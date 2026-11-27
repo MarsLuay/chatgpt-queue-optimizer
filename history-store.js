@@ -30,9 +30,10 @@
                     'cpo_history_compress','cpo_history_decompress','cpo_history_output','cpo_history_wipe_output',
                     'cpo_history_row_decision','cpo_history_meta_valid','cpo_history_next',
                     'cpo_history_page_start','cpo_history_page_size','cpo_reader_buttons','cpo_reader_move',
-                    'cpo_reader_batch','cpo_reader_continue','cpo_reader_partial'];
+                    'cpo_reader_batch','cpo_reader_continue','cpo_reader_partial',
+                    'cpo_reader_state','cpo_reader_capture','cpo_reader_guard'];
                 if (!required.every(name => typeof core[name] === 'function') ||
-                    core.cpo_history_abi() !== 3 || !(core.memory instanceof WebAssembly.Memory)) {
+                    core.cpo_history_abi() !== 4 || !(core.memory instanceof WebAssembly.Memory)) {
                     throw new Error('History module ABI mismatch');
                 }
                 this.core = core;

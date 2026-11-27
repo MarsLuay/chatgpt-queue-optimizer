@@ -3,6 +3,7 @@ mod windows_ui;
 mod secrets;
 mod wasm_bindings;
 mod browser_api_bindings;
+mod history_viewer_bindings;
 #[cfg(test)]
 mod release_tests;
 use serde_json::{json, Value};
@@ -44,6 +45,7 @@ fn build_wasm(repo:&Path, stage:&Path)->Result<()> {
     }
     wasm_bindings::generate(repo,stage)?;
     browser_api_bindings::generate(stage)?;
+    history_viewer_bindings::generate(stage)?;
     Ok(())
 }
 fn firefox_manifest(base:&Value)->Result<Value>{
@@ -113,7 +115,7 @@ fn package(repo:&Path)->Result<String>{
     for name in ["chrome-src","firefox-src"]{
         let dest=stage.join(name);fs::create_dir(&dest)?;
         for asset in FILES{
-            let src=if asset.ends_with(".wasm")||*asset==wasm_bindings::OUTPUT||*asset==browser_api_bindings::OUTPUT{stage.join(asset)}else{repo.join(asset)};
+            let src=if asset.ends_with(".wasm")||*asset==wasm_bindings::OUTPUT||*asset==browser_api_bindings::OUTPUT||*asset==history_viewer_bindings::OUTPUT{stage.join(asset)}else{repo.join(asset)};
             if !fs::symlink_metadata(&src)?.file_type().is_file(){return Err(err(format!("Not a regular file: {asset}")));}
             fs::copy(src,dest.join(asset))?;
         }
@@ -127,6 +129,7 @@ fn package(repo:&Path)->Result<String>{
     for &(name,_) in MODULES{let file=format!("{name}.wasm");publish_path(&stage.join(&file),&repo.join(&file))?;}
     publish_path(&stage.join(wasm_bindings::OUTPUT),&repo.join(wasm_bindings::OUTPUT))?;
     publish_path(&stage.join(browser_api_bindings::OUTPUT),&repo.join(browser_api_bindings::OUTPUT))?;
+    publish_path(&stage.join(history_viewer_bindings::OUTPUT),&repo.join(history_viewer_bindings::OUTPUT))?;
     for file in ["chrome-src","firefox-src",chrome,firefox]{publish_path(&stage.join(file),&build.join(file))?;}
     println!("Packaged v{version}: build/{chrome}, build/{firefox}");
     Ok(version)
@@ -342,6 +345,7 @@ fn build_only(repo:&Path)->Result<()>{
     for &(name,_) in MODULES{let file=format!("{name}.wasm");publish_path(&stage.join(&file),&repo.join(&file))?;}
     publish_path(&stage.join(wasm_bindings::OUTPUT),&repo.join(wasm_bindings::OUTPUT))?;
     publish_path(&stage.join(browser_api_bindings::OUTPUT),&repo.join(browser_api_bindings::OUTPUT))?;
+    publish_path(&stage.join(history_viewer_bindings::OUTPUT),&repo.join(history_viewer_bindings::OUTPUT))?;
     Ok(())
 }
 

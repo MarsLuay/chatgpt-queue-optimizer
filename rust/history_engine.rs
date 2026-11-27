@@ -3,6 +3,11 @@
 //! and supplies their results; Rust determines the next transaction command.
 #![cfg_attr(target_arch = "wasm32", no_std)]
 
+mod history_reader;
+pub use history_reader::cpo_reader_guard;
+#[cfg(target_arch="wasm32")]
+pub use history_reader::{cpo_reader_state,cpo_reader_capture};
+
 #[cfg(target_arch = "wasm32")]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
@@ -17,7 +22,7 @@ const MAX_TURNS: u32 = 4096;
 const PAGE: u32 = 16;
 
 #[no_mangle]
-pub extern "C" fn cpo_history_abi() -> u32 { 3 }
+pub extern "C" fn cpo_history_abi() -> u32 { 4 }
 
 // Snapshot row framing: magic, index, role, truncation flag, reserved bytes,
 // UTF-8 length, UTF-8 text. UTF-8 is validated on both encode and decode.

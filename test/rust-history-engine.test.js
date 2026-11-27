@@ -11,7 +11,7 @@ async function nativeStore() {
     const store = new CpoHistoryStore(null);
     const result = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     store.core = result.instance.exports;
-    assert.equal(store.core.cpo_history_abi(), 3);
+    assert.equal(store.core.cpo_history_abi(), 4);
     return store;
 }
 

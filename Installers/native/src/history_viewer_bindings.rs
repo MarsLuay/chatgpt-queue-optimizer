@@ -1,8 +1,16 @@
-(() => {
+//! Generate the history reader's browser-effect adapter. Rust/WASM owns
+//! action authorization, busy state, page navigation and capture accounting.
+use super::Result;
+use std::{fs,path::Path};
+pub const OUTPUT:&str="history-viewer.js";
+pub fn generate(stage:&Path)->Result<()>{
+    fs::write(stage.join(OUTPUT),String::from("// @generated Rust history reader host. DO NOT EDIT.\n")+HOST)?;
+    println!("Generated {OUTPUT} from Rust history reader");
+    Ok(())
+}
+const HOST:&str=r###"(() => {
     'use strict';
     const DB = 'cpo-local-history-v1';
-    const PAGE_SIZE = 16;
-    const MAX_TURNS = 4096;
     const sourceTab = Number(new URLSearchParams(location.search).get('tab') || 0);
     const el = id => document.getElementById(id);
     const captureButton = el('capture');
@@ -13,11 +21,14 @@
     const nextButton = el('next');
     let db;
     let meta = null;
-    let pageStart = 0;
     let historyStore = null;
     let ui = null;
-    let busy = false;
-    let renderEpoch = 0;
+    const buttons=[captureButton,discardButton,originalButton,deleteButton,prevButton,nextButton];
+    const core=()=>historyStore.requireCore();
+    const state=(op,a=0,b=0,c=0)=>core().cpo_reader_state(op,a,b,c)>>>0;
+    const capture=(op,a=0,b=0,c=0)=>core().cpo_reader_capture(op,a,b,c)>>>0;
+    const guard=(op,flags)=>core().cpo_reader_guard(op,flags)===1;
+    const flags=(...facts)=>facts.reduce((value,fact,i)=>value|(Number(!!fact)<<i),0);
 
     const request = req => new Promise((resolve, reject) => {
         req.onsuccess = () => resolve(req.result);
@@ -33,26 +44,15 @@
         return globalThis.CpoBrowserApi.invoke('runtimeSend',message);
     }
     function setStatus(message) { el('status').textContent = message; }
+    function metadataFlags() {
+        return flags(false,Number.isSafeInteger(sourceTab)&&sourceTab>0,meta,meta?.complete,meta?.tabId===sourceTab);
+    }
     function updateButtons() {
-        const complete = !!meta?.complete;
-        const validSource=Number.isSafeInteger(sourceTab)&&sourceTab>0;
-        const flags=Number(busy)|(Number(validSource)<<1)|(Number(!!meta)<<2)|(Number(complete)<<3)|(Number(meta?.tabId===sourceTab)<<4);
-        const native=historyStore?.core?.cpo_reader_buttons(flags,pageStart,meta?.count||0);
-        if(native!=null){
-            [captureButton,discardButton,originalButton,deleteButton,prevButton,nextButton].forEach((button,i)=>{button.disabled=!(native&(1<<i));});
-            return;
-        }
-        captureButton.disabled = busy || !Number.isSafeInteger(sourceTab) || sourceTab <= 0;
-        discardButton.disabled = busy || !complete || meta?.tabId !== sourceTab;
-        originalButton.disabled = busy || !complete;
-        deleteButton.disabled = busy || !meta;
-        prevButton.disabled = busy || !complete || pageStart === 0;
-        nextButton.disabled = busy || !complete || pageStart + PAGE_SIZE >= meta?.count;
+        const mask=historyStore?.core?state(3,metadataFlags(),meta?.count||0):0;
+        buttons.forEach((button,i)=>{button.disabled=!(mask&(1<<i));});
     }
     async function renderPage() {
-        const epoch = ++renderEpoch;
-        const result = await historyStore.page(pageStart);
-        if (epoch !== renderEpoch) return;
+        const result = await historyStore.page(state(4));
         meta = result.current || null;
         if (!meta?.complete) {
             el('turns').replaceChildren();
@@ -60,44 +60,44 @@
             updateButtons();
             return;
         }
-        pageStart = result.start;
+        state(5,result.start,meta.count);
+        const pageStart=state(4);
         const rows=result.records.map(row=>({fields:[(row.index+1)+'. '+row.role,row.text],flags:Number(!!row.truncated)}));
         if(ui.renderUI(6,el('turns'),rows)!==true)throw new Error('Native history renderer failed. Reopen the reader.');
         el('page').textContent = (meta.count ? pageStart + 1 : 0) + '–' +
-            Math.min(pageStart + PAGE_SIZE, meta.count) + ' of ' + meta.count;
+            (pageStart + core().cpo_history_page_size(meta.count,pageStart)) + ' of ' + meta.count;
         setStatus('Saved ' + new Date(meta.created).toLocaleString() + ' · ' +
             (meta.bytes / 1048576).toFixed(2) + ' MiB estimated payload · ' +
-            (historyStore.core ? 'Rust/WASM storage and codec' : 'JavaScript fallback') +
+            'Rust/WASM storage and codec' +
             (meta.partial ? ' · Partial snapshot (limits reached or incomplete turn text)' : '') +
             '. The original conversation is unchanged.');
         updateButtons();
     }
-    async function run(action) {
-        if (busy) return;
-        busy = true;
+    async function run(code,action) {
+        if(!historyStore?.core||!state(1,code,metadataFlags(),meta?.count||0))return;
         updateButtons();
         try { await action(); }
         catch (error) { setStatus(error?.message || 'History operation failed.'); }
-        finally { busy = false; updateButtons(); }
+        finally { state(2); updateButtons(); }
     }
-    captureButton.addEventListener('click', () => run(async () => {
+    captureButton.addEventListener('click', () => run(1,async () => {
         const tab = await getTab(sourceTab);
-        if (!tab || tab.incognito || !isChatGPTUrl(tab.url) || tab.discarded || tab.active) {
+        if (!guard(0,flags(tab,!tab?.incognito,isChatGPTUrl(tab?.url),!tab?.discarded,!tab?.active))) {
             throw new Error('Select an inactive, loaded, non-private ChatGPT tab first.');
         }
         const id = crypto.randomUUID();
-        let offset = 0;
+        capture(0);
         let current = null;
-        let partial = false;
-        while (offset < MAX_TURNS) {
+        for (;;) {
+            const offset=capture(4);
             const reply = await sendToTab(sourceTab, {
                 type: 'CPO_HISTORY_BATCH', offset,
                 identity: current?.identity, total: current?.total
             });
             const shape=!!reply?.ok&&Array.isArray(reply.records)&&Number.isSafeInteger(reply.total)&&reply.total>=0&&reply.total<=0xffffffff&&
                 Number.isSafeInteger(reply.next)&&reply.next>=0&&reply.next<=0xffffffff;
-            const accepted=shape&&(historyStore.core?.cpo_reader_batch(offset,reply.total,reply.records.length,reply.next,3) ??
-                Number(reply.records.length<=16&&reply.next===offset+reply.records.length&&reply.next<=reply.total));
+            if(shape&&reply.total===0&&!current)throw new Error('No loaded turns found.');
+            const accepted=shape&&capture(1,reply.total,reply.records.length,reply.next)===1;
             if (!accepted) {
                 throw new Error(reply?.error || 'The source conversation did not return a valid snapshot batch.');
             }
@@ -109,67 +109,63 @@
                 await historyStore.replace(current);
                 meta = current;
                 el('turns').replaceChildren();
-                pageStart = 0;
+                state(6);
             }
             if (reply.identity !== current.identity || reply.total !== current.total) throw new Error('Conversation changed.');
             const records = [];
-            let bytes = current.bytes;
             for (const row of reply.records) {
-                const encoded = historyStore.prepareRow(row, current.count + records.length, bytes);
-                if (!encoded) { partial = true; break; }
-                bytes += encoded.size;
-                partial ||= encoded.truncated;
+                const encoded = historyStore.prepareRow(row,capture(4),capture(5));
+                if (!encoded) { capture(3); break; }
+                if(!capture(2,encoded.size,Number(encoded.truncated)))throw new Error('Native capture accounting rejected row.');
                 records.push(encoded);
             }
             if (records.length) {
-                const updated = { ...current, count: current.count + records.length, bytes };
+                const updated = { ...current, count: capture(4), bytes:capture(5) };
                 await historyStore.append(id, records, updated);
                 current = updated;
                 meta = current;
             }
-            offset = current.count;
-            setStatus('Captured ' + offset + ' of ' + current.total + ' loaded turns…');
-            if (!(historyStore.core?.cpo_reader_continue(offset,current.total,records.length,reply.records.length) ?? Number(offset<MAX_TURNS&&offset<current.total&&records.length===reply.records.length&&records.length>0))) break;
+            setStatus('Captured ' + capture(4) + ' of ' + current.total + ' loaded turns…');
+            if(!capture(7,reply.records.length))break;
         }
         if (!current?.count) throw new Error('No text rows were saved.');
         const source = await getTab(sourceTab);
-        if (source.url !== current.url || source.active || source.discarded) throw new Error('Source tab changed during capture.');
-        current = { ...current, partial: !!(historyStore.core?.cpo_reader_partial(current.count,current.total,Number(partial)) ?? Number(partial || current.count < current.total)), complete: true };
+        if (!guard(1,flags(source,source?.url===current.url,!source?.active,!source?.discarded&&!source?.incognito))) throw new Error('Source tab changed during capture.');
+        current = { ...current, partial: !!capture(8), complete: true };
         await historyStore.finalize(id, current);
         await renderPage();
     }));
-    discardButton.addEventListener('click', () => run(async () => {
+    discardButton.addEventListener('click', () => run(2,async () => {
         const saved = await historyStore.readMeta();
-        if (!saved?.complete || saved.id !== meta?.id || saved.tabId !== sourceTab) throw new Error('Snapshot is no longer current.');
+        if (!guard(2,flags(saved?.complete,saved?.id===meta?.id,saved?.tabId===sourceTab))) throw new Error('Snapshot is no longer current.');
         if (!window.confirm('Unload the original ChatGPT tab? The saved snapshot is read-only and may be incomplete. Opening the original will reload the conversation.')) return;
         const response = await sendRuntime({ action: 'discardHistorySource', tabId: sourceTab,
             expectedUrl: saved.url, expectedIdentity: saved.identity });
         if (!response?.ok) throw new Error(response?.error || 'Original tab could not be unloaded safely.');
         setStatus('Original tab discarded. Browser may release its page memory; opening the original reloads it.');
     }));
-    originalButton.addEventListener('click', () => run(async () => {
+    originalButton.addEventListener('click', () => run(3,async () => {
         const saved = await historyStore.readMeta();
-        if (!saved?.complete || !isChatGPTUrl(saved.url)) throw new Error('No valid original conversation URL.');
+        if (!guard(3,flags(saved?.complete,isChatGPTUrl(saved?.url)))) throw new Error('No valid original conversation URL.');
         let tab;
         try { tab = await getTab(saved.tabId); } catch {}
-        if (tab?.url === saved.url && !tab.incognito) {
+        if (guard(4,flags(tab?.url===saved.url,tab&&!tab.incognito))) {
             await globalThis.CpoBrowserApi.invoke('tabUpdate',tab.id,{active:true});
         } else {
             await globalThis.CpoBrowserApi.invoke('tabCreate',{url:saved.url});
         }
     }));
-    deleteButton.addEventListener('click', () => run(async () => {
+    deleteButton.addEventListener('click', () => run(4,async () => {
         await historyStore.delete(meta?.id);
         meta = null;
-        pageStart = 0;
+        state(6);
         await renderPage();
         setStatus('Saved snapshot deleted.');
     }));
-    prevButton.addEventListener('click', () => run(async () => { pageStart = historyStore.core?.cpo_reader_move(pageStart,0) ?? Math.max(0, pageStart - PAGE_SIZE); await renderPage(); }));
-    nextButton.addEventListener('click', () => run(async () => { pageStart = historyStore.core?.cpo_reader_move(pageStart,1) ?? pageStart + PAGE_SIZE; await renderPage(); }));
+    prevButton.addEventListener('click', () => run(5,renderPage));
+    nextButton.addEventListener('click', () => run(6,renderPage));
 
     async function init() {
-        busy = true;
         updateButtons();
         try {
             if (chrome.extension?.inIncognitoContext) throw new Error('Private context');
@@ -181,12 +177,14 @@
             db = await request(open);
             historyStore = new globalThis.CpoHistoryStore(db);
             ui=new globalThis.CpoRustBrowserBridge(null);
-            const ready=await Promise.all([historyStore.load(),ui.load()]);
-            if(!historyStore.core||!ready[1])throw new Error('Required Rust history modules unavailable. Rebuild the extension.');
+            const ready=await Promise.all([historyStore.load(),ui.load(),globalThis.CpoQueueEngine?.load()]);
+            if(!historyStore.core||!ready[1]||!ready[2])throw new Error('Required Rust history modules unavailable. Rebuild the extension.');
             await renderPage();
             if (!meta?.complete) setStatus(meta ? 'An incomplete snapshot exists. Delete it or capture again.' : 'No saved snapshot. Capture a loaded conversation to begin.');
-        } catch(error) { setStatus(error?.message||'Local history storage could not be opened.'); }
-        finally { busy = false; updateButtons(); if (!db||!historyStore?.core||!ui?.exports) { for(const button of [captureButton,discardButton,originalButton,deleteButton,prevButton,nextButton])button.disabled=true; } }
+            state(0);
+        } catch(error) { if(historyStore?.core)state(7); setStatus(error?.message||'Local history storage could not be opened.'); }
+        finally { updateButtons(); }
     }
     init();
 })();
+"###;
