@@ -49,3 +49,59 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
     assert.equal(e.cpo_queue_confirmed(0,3),1);
     assert.equal(e.cpo_queue_confirmed(0,0),0);
 });
+
+test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
+    const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
+    const e = instance.exports;
+    assert.equal(e.cpo_queue_abi(), 2);
+    for (let flags = 0; flags < 32; flags++) {
+        const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
+        assert.equal(e.cpo_submission_ack(flags), expected);
+    }
+    assert.equal(e.cpo_submission_poll(8000,8000,0),1);
+    assert.equal(e.cpo_submission_poll(8001,8000,0),0);
+    assert.equal(e.cpo_submission_poll(1,8000,1),2);
+    assert.equal(e.cpo_submission_stage(0,0),0);
+    assert.equal(e.cpo_submission_stage(1,5),2);
+    assert.equal(e.cpo_submission_stage(2,9),3);
+});
+
+test('native recovery and persistence retain acknowledged submissions and flush forced checkpoints', {skip}, async () => {
+    const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
+    const e = instance.exports;
+    assert.equal(e.cpo_delivery_recovery(0,3,4,3),8);
+    assert.equal(e.cpo_delivery_recovery(0,67,4,3),1);
+    assert.equal(e.cpo_delivery_recovery(1,5,1,3),3);
+    assert.equal(e.cpo_delivery_recovery(2,9,1,3),4);
+    assert.equal(e.cpo_delivery_recovery(3,49,1,3),6);
+    assert.equal(e.cpo_delivery_recovery(3,33,1,3),7);
+    assert.equal(e.cpo_restore_action(2,9),1);
+    assert.equal(e.cpo_restore_action(2,12),3);
+    assert.equal(e.cpo_restore_action(1,3),2);
+    assert.equal(e.cpo_restore_eligible(5,1,0,1),0);
+    assert.equal(e.cpo_restore_eligible(5,1,0,0),1);
+    assert.equal(e.cpo_restore_eligible(5.5,1,0,0),0);
+    for (let flags=0; flags<64; flags++) {
+        const expected = flags & 1 ? (flags & 16 ? 2 : 0) :
+            (flags & 2) || (flags & 12) === 12 ? 1 : flags & 16 ? 2 : flags & 32 ? 4 : 3;
+        assert.equal(e.cpo_persist_action(flags),expected);
+    }
+});
+
+test('scheduler keeps full epoch precision and rejects early or duplicate claims', {skip}, async () => {
+    const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
+    engine.install(instance.exports);
+    const now = 1800000000000;
+    const item = {status:'pending',dueTs:now+1};
+    assert.equal(engine.schedule(4,item,now),4);
+    assert.equal(engine.schedule(4,item,now+1),1);
+    assert.equal(engine.schedule(4,{...item,status:'firing'},now+1),0);
+    assert.equal(engine.schedule(5,{...item,status:'firing'},now),5);
+    assert.equal(engine.schedule(1,{...item,status:'completed'},now),2);
+    assert.equal(engine.schedule(4,{...item,dueTs:NaN},now),0);
+    assert.equal(engine.numeric('cpo_schedule_compare',[now,now+1,now,now]),0);
+    assert.equal(engine.scheduleIdentity({type:'existing',provider:'chatgpt',conversationId:'a'},
+        {type:'existing',provider:'chatgpt',conversationId:'b'}),0);
+    assert.equal(engine.scheduleIdentity({type:'existing',provider:'chatgpt',conversationId:'a'},
+        {type:'existing',provider:'chatgpt',conversationId:'a'}),1);
+});
