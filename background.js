@@ -409,17 +409,18 @@ function applyAuthorizedConversationRebind(job, identity) {
     return job;
 }
 
+function requiredQueueDecision(value) {
+    if(value==null)throw new Error('Required native queue decision unavailable.');
+    return value;
+}
+
 function isVerifiedFreshConversation(adapter, identity, fromConversationId, navigationStarted) {
     const kind = identity?.type === 'existing' ? 1 : identity?.type === 'new' ? 2 : 0;
     const flags = Number(adapter?.id === 'chatgpt' && identity?.provider === 'chatgpt') |
         (Number(!!identity?.conversationId)<<1) | (Number(identity?.conversationId !== fromConversationId)<<2) |
         (Number(!!fromConversationId)<<3) | (Number(navigationStarted === true)<<4);
     const native = globalThis.CpoQueueEngine?.call('cpo_rollover_fresh',[kind,flags]);
-    if (native != null) return native === 1;
-    if (adapter && typeof adapter.isFreshConversationIdentity === 'function' && adapter.isFreshConversationIdentity(identity, fromConversationId)) {
-        return true;
-    }
-    return navigationStarted === true && identity?.provider === 'chatgpt' && identity?.type === 'new';
+    return requiredQueueDecision(native) === 1;
 }
 
 async function confirmFreshConversationIdentity(tabId, job, adapter, fromConversationId) {
@@ -461,13 +462,7 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
             (Number(identityStages.has(job.rolloverStage))<<3) | (Number(!!job.rolloverRebindApplied)<<4) |
             (Number(fresh)<<5) | (Number(!!job.rolloverNavigationStarted)<<6) |
             (Number(!!job.handoffSubmitted)<<7) | (Number(!!job.handoffEstablished)<<8) | (Number(present)<<9);
-        return globalThis.CpoQueueEngine?.call('cpo_rollover_next',[stage,flags]) ??
-            (!(flags&1) ? 0 : !(flags&2) ? 1 : stage === 0 && !(flags&4) ? 2 :
-                stage <= 1 && (flags&24) !== 24 ? 3 :
-                stage === 2 && !(flags&32) ? (flags&64 ? 5 : 4) :
-                stage === 2 && !(flags&16) ? 6 :
-                stage === 3 ? (flags&256 ? 11 : flags&128 ? 10 : 7) :
-                stage === 4 ? (flags&512 ? 9 : 8) : 10);
+        return requiredQueueDecision(globalThis.CpoQueueEngine?.call('cpo_rollover_next',[stage,flags]));
     };
     const initialAction = rolloverNext(0);
     if (initialAction === 0) return { action: 'return' };
@@ -1043,14 +1038,11 @@ function restoreDurableJobs(durableJobs) {
         if(!decoded.ok){console.warn('CPO: durable queue restore skipped:',decoded.error);continue;}
         const job=decoded.value;
         const tabId = job.tabId;
-        if (jobs.has(tabId)) continue;
+        if (jobs.has(tabId)||restoredJobs.some(existing=>existing.tabId===tabId)) continue;
 
         job.totalMessages = getTotalMessages(job);
 
-        const restoredNumber = globalThis.CpoQueueEngine?.call('cpo_restore_command_number', [
-            Number(!!job.currentMessage), job.currentCommandNumber, job.completedCount]);
-        if (restoredNumber != null) job.currentCommandNumber = restoredNumber;
-        else if (job.currentMessage && !job.currentCommandNumber) job.currentCommandNumber = Number(job.completedCount || 0) + 1;
+        // Native deserialization already reconciles the restored command number.
 
         const confirmed = isSubmissionConfirmed(job);
         const restoreAction = globalThis.CpoQueueEngine?.restoreAction(job, confirmed);
@@ -1082,10 +1074,10 @@ function restoreDurableJobs(durableJobs) {
             resetCommandDeliveryState(job);
         }
 
-        jobs.set(tabId, job);
         restoredJobs.push(job);
     }
-
+    // Publish the reconstructed jobs only after the entire decode succeeds.
+    for(const job of restoredJobs)jobs.set(job.tabId,job);
     return restoredJobs;
 }
 
@@ -1826,8 +1818,7 @@ async function handleProcessRetryWait(tabId, job) {
         return { action: 'return' };
     }
 
-    if ((globalThis.CpoQueueEngine?.call('cpo_queue_retry_action', [Number(!!job.currentMessage), Number(isSubmissionConfirmed(job))]) ??
-        (isSubmissionConfirmed(job) && job.currentMessage ? 1 : 2)) === 1) {
+    if (requiredQueueDecision(globalThis.CpoQueueEngine?.call('cpo_queue_retry_action', [Number(!!job.currentMessage), Number(isSubmissionConfirmed(job))])) === 1) {
         job.currentPhase = 'awaiting-response';
         job.deliveryState = 'confirmed-submission';
         job.nextRetryAt = 0;
@@ -2305,10 +2296,7 @@ function getRetryBackoffDelayMs(attemptCount, unlimited = false) {
     const native = globalThis.CpoQueueEngine?.call('cpo_queue_backoff', [exponent,
         Number(QUEUE_RETRY_POLICY.backoffBaseMs), Number(QUEUE_RETRY_POLICY.backoffFactor) || 2,
         Number(QUEUE_RETRY_POLICY.backoffMaxMs)]);
-    if (native != null) return native;
-    const delay = Number(QUEUE_RETRY_POLICY.backoffBaseMs) * Math.pow(Number(QUEUE_RETRY_POLICY.backoffFactor) || 2, exponent);
-    const maxDelay = Number(QUEUE_RETRY_POLICY.backoffMaxMs) || delay;
-    return Math.max(1, Math.min(maxDelay, delay));
+    return requiredQueueDecision(native);
 }
 
 /**
@@ -2417,7 +2405,7 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
 
     const canRetry = globalThis.CpoQueueEngine?.call('cpo_queue_can_retry', [attemptCount,
         Number(QUEUE_RETRY_POLICY.maxAutomaticAttempts), Number(unlimited)]);
-    if (canRetry == null ? attemptCount >= maxAttempts : canRetry === 0) {
+    if (canRetry !== 1) {
         job.retryExhausted = true;
         job.retryMode = unlimited ? 'unlimited' : 'finite';
         job.lastError = getRetryExhaustionReason(job, classification.reason);
@@ -2468,8 +2456,7 @@ async function retryCurrentCommandIfEnabled(tabId, job, phase, reason, diagnosti
         return false;
     }
 
-    if ((globalThis.CpoQueueEngine?.call('cpo_queue_retry_action', [Number(!!job.currentMessage), Number(isSubmissionConfirmed(job))]) ??
-        (isSubmissionConfirmed(job) && job.currentMessage ? 1 : 2)) === 1) {
+    if (requiredQueueDecision(globalThis.CpoQueueEngine?.call('cpo_queue_retry_action', [Number(!!job.currentMessage), Number(isSubmissionConfirmed(job))])) === 1) {
         job.currentPhase = 'awaiting-response';
         job.deliveryState = 'confirmed-submission';
         job.nextRetryAt = 0;
@@ -2501,14 +2488,13 @@ async function refreshChatGPTTab(tabId) {
         const flags=Number(succeeded) |
             (Number(typeof chrome.tabs?.reload==='function')<<1) |
             (Number(typeof chrome.scripting?.executeScript==='function')<<2);
-        const action=globalThis.CpoQueueEngine?.call('cpo_tab_reload_next',[stage,flags]) ??
-            (succeeded?4:stage===0?1:stage<=1&&(flags&2)?2:stage<=2&&(flags&4)?3:0);
+        const action=globalThis.CpoQueueEngine?.call('cpo_tab_reload_next',[stage,flags]) ?? 0;
         if(action===4)return true;
         if(action===0)return false;
         try {
             if(action===1) succeeded=!!(await sendTabMessage(tabId,{type:'RELOAD_PAGE'}))?.ok;
             else if(action===2) {
-                await extensionApiPromise(done=>chrome.tabs.reload(tabId,{},done),()=>chrome.tabs.reload(tabId,{}));
+                await globalThis.CpoBrowserApi.invoke('tabReload',tabId);
                 succeeded=true;
             } else if(action===3) {
                 await chrome.scripting.executeScript({target:{tabId},func:()=>window.location.reload()});
@@ -2527,7 +2513,7 @@ async function waitForTabToRecover(tabId, maxWaitMs = 30000) {
     const cancelled=()=>!!owner&&(jobs.get(tabId)!==owner||owner.isStopped||owner.isPaused);
     const poll=(ready=false)=>globalThis.CpoQueueEngine?.numeric('cpo_tab_recover_poll',[
         Date.now()-started,maxWaitMs,Number(ready)|(Number(cancelled())<<1)]) ??
-        (cancelled()?0:ready?2:Date.now()-started<maxWaitMs?1:0);
+        0;
     await sleep(1500);
     while(poll()===1){
         try{
@@ -2551,7 +2537,7 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
     const initialRecovery = globalThis.CpoQueueEngine?.call('cpo_delivery_recovery', [0,
         1 | (Number(!!waitResult?.details?.state?.hasTryAgainButton) << 1) |
         (Number(!!queueSettings.queueUnlimitedRetryWait) << 6), attempt, 3]) ??
-        (attempt > maxAttempts ? 8 : waitResult?.details?.state?.hasTryAgainButton ? 1 : 2);
+        8;
     if (initialRecovery === 8) {
         logQueueEvent(tabId, 'error', `Exceeded maximum delivery timeout recovery attempts (${maxAttempts}) for command ${job.currentCommandNumber || '?'}/${totalMessages}.`, {
             commandNumber: job.currentCommandNumber || 0,
@@ -2665,10 +2651,7 @@ async function recoverFromDeliveryTimeout(tabId, job, waitResult, totalMessages,
         (Number(isSubmissionConfirmed(job)) << 4) | (Number(!!job.currentMessage) << 5);
     const recoveryDecision = stage => {
         const flags = recoveryFlags();
-        return globalThis.CpoQueueEngine?.call('cpo_delivery_recovery', [stage, flags, attempt, 3]) ??
-            (!(flags & 1) ? 0 : stage === 1 && (flags & 4) ? 3 :
-                stage < 3 && (flags & 8) ? 4 : stage < 3 && (flags & 2) ? 5 :
-                flags & 16 ? 6 : flags & 32 ? 7 : 8);
+        return requiredQueueDecision(globalThis.CpoQueueEngine?.call('cpo_delivery_recovery', [stage, flags, attempt, 3]));
     };
     // Case 0: Page reloaded and is actively generating
     if (recoveryDecision(1) === 3) {
@@ -2908,7 +2891,7 @@ async function waitForSubmissionAck(tabId, { expectedText, beforeSnapshot, timeo
         const cancelled = !!(job && liveJob !== job) || !!(liveJob && (liveJob.isStopped || liveJob.isPaused || !liveJob.isRunning));
         const elapsed = Date.now() - startedAt;
         const poll = globalThis.CpoQueueEngine?.numeric('cpo_submission_poll', [elapsed, timeout, Number(cancelled)]) ??
-            (cancelled ? 2 : elapsed <= timeout ? 1 : 0);
+            0;
         if (poll === 0) break;
         if (poll === 2) {
             return {
@@ -2928,7 +2911,7 @@ async function waitForSubmissionAck(tabId, { expectedText, beforeSnapshot, timeo
                 const flags = 1 | (Number(!!expected) << 1) | (Number(beforeIds.has(turn.turnId)) << 2) |
                     (Number(!!turn.turnId) << 3);
                 return (globalThis.CpoQueueEngine?.call('cpo_submission_ack', [flags]) ??
-                    ((flags & 14) === 10 ? 1 : 0)) === 1;
+                    0) === 1;
             };
             const matched = (snapshot.userTurns || []).find(turn => accept(turn, turn.matchedExpected)) ||
                 (snapshot.matchedUserTurnId ? (snapshot.userTurns || []).find(turn =>
@@ -2962,7 +2945,7 @@ async function waitForSubmissionAck(tabId, { expectedText, beforeSnapshot, timeo
                 const state = response?.state || {};
                 const generating = !!(state.generating || state.deepResearchActive);
                 if (job && (jobs.get(tabId) !== job || job.isPaused || job.isStopped || !job.isRunning)) continue;
-                if ((globalThis.CpoQueueEngine?.call('cpo_submission_ack', [Number(generating) << 4]) ?? (generating ? 2 : 0)) === 2) {
+                if ((globalThis.CpoQueueEngine?.call('cpo_submission_ack', [Number(generating) << 4]) ?? 0) === 2) {
                     if (liveJob) {
                         await persistCommandDelivery(tabId, liveJob, {
                             deliveryState: 'confirmed-submission',
@@ -3300,8 +3283,8 @@ async function waitForTabResponse(tabId, context = {}) {
                         (Number(!!(state.conversationCapacityReached || state.requiresNewConversation || responseState?.source === 'conversation-max-length'))<<1) |
                         (Number(!!(state.hasError || state.hasTryAgainButton || phase === 'error'))<<2) |
                         (Number(phase === 'waiting-for-user')<<3) | (Number(phase === 'interrupted')<<4);
-                    const failure = globalThis.CpoQueueEngine?.call('cpo_wait_failure',[failureFlags]) ??
-                        (failureFlags&1 ? 1 : failureFlags&2 ? 2 : failureFlags&4 ? 3 : failureFlags&8 ? 4 : failureFlags&16 ? 5 : 0);
+                    const failure = globalThis.CpoQueueEngine?.call('cpo_wait_failure',[failureFlags]);
+                    if(failure==null){clearInterval(checkInterval);resolve({ok:false,error:'Native response classifier unavailable.',details:{failureClass:'non-retryable'}});return;}
                     if (failure === 1) {
                         clearInterval(checkInterval);
                         resolve({
@@ -3466,11 +3449,8 @@ async function waitForTabResponse(tabId, context = {}) {
                     (Number(phase === 'terminal')<<4) | (Number(bindingMatches)<<5) |
                     (Number(!!(sawGenerating || sawDeepResearch))<<6) | (Number(!phase)<<7) |
                     (Number(incompleteToolTurn)<<8);
-                const settle = globalThis.CpoQueueEngine?.call('cpo_wait_settle',[settleFlags]) ??
-                    (context.waitForExistingGeneration ? (pageIsIdle ? 2 : 1) :
-                        !incompleteToolTurn && (phase === 'transient-idle' || (hasCommandBinding && !phase && pageIsIdle && !sawGenerating && !sawDeepResearch)) ? 3 :
-                        hasCommandBinding && phase === 'terminal' && bindingMatches && pageIsIdle ? 4 :
-                        !hasCommandBinding && (sawGenerating || sawDeepResearch) && pageIsIdle ? 5 : 0);
+                const settle = globalThis.CpoQueueEngine?.call('cpo_wait_settle',[settleFlags]);
+                if(settle==null){clearInterval(checkInterval);resolve({ok:false,error:'Native response settlement unavailable.',details:{failureClass:'non-retryable'}});return;}
                 if (settle === 1 || settle === 2) {
                     if (settle === 1) {
                         idleStreak = 0;
@@ -3715,9 +3695,7 @@ function updateRunningJobsStorage(options = {}) {
         (Number(queueStateInFlightSerialized === null) << 3) |
         (Number(options.force === true) << 4) |
         (Number(queueStateFlushTimer !== null) << 5);
-    const action = globalThis.CpoQueueEngine?.call('cpo_persist_action', [flags]) ??
-        ((flags & 1) ? (flags & 16 ? 2 : 0) : ((flags & 2) || (flags & 12) === 12) ? 1 :
-            (flags & 16) ? 2 : !(flags & 32) ? 3 : 4);
+    const action = globalThis.CpoQueueEngine?.call('cpo_persist_action', [flags]) ?? 2; // emergency forced checkpoint
     if (action === 0) return queueStateWrite;
     if (action === 1) {
         pendingQueueState = null;
