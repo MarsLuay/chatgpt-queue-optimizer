@@ -21,11 +21,11 @@
                     cpo: { host: (op, a, b, c) => this.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
                 });
                 const core = result.instance.exports;
-                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 5 ||
+                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 6 ||
                     !['cpo_collect_resources', 'cpo_discover_messages', 'cpo_execute_media',
                         'cpo_apply_window', 'cpo_window_visible', 'cpo_capture_history', 'cpo_process_mutations',
                         'cpo_cache_ttl', 'cpo_cache_valid', 'cpo_cache_nodes_valid', 'cpo_mutation_delay', 'cpo_provider_selectors', 'cpo_dom_composer_write', 'cpo_dom_composer_read',
-                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool', 'cpo_ui_render', 'cpo_ui_sequence_edit', 'cpo_ui_next_limit', 'cpo_ui_sequence_select', 'cpo_ui_variables', 'cpo_ui_saved_sequence'].every(name => typeof core[name] === 'function')) {
+                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool', 'cpo_ui_render', 'cpo_ui_sequence_edit', 'cpo_ui_next_limit', 'cpo_ui_sequence_select', 'cpo_ui_variables', 'cpo_ui_saved_sequence', 'cpo_sequence_import', 'cpo_sequence_substitute'].every(name => typeof core[name] === 'function')) {
                     throw new Error('Browser WASM ABI mismatch');
                 }
                 this.exports = core;
@@ -199,6 +199,16 @@
         sequenceEdit(messages,action,index=0,text='') {
             return this.invoke({messages,value:text},core=>
                 core.cpo_ui_sequence_edit(action,index,messages.length,Number(!!text))===1);
+        }
+        importSequence(value) {
+            if(typeof value!=='string'||value.length>8*1024*1024)return null;
+            return this.invoke({value,values:[null],result:{name:'',messages:[]}},(core,ctx)=>
+                core.cpo_sequence_import(value.length)===1?ctx.result:null);
+        }
+        substitute(value,name,replacement) {
+            const needle='{{'+name+'}}';
+            return this.invoke({value,needle,replacement,parts:[]},(core,ctx)=>
+                core.cpo_sequence_substitute(value.length,needle.length)===1?ctx.parts.join(''):null);
         }
         variables(value) {
             return this.invoke({value,spans:[]},(core,ctx)=>core.cpo_ui_variables(value.length)===1?ctx.spans:null);
@@ -591,6 +601,44 @@
                     else if(a===2)delete ctx.sequences[ctx.name];
                     else return 0;
                     return 1;
+                case 130:return ctx.value.charCodeAt(a)||0;
+                case 131:ctx.values.push([]);return ctx.values.length-1;
+                case 132:ctx.values[a].push(ctx.value.slice(b,c));return 1;
+                case 133:ctx.values[a].push(String.fromCharCode(b));return 1;
+                case 134:ctx.values[a]=ctx.values[a].join('');return a;
+                case 135:ctx.values.push(a===1?[]:a===2?Object.create(null):a===3?null:a===4);return ctx.values.length-1;
+                case 136:ctx.values.push(Number(ctx.value.slice(a,b)));return ctx.values.length-1;
+                case 137:{
+                    const target=ctx.values[a];
+                    if(Array.isArray(target))target.push(ctx.values[c]);
+                    else Object.defineProperty(target,ctx.values[b],{value:ctx.values[c],enumerable:true,writable:true,configurable:true});
+                    return 1;
+                }
+                case 138:{
+                    const v=ctx.values[a];
+                    return v==null?0:typeof v==='string'?1:Array.isArray(v)?2:typeof v==='object'?3:4;
+                }
+                case 139:{
+                    const key=['name','messages','message','text','prompt'][b];
+                    const obj=ctx.values[a];
+                    if(!obj||!Object.hasOwn(obj,key))return 0;
+                    ctx.values.push(obj[key]);return ctx.values.length-1;
+                }
+                case 140:return ctx.values[a].length;
+                case 141:ctx.values.push(ctx.values[a][b]);return ctx.values.length-1;
+                case 142:{
+                    const value=globalThis.CpoQueueEngine.trim(String(ctx.values[a]??''));
+                    if(b===1)ctx.result.name=value||'Imported sequence';
+                    else if(value)ctx.result.messages.push(value);
+                    return 1;
+                }
+                case 143:return Number(!!ctx.values[a]);
+                case 144:ctx.values.length=1;ctx.result={name:'',messages:[]};return 1;
+                case 145:ctx.result.messages.push(ctx.value.slice(a,b));return 1;
+                case 146:return ctx.result.messages.length;
+                case 147:return ctx.value.indexOf(ctx.needle,a)>>>0;
+                case 148:ctx.parts.push(ctx.value.slice(a,b));return 1;
+                case 149:ctx.parts.push(ctx.replacement);return 1;
                 default: throw new Error('Unknown Rust browser host operation: ' + op);
             }
         }
