@@ -935,6 +935,8 @@ function restoreDurableJobs(durableJobs) {
         restoredJobs.push({job});
     }
     // Publish the reconstructed jobs only after the entire decode succeeds.
+    const bulk=jobs.restoreBatch(restoredJobs.map(entry=>entry.job));
+    if(bulk!==null)return bulk;
     const published=[];
     try{
         for(const {job} of restoredJobs){
@@ -3036,9 +3038,9 @@ function flushQueueState() {
     if(!jobs.canPersist()||globalThis.CpoQueueEngine?.numeric('cpo_background_checkpoint',[0,0])!==1)return queueStateWrite;
     let nextState;
     try {
-        const snapshot=getRunningJobsSnapshot();
-        nextState={serialized:jobs.revision(),items:{
-            runningJobs:snapshot,queueDurableJobs:getDurableJobsState(),isRunning:jobs.size>0
+        nextState=jobs.checkpointBatch(0);
+        if(!nextState)nextState={serialized:jobs.revision(),items:{
+            runningJobs:getRunningJobsSnapshot(),queueDurableJobs:getDurableJobsState(),isRunning:jobs.size>0
         }};
     } catch(error) {
         console.warn('Native checkpoint unavailable; previous durable state preserved.',error);
@@ -3066,6 +3068,8 @@ function flushQueueState() {
 }
 
 function getDurableJobsState() {
+    const bulk=jobs.checkpointBatch(2);
+    if(bulk)return bulk;
     const state = {};
     for(const [tabId,job] of jobs.entries())state[tabId]=jobs.checkpoint(job);
     return state;

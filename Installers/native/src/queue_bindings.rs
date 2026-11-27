@@ -346,8 +346,8 @@ const HOST:&str=r####"(() => {
             if(!accepted)throw new Error('Native job transaction rejected');
             return true;
         }
-        function initialize(initial,restore=false){
-            return native(e=>{
+        function initialEntries(initial){
+                ready();
                 const entries=[];
                 for(const [key,value] of Object.entries(initial)){
                     const field=fields.get(key);
@@ -357,6 +357,11 @@ const HOST:&str=r####"(() => {
                         for(const prompt of value)entries.push([field,encoder.encode(JSON.stringify(prompt))]);
                     }else entries.push([field,value===undefined?new Uint8Array(0):encoder.encode(JSON.stringify(value))]);
                 }
+                return entries;
+        }
+        function initialize(initial,restore=false){
+            const entries=initialEntries(initial);
+            return native(e=>{
                 const length=entries.reduce((sum,[,bytes])=>sum+8+bytes.length,0);
                 // Preserve support for unusually large combined job frames via
                 // the previous per-field path rather than silently truncate.
@@ -432,6 +437,22 @@ const HOST:&str=r####"(() => {
             }
             return handle;
         }
+        function readBatch(e,size){
+            if(!size)return null;
+            try{return JSON.parse(decoder.decode(new Uint8Array(e.memory.buffer,e.cpo_live_output()>>>0,size-1)));}
+            finally{e.cpo_live_wipe();}
+        }
+        function checkpointBatch(mode){
+            return native(e=>{
+                const rows=Array.from(handles,([tabId,job])=>[ids.get(job),encoder.encode(JSON.stringify(String(tabId)))]);
+                const length=rows.reduce((n,[,bytes])=>n+8+bytes.length,0);
+                if(length>64*1024*1024)return null;
+                const ptr=e.cpo_live_input(length)>>>0;if(length&&!ptr)return null;
+                if(length){const view=new DataView(e.memory.buffer,ptr,length),out=new Uint8Array(e.memory.buffer,ptr,length);let offset=0;
+                    for(const [id,bytes] of rows){view.setUint32(offset,id,true);view.setUint32(offset+4,bytes.length,true);out.set(bytes,offset+8);offset+=8+bytes.length;}}
+                return readBatch(e,e.cpo_live_checkpoint_batch(mode)>>>0);
+            });
+        }
         const store={
             get size(){return handles.size;},
             has:key=>handles.has(key),
@@ -456,6 +477,39 @@ const HOST:&str=r####"(() => {
                 }
                 return store;
             },
+            restoreBatch(records){
+                const tabs=new Set();
+                for(const job of records){
+                    if(handles.has(job.tabId)||tabs.has(job.tabId))throw new Error('Duplicate restored tab');
+                    tabs.add(job.tabId);
+                }
+                const rows=records.map(initialEntries);
+                const sizes=rows.map(entries=>entries.reduce((sum,[,v])=>sum+8+v.length,0));
+                const length=sizes.reduce((sum,n)=>sum+4+n,0);
+                if(length>64*1024*1024)return null;
+                const allocated=native(e=>{
+                    const ptr=e.cpo_live_input(length)>>>0;
+                    if(length&&!ptr)return null;
+                    if(length){const view=new DataView(e.memory.buffer,ptr,length),out=new Uint8Array(e.memory.buffer,ptr,length);let at=0;
+                        for(let i=0;i<rows.length;i++){
+                            view.setUint32(at,sizes[i],true);at+=4;
+                            for(const [field,bytes] of rows[i]){view.setUint32(at,field,true);view.setUint32(at+4,bytes.length,true);out.set(bytes,at+8);at+=8+bytes.length;}
+                        }}
+                    return readBatch(e,e.cpo_live_restore_batch()>>>0);
+                });
+                if(!allocated)return null;
+                if(!Array.isArray(allocated)||allocated.length!==records.length)throw new Error('Invalid native restore handles');
+                try{
+                    const pending=records.map((job,i)=>makeJob(job.tabId,allocated[i],job,true));
+                    for(let i=0;i<records.length;i++)handles.set(records[i].tabId,pending[i]);
+                    return pending;
+                }catch(error){
+                    for(const id of allocated)native(e=>e.cpo_live_delete(id));
+                    for(const record of records)handles.delete(record.tabId);
+                    throw error;
+                }
+            },
+            checkpointBatch,
             delete(tabId){
                 const handle=handles.get(tabId);
                 if(!handle)return false;
@@ -554,7 +608,7 @@ const HOST:&str=r####"(() => {
                 if(!id||handles.get(ownerTabs.get(job))!==job)return null;
                 return native(e=>e.cpo_live_processing(id,op)>>>0);
             },
-            runningSnapshot(){const out={};for(const [tabId,job] of handles)out[tabId]=read(ids.get(job),NONE-1);return out;},
+            runningSnapshot(){const batch=checkpointBatch(1);if(batch)return batch;const out={};for(const [tabId,job] of handles)out[tabId]=read(ids.get(job),NONE-1);return out;},
             checkpoint(job){
                 const id=ids.get(job);
                 if(!id)throw new Error('Unowned live job');

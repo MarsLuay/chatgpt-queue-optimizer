@@ -1013,22 +1013,21 @@ mod live_state {
         // Initialize all scalars and the queue before allocating a visible
         // native owner. Repeated queue frames are ordered; duplicate scalar
         // indices or malformed prompt frames reject the entire operation.
-        fn initialize(&mut self,restore:bool)->u32{
-            let input=std::mem::take(&mut self.input);
+        fn decode_initial(input:&[u8],restore:bool)->Option<Job>{
             let mut job=Job::new();let mut seen=vec![false;job.fields.len()];
             let mut at=0usize;
             while at<input.len(){
-                let Some(header)=input.get(at..at+8)else{return 0;};
+                let Some(header)=input.get(at..at+8)else{return None;};
                 let idx=u32::from_le_bytes(header[..4].try_into().unwrap()) as usize;
                 let len=u32::from_le_bytes(header[4..].try_into().unwrap()) as usize;
-                at+=8;let Some(end)=at.checked_add(len)else{return 0;};
-                let Some(value)=input.get(at..end)else{return 0;};at=end;
-                if idx>=job.fields.len(){return 0;}
+                at+=8;let Some(end)=at.checked_add(len)else{return None;};
+                let Some(value)=input.get(at..end)else{return None;};at=end;
+                if idx>=job.fields.len(){return None;}
                 if idx==QUEUE{
-                    if len<2||value.first()!=Some(&b'"')||value.last()!=Some(&b'"'){return 0;}
+                    if len<2||value.first()!=Some(&b'"')||value.last()!=Some(&b'"'){return None;}
                     job.queue.push_back(value.to_vec());
                 }else{
-                    if seen[idx]{return 0;}seen[idx]=true;
+                    if seen[idx]{return None;}seen[idx]=true;
                     if len!=0{job.fields[idx]=Some(value.to_vec());}
                 }
             }
@@ -1042,12 +1041,91 @@ mod live_state {
                     1=>{job.set("currentPhase",b"\"awaiting-response\"");if job.get("deliveryState")!=b"\"active-response\""{job.set("deliveryState",b"\"confirmed-submission\"");}},
                     2=>{job.set("currentPhase",b"\"terminal\"");job.set("deliveryState",b"\"terminal-awaiting-bookkeeping\"");},
                     3 if !job.confirmed()&&job.truth("currentMessage")=>{job.requeue();job.set("currentPhase",b"\"queued\"");job.reset(6);},
-                    _=>return 0
+                    _=>return None
                 }
                 job.fields[super::DURABLE_FIELDS.len()]=Some(FALSE.to_vec());
             }
+            Some(job)
+        }
+        fn initialize(&mut self,restore:bool)->u32{
+            let mut input=std::mem::take(&mut self.input);
+            let decoded=Self::decode_initial(&input,restore);
+            input.fill(0);
+            let Some(mut job)=decoded else{return 0;};
             let Some(id)=self.next.checked_add(1)else{return 0;};
             self.next=id;job.dirty(self.advance());self.jobs.insert(id,job);id
+        }
+        // Length-prefixed complete job frames. Decode and validate every
+        // record before assigning any visible native handles or revisions.
+        fn restore_batch(&mut self)->u32{
+            self.output.fill(0);self.output.clear();
+            let mut input=std::mem::take(&mut self.input);
+            let staged=(||{
+                let mut at=0usize;let mut jobs=Vec::new();
+                let mut tabs=std::collections::BTreeSet::new();
+                while at<input.len(){
+                    let len=u32::from_le_bytes(input.get(at..at+4)?.try_into().ok()?) as usize;at+=4;
+                    let end=at.checked_add(len)?;
+                    let job=Self::decode_initial(input.get(at..end)?,true)?;at=end;
+                    let tab=std::str::from_utf8(job.get("tabId")).ok()?.parse::<u64>().ok()?;
+                    if tab==0||tab>9007199254740991||!tabs.insert(tab)||jobs.len()>=65536{return None;}
+                    if self.jobs.values().any(|j|j.get("tabId")==job.get("tabId")){return None;}
+                    jobs.push(job);
+                }
+                Some(jobs)
+            })();
+            input.fill(0);
+            let Some(staged)=staged else{return 0;};
+            let Some(last)=self.next.checked_add(staged.len() as u32)else{return 0;};
+            let revision=if staged.is_empty(){self.epoch}else{self.advance()};
+            self.output.push(b'[');
+            for (i,mut job) in staged.into_iter().enumerate(){
+                let id=self.next+i as u32+1;
+                job.dirty(revision);self.jobs.insert(id,job);
+                if i!=0{self.output.push(b',');}self.output.extend_from_slice(id.to_string().as_bytes());
+            }
+            self.next=last;self.output.push(b']');
+            self.output.len() as u32+1
+        }
+        // IDs and map keys are supplied by the host map (not by unrelated
+        // stores sharing this WASM instance). Serialize both views in one call.
+        fn checkpoint_batch(&mut self,mode:u32)->u32{
+            self.output.fill(0);self.output.clear();
+            let mut input=std::mem::take(&mut self.input);
+            let result=(||{
+                if mode>2{return None;}
+                let mut at=0usize;let mut rows=Vec::new();
+                let mut keys=std::collections::BTreeSet::new();
+                while at<input.len(){
+                    let id=u32::from_le_bytes(input.get(at..at+4)?.try_into().ok()?);
+                    let len=u32::from_le_bytes(input.get(at+4..at+8)?.try_into().ok()?) as usize;at+=8;
+                    let end=at.checked_add(len)?;let key=input.get(at..end)?;at=end;
+                    if key.len()<2||key.first()!=Some(&b'"')||key.last()!=Some(&b'"')||!keys.insert(key){return None;}
+                    rows.push((key,self.jobs.get(&id)?));
+                }
+                let mut out=vec![b'{'];
+                if mode==0{out.extend_from_slice(b"\"serialized\":");out.extend_from_slice(self.epoch.to_string().as_bytes());out.extend_from_slice(b",\"items\":{\"runningJobs\":{");}
+                if mode!=2{
+                    for (i,(key,job)) in rows.iter().enumerate(){
+                        if i!=0{out.push(b',');}out.extend_from_slice(key);out.push(b':');out.extend_from_slice(&job.snapshot());
+                    }
+                    out.push(b'}');
+                }
+                if mode==0{out.extend_from_slice(b",\"queueDurableJobs\":{");}
+                if mode!=1{
+                    for (i,(key,job)) in rows.iter().enumerate(){
+                        let bytes=super::durable_projection::project(&job.fields,&job.queue)?;
+                        if i!=0{out.push(b',');}out.extend_from_slice(key);out.push(b':');out.extend_from_slice(&bytes);
+                        if out.len()>MAX_INPUT{return None;}
+                    }
+                    out.push(b'}');
+                }
+                if mode==0{out.extend_from_slice(if rows.is_empty(){b",\"isRunning\":false}}".as_slice()}else{b",\"isRunning\":true}}".as_slice()});}
+                if out.len()>MAX_INPUT{return None;}
+                Some(out)
+            })();
+            input.fill(0);
+            let Some(out)=result else{return 0;};self.output=out;self.output.len() as u32+1
         }
         fn mutate(&mut self, id: u32, field: u32, op: u32, index: u32) -> bool {
             let input = std::mem::take(&mut self.input);
@@ -1612,6 +1690,10 @@ mod live_state {
     pub extern "C" fn cpo_live_initialize()->u32{STORE.with(|s|s.borrow_mut().initialize(false))}
     #[no_mangle]
     pub extern "C" fn cpo_live_restore()->u32{STORE.with(|s|s.borrow_mut().initialize(true))}
+    #[no_mangle]
+    pub extern "C" fn cpo_live_restore_batch()->u32{STORE.with(|s|s.borrow_mut().restore_batch())}
+    #[no_mangle]
+    pub extern "C" fn cpo_live_checkpoint_batch(mode:u32)->u32{STORE.with(|s|s.borrow_mut().checkpoint_batch(mode))}
     #[no_mangle]
     pub extern "C" fn cpo_live_new() -> u32 { STORE.with(|s| s.borrow_mut().create()) }
     #[no_mangle]

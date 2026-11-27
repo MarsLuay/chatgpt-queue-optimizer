@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 35);
+    assert.equal(e.cpo_queue_abi(), 36);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -900,4 +900,19 @@ test('native restore reconciles before publication and retry timing follows live
     jobs.transaction(job,20);assert.equal(jobs.retryTick(job,2000,250),-1);assert.equal(job.isStopped,true);
     jobs.set(8,{tabId:8,isRunning:true,currentMessage:'sent',currentPhase:'sending',deliveryState:'confirmed-submission',queue:[]},true);
     assert.equal(jobs.get(8).currentPhase,'awaiting-response');
+});
+
+
+test('native bulk checkpoint and restore preserve isolation and one revision',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});engine.install(instance.exports);
+    const jobs=engine.createLiveJobs(),other=engine.createLiveJobs();other.set(99,{tabId:99,queue:['unrelated'],isRunning:true});
+    const before=jobs.revision();
+    const restored=jobs.restoreBatch([{tabId:7,isRunning:true,currentPhase:'sending',currentMessage:'unconfirmed',deliveryState:'pre-click',queue:['next']},{tabId:8,isRunning:true,currentPhase:'sending',currentMessage:'sent',deliveryState:'confirmed-submission',queue:[]}]);
+    assert.equal(restored.length,2);assert.equal(jobs.revision(),before+1);
+    assert.deepEqual([...jobs.get(7).queue],['unconfirmed','next']);assert.equal(jobs.get(8).currentPhase,'awaiting-response');
+    const snapshot=jobs.checkpointBatch(0);assert.equal(snapshot.serialized,jobs.revision());assert.equal(snapshot.items.isRunning,true);
+    assert.deepEqual(Object.keys(snapshot.items.runningJobs),['7','8']);assert.deepEqual(Object.keys(snapshot.items.queueDurableJobs),['7','8']);
+    assert.deepEqual(snapshot.items.queueDurableJobs['7'],jobs.checkpoint(jobs.get(7)));
+    assert.equal(snapshot.items.runningJobs['7'].currentMessage,undefined);
+    assert.throws(()=>jobs.restoreBatch([{tabId:7,queue:[]}])) ;assert.equal(jobs.revision(),snapshot.serialized);
 });
