@@ -5,7 +5,7 @@
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! { core::arch::wasm32::unreachable() }
 
 #[no_mangle]
-pub extern "C" fn cpo_queue_abi() -> u32 { 3 }
+pub extern "C" fn cpo_queue_abi() -> u32 { 4 }
 
 const OFFSET: u32 = 2166136261;
 const PRIME: u32 = 16777619;
@@ -419,9 +419,115 @@ pub extern "C" fn cpo_rollover_generation(generation: u32, rebound: u32) -> u32 
     generation.saturating_add((rebound == 0) as u32)
 }
 
+// JSON string serialization uses UTF-16 to preserve JavaScript strings,
+// including lone surrogates. The host supplies bounded chunks without
+// splitting surrogate pairs. Output matches well-formed JSON.stringify.
+const JSON_OUTPUT_CAP: usize = CHUNK * 6;
+fn escape_json(input: &[u16], output: &mut [u16]) -> usize {
+    let mut i = 0;
+    let mut n = 0;
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    while i < input.len() {
+        let unit = input[i];
+        let short = match unit { 34 => 34, 92 => 92, 8 => 98, 9 => 116,
+            10 => 110, 12 => 102, 13 => 114, _ => 0 };
+        if short != 0 {
+            output[n] = 92; output[n+1] = short; n += 2;
+        } else if (0xd800..=0xdbff).contains(&unit) &&
+            input.get(i+1).is_some_and(|v| (0xdc00..=0xdfff).contains(v)) {
+            output[n] = unit; output[n+1] = input[i+1]; n += 2; i += 1;
+        } else if unit < 32 || (0xd800..=0xdfff).contains(&unit) {
+            output[n] = 92; output[n+1] = 117;
+            for j in 0..4 { output[n+2+j] = HEX[((unit >> (12-j*4)) & 15) as usize] as u16; }
+            n += 6;
+        } else {
+            output[n] = unit; n += 1;
+        }
+        i += 1;
+    }
+    n
+}
+#[cfg(target_arch = "wasm32")]
+static mut JSON_OUTPUT: [u16; JSON_OUTPUT_CAP] = [0; JSON_OUTPUT_CAP];
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_json_output() -> usize { core::ptr::addr_of_mut!(JSON_OUTPUT) as *mut u16 as usize }
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_json_escape(len: u32) -> u32 {
+    if len as usize > CHUNK { return 0; }
+    let input = unsafe { core::slice::from_raw_parts(cpo_fingerprint_buffer() as *const u16,len as usize) };
+    let out = unsafe { core::slice::from_raw_parts_mut(cpo_json_output() as *mut u16,JSON_OUTPUT_CAP) };
+    escape_json(input,out) as u32
+}
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_json_wipe(len: u32) {
+    let p = cpo_json_output() as *mut u16;
+    for i in 0..(len as usize).min(JSON_OUTPUT_CAP) { unsafe { core::ptr::write_volatile(p.add(i),0) }; }
+}
+// Syntax tokens: object/array begin/end, separator, colon, quote, null,
+// true, false. Returning a packed ASCII token keeps the transport small.
+#[no_mangle]
+pub extern "C" fn cpo_json_token(kind: u32) -> u32 {
+    match kind { 0=>123,1=>125,2=>91,3=>93,4=>44,5=>58,6=>34,
+        7=>u32::from_le_bytes(*b"null"),8=>u32::from_le_bytes(*b"true"),_=>0 }
+}
+
+// Tabs: flags 1 valid id, 2 inactive, 4 complete, 8 ChatGPT,
+// 16 protected (highlighted/pinned/audible/private/etc), 32 queue work,
+// 64 unchanged identity/access, 128 content confirmed safe.
+// Stage 0 candidate, stage 1 final authorization; mode 0 automatic,
+// mode 1 explicitly requested. Never discard without the final safety checks.
+#[no_mangle]
+pub extern "C" fn cpo_tab_discard(stage: u32, mode: u32, flags: u32, minutes: u32, elapsed: f64) -> u32 {
+    if flags & 15 != 15 || flags & 48 != 0 { return 0; }
+    if mode == 0 && (!matches!(minutes,15|30|60) || !elapsed.is_finite() || elapsed < f64::from(minutes)*60000.0) { return 0; }
+    if stage == 1 && flags & 192 != 192 { return 0; }
+    (stage <= 1 && mode <= 1) as u32
+}
+#[no_mangle]
+pub extern "C" fn cpo_tab_alarm(minutes: u32) -> u32 { matches!(minutes,15|30|60) as u32 }
+// Reload effects: 1 content request, 2 tabs.reload, 3 script injection,
+// 4 success, 0 unavailable. Each effect is attempted at most once.
+#[no_mangle]
+pub extern "C" fn cpo_tab_reload_next(stage: u32, flags: u32) -> u32 {
+    if flags & 1 != 0 { return 4; }
+    if stage == 0 { return 1; }
+    if stage <= 1 && flags & 2 != 0 { return 2; }
+    if stage <= 2 && flags & 4 != 0 { return 3; }
+    0
+}
+#[no_mangle]
+pub extern "C" fn cpo_tab_recover_poll(elapsed: f64, limit: f64, flags: u32) -> u32 {
+    if flags & 2 != 0 { return 0; }
+    if flags & 1 != 0 { return 2; }
+    (elapsed.is_finite() && limit.is_finite() && elapsed < limit) as u32
+}
+#[no_mangle]
+pub extern "C" fn cpo_tab_close_action(flags: u32) -> u32 {
+    // A removed live job must be cancelled and checkpointed.
+    (flags & 1 != 0) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn json_escape_and_tab_lifecycle() {
+        let input = [34,92,10,0,0xd800,0xd83d,0xde00,0xdc00];
+        let mut out = [0;48];
+        let n = escape_json(&input,&mut out);
+        let expected = "\\\"\\\\\\n\\u0000\\ud800😀\\udc00".encode_utf16().collect::<Vec<_>>();
+        assert_eq!(&out[..n],expected.as_slice());
+        assert_eq!(cpo_tab_discard(0,0,15,15,900000.0),1);
+        assert_eq!(cpo_tab_discard(0,0,15,15,899999.0),0);
+        assert_eq!(cpo_tab_discard(1,1,15|192,0,0.0),1);
+        assert_eq!(cpo_tab_discard(1,1,15|192|32,0,0.0),0);
+        assert_eq!(cpo_tab_reload_next(1,6),2);
+        assert_eq!(cpo_tab_reload_next(2,6),3);
+        assert_eq!(cpo_tab_recover_poll(10.0,20.0,2),0);
+    }
     #[test]
     fn provider_routes_and_response_priority() {
         let units = |s: &str| s.encode_utf16().collect::<Vec<_>>();
