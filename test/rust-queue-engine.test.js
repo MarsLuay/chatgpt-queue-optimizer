@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 10);
+    assert.equal(e.cpo_queue_abi(), 11);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -420,4 +420,27 @@ test('native provider catalogs, keyboard and diagnostic policies',{skip},async()
     const result=engine.sanitizeDiagnostic({prompt:'secret',nested:{token:{redacted:true,secret:'leak'},ok:true}},0,'',
         key=>['prompt','token'].includes(key),error=>({message:error.message}));
     assert.deepEqual(result,{ok:true,value:{prompt:{redacted:true,length:6},nested:{token:{redacted:true},ok:true}}});
+});
+
+test('native scheduled collections, identity and popup formatters',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    const a={id:'a',dueTs:10,createdAt:5,status:'pending'},b={id:'b',dueTs:1,createdAt:9,status:'pending'},c={id:'c',dueTs:10,createdAt:5,status:'failed'};
+    assert.deepEqual(engine.scheduledSort([a,b,c]),[b,a,c]);
+    assert.deepEqual(engine.scheduledLookup([a,b,c],'b'),[b]);
+    assert.deepEqual(engine.scheduledWithout([a,b,c],'b'),[a,c]);
+    assert.deepEqual(engine.scheduledDue([a,b,c],null,10),[a,b]);
+    assert.deepEqual(engine.scheduledDue([a,b,c],'a',9),[]);
+    assert.equal(engine.identityKey('chatgpt','existing','abc'),'chatgpt:c:abc');
+    assert.equal(engine.identityKey('claude','new',null),'claude:new');
+    assert.equal(engine.identityKey('chatgpt','existing','abc','preserved'),'preserved');
+    assert.match(engine.continuationHandoff({runId:'  test  id ',pendingMessageLength:4}),/Logical run id: test id.*pending \(length 4\)/);
+    assert.equal(engine.textBatch(8,['ChatGPT - Example – Claude']),'Example');
+    assert.equal(engine.popupStatus({currentPhase:'retry_wait'}),'Retrying');
+    assert.equal(engine.popupRunningLabel('Tab','Queued',{totalMessages:2,completedCount:1,remaining:1}),'Tab | Queued | Done: 1/2 | Remaining: 1');
+    assert.equal(engine.popupScheduledLabel({status:'pending',text:' a  b '},'Tab','Today'),'Tab | Pending | Today | a b');
+    const tabs=[{id:1,url:'https://chatgpt.com/'},{id:1,url:'https://claude.ai/'},{id:2,url:'https://claude.ai/',active:true},{id:3,url:'https://example.com/'}];
+    assert.deepEqual(engine.supportedTabs(tabs),[tabs[2],tabs[0]]);
+    assert.equal(engine.popupStats('ChatGPT',{messageCount:2,hiddenCount:0,visibleCount:2})[0],'Target: ChatGPT');
+    assert.equal(engine.popupStats('ChatGPT',{messageCount:2,hiddenCount:0,visibleCount:2,debugInfo:{resources:{}}}).length,26);
 });

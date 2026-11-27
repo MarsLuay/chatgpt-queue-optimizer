@@ -24,9 +24,9 @@
             'cpo_durable_number','cpo_durable_boolean','cpo_durable_retry_mode','cpo_durable_trim',
             'cpo_setting_number','cpo_setting_bool','cpo_popup_status','cpo_popup_remaining','cpo_popup_schedule_actions',
             'cpo_log_duplicate','cpo_log_keep_start','cpo_log_limit','cpo_log_sensitive',
-            'cpo_event_code','cpo_content_event_kind','cpo_api_mode','cpo_api_path','cpo_injection_route','cpo_async_transition','cpo_live_new','cpo_live_delete','cpo_live_epoch','cpo_live_len','cpo_live_input','cpo_live_write','cpo_live_read','cpo_live_output','cpo_live_wipe','cpo_catalog_len','cpo_catalog_items','cpo_catalog_word','cpo_enter_eligible','cpo_enter_action','cpo_provider_predicate','cpo_log_plan','cpo_diag_pick','cpo_diag_reset','cpo_diag_update','cpo_diag_finish','cpo_log_walk_begin','cpo_log_walk_plan','cpo_log_walk_next','cpo_log_walk_close'];
+            'cpo_event_code','cpo_content_event_kind','cpo_api_mode','cpo_api_path','cpo_injection_route','cpo_async_transition','cpo_live_new','cpo_live_delete','cpo_live_epoch','cpo_live_len','cpo_live_input','cpo_live_write','cpo_live_read','cpo_live_output','cpo_live_wipe','cpo_catalog_len','cpo_catalog_items','cpo_catalog_word','cpo_enter_eligible','cpo_enter_action','cpo_provider_predicate','cpo_log_plan','cpo_diag_pick','cpo_diag_reset','cpo_diag_update','cpo_diag_finish','cpo_log_walk_begin','cpo_log_walk_plan','cpo_log_walk_next','cpo_log_walk_close','cpo_batch_input','cpo_batch_run','cpo_batch_output','cpo_batch_wipe'];
         if (!names.every(name => typeof exports[name] === 'function') ||
-            exports.cpo_queue_abi() !== 10 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
+            exports.cpo_queue_abi() !== 11 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
         core = exports;
         durableSchema = null;
         catalogCache.clear();
@@ -545,6 +545,76 @@
         }catch(error){fail(error);return null;}
     }
 
+
+    // One transfer per collection or formatted record, not per comparator.
+    function batch(op,fields){
+        if(!core)return null;
+        const e=core;
+        try{
+            const values=fields.map(value=>String(value??''));
+            let len=0;
+            for(const value of values){len+=2+value.length;if(len>32*1024*1024)return null;}
+            const ptr=e.cpo_batch_input(len)>>>0;
+            if(!ptr)return null;
+            const input=new Uint16Array(e.memory.buffer,ptr,len);
+            let pos=0;
+            for(const value of values){input[pos++]=value.length&65535;input[pos++]=value.length>>>16;for(let i=0;i<value.length;i++)input[pos++]=value.charCodeAt(i);}
+            const size=e.cpo_batch_run(op)>>>0;
+            if(!size)return null;
+            const output=new Uint16Array(e.memory.buffer,e.cpo_batch_output()>>>0,size-1);
+            const result=[];pos=0;
+            while(pos<output.length){
+                if(pos+2>output.length)throw new Error('Invalid native batch framing');
+                const n=output[pos]+output[pos+1]*65536;pos+=2;
+                if(pos+n>output.length)throw new Error('Invalid native batch size');
+                let value='';
+                for(let start=pos;start<pos+n;start+=8192)value+=String.fromCharCode(...output.subarray(start,Math.min(pos+n,start+8192)));
+                result.push(value);pos+=n;
+            }
+            return result;
+        }catch(error){fail(error);return null;}
+        finally{try{e.cpo_batch_wipe();}catch{}}
+    }
+    function textBatch(op,fields){return batch(op,fields)?.[0]??null;}
+    function collection(op,items,fields){
+        const indices=batch(op,fields);
+        if(indices==null)return null;
+        return indices.map(value=>{const i=Number(value);if(!Number.isInteger(i)||i<0||i>=items.length)throw new Error('Invalid native collection index');return items[i];});
+    }
+    const scheduledSort=items=>collection(1,items,items.flatMap(item=>[Number(item?.dueTs||0),Number(item?.createdAt||0)]));
+    const scheduledLookup=(items,id)=>collection(2,items,[String(id),...items.map(item=>String(item?.id??''))]);
+    const scheduledWithout=(items,id)=>collection(3,items,[String(id),...items.map(item=>String(item?.id??''))]);
+    const scheduledDue=(items,id,now)=>collection(4,items,[now,id||'',...items.flatMap(item=>[item?.id??'',Math.max(0,['','pending','firing','completed','failed','cancelled'].indexOf(item?.status)),Number(item?.dueTs||0)])]);
+    const identityKey=(provider,type,id,key='')=>textBatch(5,[provider,type,id??'',key||'']);
+    function continuationHandoff(context){
+        return textBatch(6,[context.runId||'',Number(context.conversationGeneration||0),Number(context.completedCount||0),Number(context.currentCommandNumber||0),Number(context.remainingCount||0),Number(context.pendingMessageLength||0)]);
+    }
+    function supportedTabs(items){
+        const fields=items.flatMap(tab=>{
+            let supported=0;
+            try{const url=new URL(tab?.url||tab?.pendingUrl||'');supported=Number(url.protocol==='https:'&&!!providerHost(url.hostname.toLowerCase()));}catch{}
+            return [tab?.id?String(tab.id):'',supported,Number(!!tab?.active)];
+        });
+        return collection(7,items,fields);
+    }
+    function popupStatus(job){
+        return textBatch(9,[job.status||'',job.currentPhase||'',Number(!!job.isPaused)|(Number(!!job.rolloverInProgress)<<1)|(Number(!!job.waitForIdleBeforeSend)<<2)]);
+    }
+    function popupRunningLabel(title,status,job){
+        return textBatch(10,[String(title||'Supported tab'),status,Number(job.completedCount||0),Number(job.totalMessages||0),Number(job.currentCommandNumber||0),job.remaining??0,Number(job.nextMessageLength||0),job.lastError||job.pausedReason||'']);
+    }
+    function popupScheduledLabel(item,title,due){
+        return textBatch(12,[String(title||('Tab '+(item.tabId||'unknown'))),item.status||'',due,item.text||'',item.failureReason||'']);
+    }
+    function popupStats(title,response){
+        const d=response.debugInfo||{},p=d.performance||{},r=d.resources;
+        const fields=[title,String(response.messageCount),d.optimizerEngine??'Unknown',d.browserEngine??'Unknown',String(response.hiddenCount),String(response.visibleCount),d.containerFound?'Found':'Missing',d.initialized?'Yes':'No',p.scans??0,p.lastScanMs??0,p.lastWindowMs??0,p.mutationSkips??0];
+        if(r){
+            const m=r.mediaEviction||{},mib=bytes=>typeof bytes==='number'?(bytes/1048576).toFixed(2)+' MiB':'Unavailable';
+            fields.push(...[r.sampledTurns,r.totalTurns,r.truncatedTurns,r.nodes,r.textChars,r.images,r.media,r.surfaces,r.units,r.adaptiveEnabled?r.budget+' units; target '+r.adaptiveTarget+' turns':'Off',r.manuallyExpanded?'Yes':'No',r.cachedMessageRefs,m.imagesEvicted??0,m.playbackEvicted??0,m.restored??0,mib(m.estimatedImageBytes),mib(r.wasmLinearBytes),mib(r.usedJsHeapBytes)].map(String),'','','','');
+        }
+        return batch(13,fields);
+    }
     function providerCatalog(id){
         if(!core)return null;
         if(catalogCache.has(id))return catalogCache.get(id);
@@ -707,7 +777,7 @@
             (Number(!!job.waitForIdleBeforeSend) << 6);
         return call('cpo_queue_next', [flags, phase, job.queue.length]);
     }
-    const api = { providerCatalog, diagnosticText, diagnosticPick, sanitizeDiagnostic, createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
+    const api = { batch, textBatch, scheduledSort, scheduledLookup, scheduledWithout, scheduledDue, identityKey, continuationHandoff, supportedTabs, popupStatus, popupRunningLabel, popupScheduledLabel, popupStats, providerCatalog, diagnosticText, diagnosticPick, sanitizeDiagnostic, createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
     globalThis.CpoQueueEngine = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();

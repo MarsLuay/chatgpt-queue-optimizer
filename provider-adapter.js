@@ -8,7 +8,11 @@
     const PROVIDER_CODES = { chatgpt: 1, gemini: 2, claude: 3 };
     const nativeContains = (text, marker) => globalThis.CpoQueueEngine?.contains(text, marker) ?? text.includes(marker);
     function nativeRoute(provider, pathname) {
-        return globalThis.CpoQueueEngine?.providerRoute(PROVIDER_CODES[provider], pathname) ?? null;
+        const engine=globalThis.CpoQueueEngine;
+        const route=engine?.providerRoute(PROVIDER_CODES[provider],pathname);
+        if(!route)return null;
+        const key=engine.identityKey?.(provider,route.type,route.conversationId);
+        return {...route,key:key??(route.conversationId?provider+':c:'+route.conversationId:provider+':'+route.type)};
     }
     function nativeGeneration(stop, streaming, tool, error, retry, deep = false, capacity = false) {
         const flags = Number(!!stop) | (Number(!!streaming)<<1) | (Number(!!tool)<<2) |
@@ -222,7 +226,7 @@
     }
 
     function normalizeCommandText(text) {
-        return String(text || '').replace(/\s+/g, ' ').trim();
+        return globalThis.CpoQueueEngine?.textBatch?.(14,[String(text||'')]) ?? String(text || '').replace(/\s+/g, ' ').trim();
     }
 
     function fingerprintCommandText(text) {
@@ -1363,7 +1367,7 @@
                 if (native) {
                     const existing = native.type === 'existing';
                     const fresh = native.type === 'new';
-                    return { ...unsupported, ...native, key: existing ? this.id + ':c:' + native.conversationId : this.id + ':' + native.type,
+                    return { ...unsupported, ...native, key: native.key,
                         surface: existing ? 'conversation' : fresh ? 'composer' : 'unsupported',
                         optimizerEligible: existing || fresh, allowFallbackDiscovery: existing, pathname };
                 }
@@ -1462,6 +1466,8 @@
         }
 
         buildContinuationHandoffMessage(context = {}) {
+            const native=globalThis.CpoQueueEngine?.continuationHandoff?.(context);
+            if(native!=null)return native;
             const runId = String(context.runId || '').replace(/\s+/g, ' ').trim().slice(0, 80);
             const commandNumber = Number(context.currentCommandNumber || 0);
             const completedCount = Number(context.completedCount || 0);
@@ -2105,7 +2111,7 @@
 
                 const native = nativeRoute(this.id, pathname);
                 if (native) return { provider: this.id, ...native,
-                    key: native.conversationId ? this.id + ':c:' + native.conversationId : this.id + ':' + native.type };
+                    key: native.key };
 
                 // /app/:id or /u/:n/app/:id
                 const existingMatch = pathname.match(/(?:^|\/)(?:u\/\d+\/)?app\/([a-zA-Z0-9_-]+)\/?$/);
@@ -2470,7 +2476,7 @@
 
                 const native = nativeRoute(this.id, pathname);
                 if (native) return { provider: this.id, ...native,
-                    key: native.conversationId ? this.id + ':c:' + native.conversationId : this.id + ':' + native.type };
+                    key: native.key };
 
                 // Existing chat: /chat/:id
                 const existingMatch = pathname.match(/^\/chat\/([a-zA-Z0-9_-]+)\/?$/);

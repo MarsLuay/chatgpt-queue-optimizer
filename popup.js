@@ -2,6 +2,8 @@
  * @param {RunningJobSnapshot|Record<string, unknown>} [job]
  */
 function getPopupQueueStatusLabel(job = {}) {
+    const nativeLabel=globalThis.CpoQueueEngine?.popupStatus?.(job);
+    if(nativeLabel!=null)return nativeLabel;
     const status = String(job.status || '').trim().toLowerCase();
     const phase = String(job.currentPhase || '').trim().toLowerCase();
     const either=values=>values.includes(status)||values.includes(phase);
@@ -64,6 +66,8 @@ function getPopupQueueStatusLabel(job = {}) {
 function formatPopupRunningInstanceText(tabTitle, job = {}) {
     const title = String(tabTitle || 'Supported tab');
     const status = getPopupQueueStatusLabel(job);
+    const native=globalThis.CpoQueueEngine?.popupRunningLabel?.(title,status,job);
+    if(native!=null)return native;
     const totalMessages = Number(job.totalMessages || 0);
     const completedCount = Number(job.completedCount || 0);
     const progress = totalMessages > 0 ? ` | Done: ${completedCount}/${totalMessages}` : '';
@@ -115,6 +119,8 @@ function formatScheduledLocalDateTime(timestamp) {
 }
 
 function getScheduledStatusLabel(status) {
+    const native=globalThis.CpoQueueEngine?.textBatch?.(11,[status||'']);
+    if(native!=null)return native;
     const normalized = String(status || '').trim().toLowerCase();
     return {
         pending: 'Pending',
@@ -126,6 +132,8 @@ function getScheduledStatusLabel(status) {
 }
 
 function formatScheduledItemText(item = {}, targetTitle = '') {
+    const native=globalThis.CpoQueueEngine?.popupScheduledLabel?.(item,targetTitle,formatScheduledLocalDateTime(item.dueTs));
+    if(native!=null)return native;
     const target = String(targetTitle || `Tab ${item.tabId || 'unknown'}`);
     const preview = String(item.text || '').replace(/\s+/g, ' ').trim();
     const status = getScheduledStatusLabel(item.status);
@@ -288,18 +296,6 @@ document.addEventListener('DOMContentLoaded', async function () {
         return tab?.url || tab?.pendingUrl || '';
     }
 
-    function dedupeTabs(tabs) {
-        const byId = new Map();
-
-        (Array.isArray(tabs) ? tabs : []).forEach((tab) => {
-            if (tab && tab.id && !byId.has(tab.id)) {
-                byId.set(tab.id, tab);
-            }
-        });
-
-        return Array.from(byId.values());
-    }
-
     async function getActiveTab() {
         const queries = [
             { active: true, currentWindow: true },
@@ -339,20 +335,19 @@ document.addEventListener('DOMContentLoaded', async function () {
 
         try {
             const allTabs = await tabsQuery({});
-            collected.push(...allTabs.filter(tab => isSupportedProviderUrl(getTabUrl(tab))));
+            const filtered=globalThis.CpoQueueEngine.supportedTabs(allTabs);
+            if(filtered==null)throw new Error('Native tab filter unavailable');
+            collected.push(...filtered);
         } catch {
             // URL-filtered tab queries above are enough when all-tabs scanning is unavailable.
         }
 
-        return dedupeTabs(collected)
-            .filter(tab => isSupportedProviderUrl(getTabUrl(tab)))
-            .toSorted((a, b) => {
-                if (!!a.active !== !!b.active) {
-                    return a.active ? -1 : 1;
-                }
-
-                return cleanTabTitle(a.title || '').localeCompare(cleanTabTitle(b.title || ''));
-            });
+        const selected=globalThis.CpoQueueEngine.supportedTabs(collected);
+        if(selected==null)throw new Error('Native tab collection unavailable');
+        // Locale collation remains browser-owned; clean each title only once.
+        const titles=new Map(selected.map(tab=>[tab.id,cleanTabTitle(tab.title||'')]));
+        return selected.toSorted((a,b)=>Number(!!b.active)-Number(!!a.active) ||
+            titles.get(a.id).localeCompare(titles.get(b.id)));
     }
 
     const getAllChatGPTTabs = getAllSupportedTabs;
@@ -663,12 +658,8 @@ document.addEventListener('DOMContentLoaded', async function () {
         if (!scheduledItemsList) return;
 
         const titleMap = await getScheduledTargetTitleMap();
-        const sortedItems = (Array.isArray(items) ? items : []).slice().sort((a, b) => {
-            const native=globalThis.CpoQueueEngine?.numeric('cpo_schedule_compare',[Number(a?.dueTs||0),Number(b?.dueTs||0),Number(a?.createdAt||0),Number(b?.createdAt||0)]);
-            if(native!=null)return native-1;
-            const dueDiff = Number(a?.dueTs || 0) - Number(b?.dueTs || 0);
-            return dueDiff || Number(a?.createdAt || 0) - Number(b?.createdAt || 0);
-        });
+        const sortedItems=globalThis.CpoQueueEngine.scheduledSort(Array.isArray(items)?items:[]);
+        if(sortedItems==null)throw new Error('Native scheduled collection unavailable');
 
         const rows=sortedItems.map(item=>({fields:[formatScheduledItemText(item,titleMap[String(item.tabId)]),
             getScheduledStatusLabel(item.status),String(item.status||'').toLowerCase()],
@@ -785,6 +776,8 @@ document.addEventListener('DOMContentLoaded', async function () {
     }
 
     function cleanTabTitle(title) {
+        const native=globalThis.CpoQueueEngine?.textBatch?.(8,[String(title||'Supported tab')]);
+        if(native!=null)return native;
         return String(title || 'Supported tab')
             .replace(/^ChatGPT\s*[-–]\s*/i, '')
             .replace(/\s*[-–]\s*ChatGPT$/i, '')
@@ -2070,6 +2063,8 @@ The sequence should do the following: `;
     }
 
     function renderOptimizerStats(tab, response) {
+        const native=globalThis.CpoQueueEngine?.popupStats?.(cleanTabTitle(tab.title),response);
+        if(native!=null){renderNative(5,optimizerStats,native.map(line=>({fields:[line]})));return;}
         const lines = [
             `Target: ${cleanTabTitle(tab.title)}`,
             `Total messages: ${response.messageCount}`,

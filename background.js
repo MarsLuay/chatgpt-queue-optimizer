@@ -391,9 +391,7 @@ function applyAuthorizedConversationRebind(job, identity) {
     job.provider = identity.provider || job.provider || 'chatgpt';
     job.conversationId = identity.conversationId || null;
     job.conversationType = identity.type || (identity.conversationId ? 'existing' : 'new');
-    job.targetKey = identity.key || (job.conversationId
-        ? `${job.provider}:c:${job.conversationId}`
-        : `${job.provider}:${job.conversationType}`);
+    job.targetKey = normalizedIdentityKey(job.provider,job.conversationType,job.conversationId,identity.key);
     job.rolloverToConversationId = job.conversationId;
     if (!job.rolloverRebindApplied) {
         const generation = Number(job.conversationGeneration || 0);
@@ -1246,7 +1244,7 @@ function handleStartSequence(request, sendResponse) {
         const provider = identity?.provider || 'chatgpt';
         const conversationType = identity?.type || 'unknown';
         const conversationId = identity?.conversationId || null;
-        const targetKey = identity?.key || (conversationId ? `${provider}:c:${conversationId}` : `${provider}:${conversationType}`);
+        const targetKey = normalizedIdentityKey(provider,conversationType,conversationId,identity?.key);
 
         jobs.set(tabId, {
             tabId,
@@ -1368,7 +1366,7 @@ async function startNewJobFromEnqueueResult(tabId, message, waitForIdleBeforeSta
     const provider = identity?.provider || 'chatgpt';
     const conversationType = identity?.type || 'unknown';
     const conversationId = identity?.conversationId || null;
-    const targetKey = identity?.key || (conversationId ? `${provider}:c:${conversationId}` : `${provider}:${conversationType}`);
+    const targetKey = normalizedIdentityKey(provider,conversationType,conversationId,identity?.key);
 
     jobs.set(tabId, {
         tabId,
@@ -3657,7 +3655,7 @@ function getRunningJobsSnapshot() {
         const provider = job.provider || 'chatgpt';
         const conversationId = job.conversationId || null;
         const conversationType = job.conversationType || (conversationId ? 'existing' : 'unknown');
-        const targetKey = job.targetKey || (conversationId ? `${provider}:c:${conversationId}` : `${provider}:${conversationType}`);
+        const targetKey = normalizedIdentityKey(provider,conversationType,conversationId,job.targetKey);
 
         snapshot[tabId] = {
             tabId: job.tabId,
@@ -4222,10 +4220,16 @@ function scheduledAlarmName(id) {
     return `${SCHEDULED_ALARM_PREFIX}${String(id || '')}`;
 }
 
+function nativeScheduledCollection(method,...args){
+    const result=globalThis.CpoQueueEngine?.[method]?.(...args);
+    if(result==null)throw new Error('Native scheduled collection unavailable; stored items preserved.');
+    return result;
+}
 function sortScheduledMessages(items) {
-    return [...(Array.isArray(items) ? items : [])].sort((a, b) => {
-        return requiredQueueDecision(globalThis.CpoQueueEngine?.numeric('cpo_schedule_compare', [Number(a?.dueTs || 0), Number(b?.dueTs || 0), Number(a?.createdAt || 0), Number(b?.createdAt || 0)]))-1;
-    });
+    return nativeScheduledCollection('scheduledSort',Array.isArray(items)?items:[]);
+}
+function findScheduledItem(items,id){
+    return nativeScheduledCollection('scheduledLookup',items,id)[0];
 }
 
 function scheduledAction(action, item, now = Date.now()) {
@@ -4276,7 +4280,7 @@ function createScheduledAlarm(item) {
 async function persistScheduledItem(nextItem) {
     return withScheduledStorageLock(async () => {
         const items = await readScheduledMessages();
-        const index = items.findIndex((item) => item.id === nextItem.id);
+        const index = items.indexOf(findScheduledItem(items,nextItem.id));
         if (index >= 0) {
             items[index] = nextItem;
         } else {
@@ -4291,12 +4295,16 @@ async function persistScheduledItem(nextItem) {
     });
 }
 
+function normalizedIdentityKey(provider,type,id,key=''){
+    return globalThis.CpoQueueEngine?.identityKey?.(provider,type,id,key) ??
+        (key||(id?provider+':c:'+id:provider+':'+type));
+}
 function buildScheduledConversationIdentity(item) {
     return {
         provider: item.provider || 'chatgpt',
         type: item.conversationType || 'unknown',
         conversationId: item.conversationId || null,
-        key: item.targetKey || `${item.provider || 'chatgpt'}:${item.conversationType || 'unknown'}`
+        key: normalizedIdentityKey(item.provider||'chatgpt',item.conversationType||'unknown',null,item.targetKey)
     };
 }
 
@@ -4356,7 +4364,7 @@ async function createScheduledMessage({ text, dueTs, tabId, conversationIdentity
     const provider = identity?.provider || 'chatgpt';
     const conversationType = identity?.type || identity?.conversationType || 'unknown';
     const conversationId = identity?.conversationId || null;
-    const targetKey = identity?.key || (conversationId ? `${provider}:c:${conversationId}` : `${provider}:${conversationType}`);
+    const targetKey = normalizedIdentityKey(provider,conversationType,conversationId,identity?.key);
     const now = Date.now();
 
     const item = {
@@ -4391,7 +4399,7 @@ async function cancelScheduledMessage(id) {
     const scheduledId = String(id || '');
     return withScheduledStorageLock(async () => {
         const items = await readScheduledMessages();
-        const item = items.find((entry) => entry.id === scheduledId);
+        const item = findScheduledItem(items,scheduledId);
 
         if (!item) {
             return { ok: false, error: 'Scheduled message not found.' };
@@ -4421,7 +4429,7 @@ async function deleteScheduledMessage(id) {
     const scheduledId = String(id || '');
     return withScheduledStorageLock(async () => {
         const items = await readScheduledMessages();
-        const item = items.find((entry) => entry.id === scheduledId);
+        const item = findScheduledItem(items,scheduledId);
 
         if (!item) {
             return { ok: false, error: 'Scheduled message not found.' };
@@ -4431,7 +4439,7 @@ async function deleteScheduledMessage(id) {
             return { ok: false, error: 'Scheduled message delivery is already in progress.' };
         }
 
-        const nextItems = items.filter((entry) => entry.id !== scheduledId);
+        const nextItems = nativeScheduledCollection('scheduledWithout',items,scheduledId);
         clearScheduledAlarm(scheduledId);
         await writeScheduledMessages(nextItems);
         notifyRuntime({ action: 'scheduledMessagesUpdated', deletedId: scheduledId });
@@ -4444,7 +4452,7 @@ async function retryScheduledMessage(id, dueTs = null) {
     const scheduledId = String(id || '');
     const result = await withScheduledStorageLock(async () => {
         const items = await readScheduledMessages();
-        const item = items.find((entry) => entry.id === scheduledId);
+        const item = findScheduledItem(items,scheduledId);
 
         if (!item) {
             return { ok: false, error: 'Scheduled message not found.' };
@@ -4520,7 +4528,7 @@ async function markScheduledCompleted(item, enqueueResult = {}) {
 async function claimScheduledMessageForFire(id, now = Date.now()) {
     return withScheduledStorageLock(async () => {
         const items = await readScheduledMessages();
-        const item = items.find((entry) => entry.id === id);
+        const item = findScheduledItem(items,id);
 
         if (!item) {
             return null;
@@ -4600,7 +4608,7 @@ async function fireScheduledMessage(item) {
 
 async function processDueScheduledMessages(source = 'manual', onlyId = null, now = Date.now()) {
     const items = await readScheduledMessages();
-    const selectedItem = onlyId ? items.find((item) => item.id === onlyId) : null;
+    const selectedItem = onlyId ? findScheduledItem(items,onlyId) : null;
 
     if (
         selectedItem &&
@@ -4612,10 +4620,7 @@ async function processDueScheduledMessages(source = 'manual', onlyId = null, now
         return [];
     }
 
-    const dueItems = items.filter((item) => {
-        if (onlyId && item.id !== onlyId) return false;
-        return scheduledAction(4, item, now) === 1;
-    });
+    const dueItems = nativeScheduledCollection('scheduledDue',items,onlyId,now);
 
     const fired = [];
 

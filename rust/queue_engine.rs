@@ -1,7 +1,7 @@
 //! Queue execution decisions and streaming legacy-compatible UTF-16 fingerprints.
 
 #[no_mangle]
-pub extern "C" fn cpo_queue_abi() -> u32 { 10 }
+pub extern "C" fn cpo_queue_abi() -> u32 { 11 }
 
 const OFFSET: u32 = 2166136261;
 const PRIME: u32 = 16777619;
@@ -1279,6 +1279,225 @@ mod diagnostic_walk {
             for i in 2..=12{assert_eq!(cpo_log_walk_next(),i);}
             assert_eq!(cpo_log_walk_next(),0);
             assert_eq!(cpo_log_walk_close(),1);
+        }
+    }
+}
+
+ // Batched UTF-16 messages retain browser string semantics, including
+ // isolated surrogates. The host only marshals flat fields and object indices.
+mod presentation_batch {
+    use std::{cell::RefCell, collections::BTreeSet};
+    const MAX_UNITS: usize=32*1024*1024;
+    #[derive(Default)]
+    struct Buffer { input:Vec<u16>, output:Vec<u16> }
+    thread_local!{static BUFFER:RefCell<Buffer>=RefCell::new(Buffer::default());}
+    fn put(out:&mut Vec<u16>,value:&[u16]){
+        let n=value.len() as u32;out.push(n as u16);out.push((n>>16) as u16);out.extend_from_slice(value);
+    }
+    fn fields(input:&[u16])->Option<Vec<&[u16]>>{
+        let mut pos=0;let mut out=Vec::new();
+        while pos<input.len(){
+            let lo=*input.get(pos)? as usize;let hi=*input.get(pos+1)? as usize;pos+=2;
+            let end=pos.checked_add(lo|(hi<<16))?;out.push(input.get(pos..end)?);pos=end;
+        }
+        Some(out)
+    }
+    fn ascii(s:&str)->Vec<u16>{s.encode_utf16().collect()}
+    fn append(out:&mut Vec<u16>,s:&str){out.extend(s.encode_utf16());}
+    fn eq(s:&[u16],v:&str)->bool{s.iter().copied().eq(v.encode_utf16())}
+    fn number(s:&[u16])->f64 {String::from_utf16_lossy(s).parse::<f64>().unwrap_or(f64::NAN)}
+    fn normalize(s:&[u16])->Vec<u16>{
+        let mut out=Vec::with_capacity(s.len());let mut space=false;
+        for &ch in s {
+            if super::whitespace(ch){space=!out.is_empty();continue;}
+            if space{out.push(32);space=false;}
+            out.push(ch);
+        }
+        out
+    }
+    fn trim(s:&[u16])->&[u16]{
+        let start=s.iter().position(|&x|!super::whitespace(x)).unwrap_or(s.len());
+        let end=s.iter().rposition(|&x|!super::whitespace(x)).map_or(start,|i|i+1);&s[start..end]
+    }
+    fn lower_ascii(s:&[u16])->Vec<u16>{s.iter().map(|&c|if (65..=90).contains(&c){c+32}else{c}).collect()}
+    fn starts_ignore_case(s:&[u16],word:&str)->bool{
+        s.get(..word.len()).map_or(false,|x|lower_ascii(x)==ascii(word))
+    }
+    fn clean_title(mut s:&[u16])->Vec<u16>{
+        for word in ["chatgpt","gemini","claude"]{
+            if starts_ignore_case(s,word){
+                let rest=&s[word.len()..];let n=rest.iter().take_while(|&&c|super::whitespace(c)).count();
+                if matches!(rest.get(n),Some(45|0x2013)){
+                    let rest=&rest[n+1..];let n=rest.iter().take_while(|&&c|super::whitespace(c)).count();s=&rest[n..];
+                }
+            }
+            if s.len()>=word.len()&&starts_ignore_case(&s[s.len()-word.len()..],word){
+                let rest=&s[..s.len()-word.len()];let end=rest.iter().rposition(|&c|!super::whitespace(c));
+                if let Some(i)=end{if matches!(rest[i],45|0x2013){let prefix=&rest[..i];let end=prefix.iter().rposition(|&c|!super::whitespace(c)).map_or(0,|n|n+1);s=&prefix[..end];}}
+            }
+        }
+        let s=trim(s);if s.is_empty(){ascii("Supported tab")}else{s.to_vec()}
+    }
+    fn format_identity(f:&[&[u16]])->Option<Vec<u16>>{
+        if f.len()!=4{return None;}if !f[3].is_empty(){return Some(f[3].to_vec());}
+        let mut out=f[0].to_vec();append(&mut out,":");
+        if !f[2].is_empty(){append(&mut out,"c:");out.extend_from_slice(f[2]);}else{out.extend_from_slice(f[1]);}
+        Some(out)
+    }
+    fn handoff(f:&[&[u16]])->Option<Vec<u16>>{
+        if f.len()!=6{return None;}
+        let mut run=normalize(f[0]);run.truncate(80);
+        let mut out=ascii("Continuation handoff for an automated ChatGPT Queue Optimizer run. The previous conversation reached ChatGPT maximum length. Logical run id: ");
+        if run.is_empty(){append(&mut out,"unknown");}else{out.extend(run);}
+        for (label,value) in [(". Conversation segment: ",f[1]),(". Completed original commands: ",f[2]),(". Current original command number: ",f[3]),(". Remaining original commands after this one: ",f[4])]{append(&mut out,label);out.extend_from_slice(value);}
+        append(&mut out,". ");
+        if number(f[5])>0.0{append(&mut out,"The next original queued command is pending (length ");out.extend_from_slice(f[5]);append(&mut out,") and must be treated as the next user task.");}
+        else{append(&mut out,"Resume the remaining original queued commands in order.");}
+        append(&mut out," Do not treat this handoff as one of the original queued commands. Preserve prior workflow constraints and continue in FIFO order.");
+        out.truncate(1200);Some(out)
+    }
+    fn scheduled_status(s:&[u16])->&'static str{
+        let lower=lower_ascii(trim(s));
+        for (key,label) in [("pending","Pending"),("firing","Sending"),("completed","Completed"),("failed","Failed"),("cancelled","Cancelled")]{
+            if eq(&lower,key){return label;}
+        }
+        "Unknown"
+    }
+    fn popup_status(f:&[&[u16]])->Option<Vec<u16>>{
+        if f.len()!=3{return None;}
+        let status=lower_ascii(trim(f[0]));let phase=lower_ascii(trim(f[1]));let flags=number(f[2]) as u32;
+        let either=|values:&[&str]|values.iter().any(|v|eq(&status,v)||eq(&phase,v));
+        let phase_is=|values:&[&str]|values.iter().any(|v|eq(&phase,v));
+        let mask=(either(&["complete","completed","done","finished"]) as u32)
+            |((either(&["failed","error"]) as u32)<<1)
+            |((((flags&1!=0)||eq(&status,"paused")) as u32)<<2)
+            |((either(&["retrying","retry-wait","retry_wait"]) as u32)<<3)
+            |((((flags&2!=0)||phase_is(&["rollover-in-progress","rollover","conversation-rollover"])) as u32)<<4)
+            |((((flags&4!=0)||phase_is(&["waiting-for-idle","wait-for-idle","waiting_idle"])) as u32)<<5)
+            |((phase_is(&["waiting","wait"]) as u32)<<6)|((phase_is(&["sending","send"]) as u32)<<7)
+            |((eq(&phase,"queued") as u32)<<8)|((eq(&status,"stopped") as u32)<<9);
+        let labels=["Complete","Failed","Paused","Retrying","New conversation","Waiting for idle","Waiting","Sending","Queued","Stopped","Running"];
+        Some(ascii(labels[super::cpo_popup_status(mask) as usize]))
+    }
+    fn running_label(f:&[&[u16]])->Option<Vec<u16>>{
+        if f.len()!=8{return None;}let mut out=f[0].to_vec();
+        append(&mut out," | ");out.extend_from_slice(f[1]);
+        if number(f[3])>0.0{append(&mut out," | Done: ");out.extend_from_slice(f[2]);append(&mut out,"/");out.extend_from_slice(f[3]);
+            if number(f[4])>0.0{append(&mut out," | Command: ");out.extend_from_slice(f[4]);append(&mut out,"/");out.extend_from_slice(f[3]);}}
+        append(&mut out," | Remaining: ");out.extend_from_slice(f[5]);
+        if number(f[6])>0.0{append(&mut out," | Next length: ");out.extend_from_slice(f[6]);}
+        if !f[7].is_empty(){append(&mut out," | Error: ");out.extend_from_slice(f[7]);}
+        Some(out)
+    }
+    fn scheduled_label(f:&[&[u16]])->Option<Vec<u16>>{
+        if f.len()!=5{return None;}let mut out=f[0].to_vec();
+        append(&mut out," | ");append(&mut out,scheduled_status(f[1]));append(&mut out," | ");out.extend_from_slice(f[2]);
+        append(&mut out," | ");out.extend(normalize(f[3]));if !f[4].is_empty(){append(&mut out," | ");out.extend_from_slice(f[4]);}Some(out)
+    }
+    // Native statistics templates. The host supplies exact ECMAScript string
+    // values and locale-dependent numbers; all line assembly happens here.
+    fn stats(f:&[&[u16]])->Option<Vec<Vec<u16>>>{
+        if f.len()!=12&&f.len()!=34{return None;}
+        let mut result=Vec::new();
+        let patterns=["Target: ","Total messages: ","Optimizer engine: ","Browser execution engine: ","Hidden: ","Visible: ","Container: ","Initialized: ","DOM scans: ","Last scan: ","Last window: ","Streaming mutation batches skipped: "];
+        for (i,label) in patterns.iter().enumerate(){let mut line=ascii(label);line.extend_from_slice(f[i]);if i==9||i==10{append(&mut line," ms");}result.push(line);}
+        if f.len()==34{
+            result.push(ascii("Resource sample (recent turns only):"));
+            let specs:&[&[(&str,usize)]]=&[
+                &[("Sampled: ",12),("/",13),("; capped turns: ",14)],
+                &[("Sampled DOM nodes: ",15),("; text characters: ",16)],
+                &[("Images: ",17),("; audio/video: ",18),("; canvas/frames: ",19)],
+                &[("Resource units (estimate): ",20)],
+                &[("Adaptive budget: ",21)],
+                &[("Manual history expansion: ",22)],
+                &[("Extension cached message references: ",23)],
+                &[("Image eviction actions: ",24)],
+                &[("Paused playback eviction actions: ",25)],
+                &[("Source restoration actions: ",26)],
+                &[("Estimated image surface bytes targeted (cumulative): ",27)],
+                &[("WASM linear memory: ",28)],
+                &[("Browser JS heap (not tab RAM): ",29)],
+            ];
+            for spec in specs{let mut line=Vec::new();for &(label,index) in *spec{append(&mut line,label);line.extend_from_slice(f[index]);}result.push(line);}
+        }
+        Some(result)
+    }
+    fn execute(op:u32,f:&[&[u16]])->Option<Vec<Vec<u16>>>{
+        let single=|v:Vec<u16>|Some(vec![v]);
+        match op{
+            1=>{ // stable due-time sort, then creation time
+                if f.len()%2!=0{return None;}
+                let mut rows:Vec<_>=f.chunks_exact(2).enumerate().map(|(i,v)|(i,number(v[0]),number(v[1]))).collect();
+                rows.sort_by(|a,b|match super::cpo_schedule_compare(a.1,b.1,a.2,b.2){0=>std::cmp::Ordering::Less,2=>std::cmp::Ordering::Greater,_=>std::cmp::Ordering::Equal});
+                Some(rows.iter().map(|r|ascii(&r.0.to_string())).collect())
+            },
+            2|3=>{ // lookup first ID or all indices other than that ID
+                let (id,items)=f.split_first()?;
+                let indices=items.iter().enumerate().filter(|(_,v)|if op==2{*v==id}else{*v!=id});
+                Some(if op==2{indices.take(1).map(|(i,_)|ascii(&i.to_string())).collect()}else{indices.map(|(i,_)|ascii(&i.to_string())).collect()})
+            },
+            4=>{ // due selection with optional specific ID, revalidated by claim
+                if f.len()<2||(f.len()-2)%3!=0{return None;}
+                let now=number(f[0]);let id=f[1];
+                Some(f[2..].chunks_exact(3).enumerate().filter(|(_,v)|(id.is_empty()||id==v[0])&&super::cpo_schedule_action(4,number(v[1]) as u32,number(v[2]),now)==1).map(|(i,_)|ascii(&i.to_string())).collect())
+            },
+            5=>single(format_identity(f)?),
+            6=>single(handoff(f)?),
+            7=>{ // deduplicate first tab ID, then filter supported providers
+                if f.len()%3!=0{return None;}
+                let mut seen=BTreeSet::new();let mut active=Vec::new();let mut other=Vec::new();
+                for (i,row) in f.chunks_exact(3).enumerate(){
+                    if row[0].is_empty()||!seen.insert(row[0])||!eq(row[1],"1"){continue;}
+                    if eq(row[2],"1"){active.push(ascii(&i.to_string()));}else{other.push(ascii(&i.to_string()));}
+                }
+                active.extend(other);Some(active)
+            },
+            8=>single(clean_title(*f.first()?)),
+            9=>single(popup_status(f)?),
+            10=>single(running_label(f)?),
+            11=>single(ascii(scheduled_status(*f.first()?))),
+            12=>single(scheduled_label(f)?),
+            13=>stats(f),
+            14=>single(normalize(*f.first()?)),
+            _=>None
+        }
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_batch_input(len:u32)->usize{
+        if len as usize>MAX_UNITS{return 0;}
+        BUFFER.with(|b|{let mut b=b.borrow_mut();b.input.resize(len as usize,0);b.input.as_mut_ptr() as usize})
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_batch_run(op:u32)->u32{
+        BUFFER.with(|b|{
+            let mut b=b.borrow_mut();
+            let result=fields(&b.input).and_then(|f|execute(op,&f));
+            b.input.fill(0);b.input.clear();b.output.fill(0);b.output.clear();
+            let Some(result)=result else{return 0;};
+            for row in result{put(&mut b.output,&row);}
+            u32::try_from(b.output.len()).ok().and_then(|n|n.checked_add(1)).unwrap_or(0)
+        })
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_batch_output()->usize{BUFFER.with(|b|b.borrow().output.as_ptr() as usize)}
+    #[no_mangle]
+    pub extern "C" fn cpo_batch_wipe(){
+        BUFFER.with(|b|{let mut b=b.borrow_mut();b.input.fill(0);b.input.clear();b.output.fill(0);b.output.clear();});
+    }
+    #[cfg(test)]
+    mod tests{
+        use super::*;
+        #[test]fn stable_order_and_identity(){
+            let rows=["10","5","1","9","10","5"].map(ascii);
+            let refs:Vec<_>=rows.iter().map(Vec::as_slice).collect();
+            assert_eq!(execute(1,&refs).unwrap(),["1","0","2"].map(ascii));
+            let values=["chatgpt","existing","abc",""].map(ascii);
+            let refs:Vec<_>=values.iter().map(Vec::as_slice).collect();
+            assert_eq!(execute(5,&refs).unwrap(),vec![ascii("chatgpt:c:abc")]);
+        }
+        #[test]fn title_and_whitespace(){
+            assert_eq!(clean_title(&ascii("ChatGPT - Example – Claude")),ascii("Example"));
+            assert_eq!(normalize(&ascii("  a\t b  ")),ascii("a b"));
         }
     }
 }
