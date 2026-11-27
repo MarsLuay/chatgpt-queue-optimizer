@@ -21,10 +21,11 @@
                     cpo: { host: (op, a, b, c) => this.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
                 });
                 const core = result.instance.exports;
-                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 3 ||
+                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 4 ||
                     !['cpo_collect_resources', 'cpo_discover_messages', 'cpo_execute_media',
                         'cpo_apply_window', 'cpo_window_visible', 'cpo_capture_history', 'cpo_process_mutations',
-                        'cpo_cache_ttl', 'cpo_cache_valid', 'cpo_cache_nodes_valid', 'cpo_mutation_delay', 'cpo_provider_selectors'].every(name => typeof core[name] === 'function')) {
+                        'cpo_cache_ttl', 'cpo_cache_valid', 'cpo_cache_nodes_valid', 'cpo_mutation_delay', 'cpo_provider_selectors', 'cpo_dom_composer_write', 'cpo_dom_composer_read',
+                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate'].every(name => typeof core[name] === 'function')) {
                     throw new Error('Browser WASM ABI mismatch');
                 }
                 this.exports = core;
@@ -142,6 +143,30 @@
                 return ctx.matches;
             });
         }
+
+        composerRead(provider, element) {
+            const flags = Number(!!element) | (Number(element?.tagName?.toLowerCase()==='textarea')<<1);
+            return this.invoke({ element, text: [] },(core,ctx)=>{
+                core.cpo_dom_composer_read(provider,flags);
+                return ctx.text.join('');
+            });
+        }
+        composerWrite(provider, element, text, mode=0) {
+            const flags=Number(!!element)|(Number(element?.tagName?.toLowerCase()==='textarea')<<1)|(Number(!!text)<<2);
+            return this.invoke({element,value:String(text||'')},core=>core.cpo_dom_composer_write(provider,mode,flags)===1);
+        }
+        click(element) {
+            const flags=Number(!!element)|(Number(!!element&&!element.disabled&&element.getAttribute?.('aria-disabled')!=='true')<<1)|
+                (Number(!!element&&element.isConnected!==false)<<2);
+            return this.invoke({element},core=>core.cpo_dom_click(flags)===1);
+        }
+        submitStage(stage, flags) { return this.invoke({},core=>core.cpo_dom_submit_stage(stage,flags)>>>0); }
+        activeSurface(node, members, latest) {
+            if(!node)return false;
+            return this.invoke({node,members,latest},core=>core.cpo_dom_active_surface()===1);
+        }
+        nodeRole(flags) { return this.invoke({},core=>core.cpo_dom_role(flags)>>>0); }
+        candidate(mode,flags) { return this.invoke({},core=>core.cpo_dom_candidate(mode,flags)===1); }
 
         handle(node) {
             if (!node) return 0;
@@ -414,6 +439,41 @@
                     ctx.matches.push({element, selector: ctx.selectors[b], signalKey: ctx.signalKey});
                     return 1;
                 }
+                case 90: ctx.element.focus?.(); return 1;
+                case 91: ctx.element.value=ctx.value; return 1;
+                case 92:
+                    if(typeof ctx.element.replaceChildren==='function')ctx.element.replaceChildren();
+                    else if(Array.isArray(ctx.element.children))ctx.element.children.length=0;
+                    return 1;
+                case 93:
+                    if(a)ctx.element.innerText='';
+                    ctx.element.textContent='';
+                    return 1;
+                case 94:
+                    if(a)ctx.element.classList?.add?.('ql-blank');
+                    else ctx.element.classList?.remove?.('ql-blank');
+                    return 1;
+                case 95: {
+                    const paragraph=(ctx.element.ownerDocument||document).createElement('p');
+                    paragraph.innerText=ctx.value;paragraph.textContent=ctx.value;
+                    ctx.element.appendChild(paragraph);return 1;
+                }
+                case 96:
+                    if(typeof InputEvent==='function')ctx.element.dispatchEvent(new InputEvent('input',{
+                        bubbles:true,inputType:ctx.value?'insertText':'deleteContentBackward',data:ctx.value||null
+                    }));
+                    return 1;
+                case 97: {
+                    const node=a===2?ctx.element.children[b]:ctx.element;
+                    const text=String((a===0?node?.value:node?.innerText||node?.textContent)||'');
+                    ctx.text.push(text);
+                    return Number(!!text);
+                }
+                case 98: return ctx.element.children?.length||0;
+                case 99:
+                    try{ctx.element.click();return 1;}catch{return 0;}
+                case 100: return !ctx.node?0:ctx.node===ctx.latest?1:ctx.members.has(ctx.node)?2:3;
+                case 101: ctx.node=ctx.node.parentElement||ctx.node.parentNode||null;return 1;
                 default: throw new Error('Unknown Rust browser host operation: ' + op);
             }
         }
