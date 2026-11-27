@@ -519,7 +519,7 @@
             'cpo_hidden_count', 'cpo_offscreen_end', 'cpo_batch_count',
             'cpo_resource_units', 'cpo_adaptive_window', 'cpo_image_surface_bytes', 'cpo_can_evict_playback'];
           if (!required.every(name => typeof core[name] === 'function') ||
-              core.cpo_abi_version() !== 3) {
+              core.cpo_abi_version() !== 4) {
             throw new Error('Rust optimizer ABI mismatch');
           }
           const memory = result.instance.exports.memory;
