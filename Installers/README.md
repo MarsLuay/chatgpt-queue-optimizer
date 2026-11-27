@@ -41,14 +41,16 @@ From the repository root in PowerShell:
 & '.\install locally.bat'
 ```
 
-By default, the launcher attempts Firefox and Chromium independently, skips a
-browser that is not installed, and reports failures. To install into only one
-browser or explicitly select Google Chrome:
+The launcher prompts for `1. Firefox` or `2. Chromium` before building and
+installs into only the selected browser. Explicit command-line selection skips
+the prompt. Google Chrome and installing both browsers (`-Browser All`) remain
+available only through explicit command-line selection:
 
 ```powershell
 & '.\install locally.bat' -Browser Firefox
 & '.\install locally.bat' -Browser Chromium
 & '.\install locally.bat' -Browser Chrome
+& '.\install locally.bat' -Browser All
 ```
 
 Chromium and Chrome use the Vault Pi style verified `chrome://extensions`
