@@ -13,7 +13,7 @@ $result=1
 $timer=[Diagnostics.Stopwatch]::StartNew()
 function Write-InstallLog([string]$message) {
     $line='[{0}] {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'),$message
-    if ($script:logPath) { Add-Content -LiteralPath $script:logPath -Value $line -Encoding UTF8 }
+    if ($script:logPath) { Add-Content -LiteralPath $script:logPath -Value $line -Encoding UTF8 -ErrorAction Stop }
     Write-Host $line
 }
 function Invoke-LoggedNative([string]$executable,[string[]]$arguments) {
@@ -21,6 +21,7 @@ function Invoke-LoggedNative([string]$executable,[string[]]$arguments) {
     # Keep both streams visible and recorded without treating every stderr
     # line as a terminating error; the child exit code determines success.
     $ErrorActionPreference='Continue'
+    $LASTEXITCODE=$null
     & $executable @arguments 2>&1 | ForEach-Object {
         $line=[string]$_
         if ($_ -is [System.Management.Automation.ErrorRecord]) { $line='[stderr] '+$line }
@@ -54,7 +55,8 @@ try {
     foreach ($name in @('py.exe','python.exe')) {
         $command=Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $command) { continue }
-        $prefix=if ($name -eq 'py.exe') { @('-3') } else { @() }
+        $prefix=@()
+        if ($name -eq 'py.exe') { $prefix=@('-3') }
         $probe=@($prefix)+@('-c','import sys; sys.exit(0 if sys.version_info.major == 3 else 1)')
         $code=Invoke-LoggedNative $command.Source $probe
         if ($code -eq 0) { $python=$command.Source; $pythonArgs=@($prefix); break }
