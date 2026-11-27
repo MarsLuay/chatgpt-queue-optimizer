@@ -94,7 +94,7 @@ const HOST:&str=r####"(() => {
             try{
                 const result=e.cpo_worker_dispatch(op,token)>>>0;
                 if(result===0xffffffff)return null;
-                if(op!==1)return result;
+                if(op!==1&&op!==10)return result;
                 return JSON.parse(workerDecoder.decode(new Uint8Array(e.memory.buffer,e.cpo_worker_output()>>>0,result)));
             }finally{e.cpo_worker_wipe();}
         }catch(error){fail(error);return null;}
@@ -472,6 +472,10 @@ const HOST:&str=r####"(() => {
             checkpoint(job){
                 const id=ids.get(job);
                 if(!id)throw new Error('Unowned live job');
+                if(handles.get(ownerTabs.get(job))!==job)throw new Error('Retired live job');
+                const canonical=read(id,NONE-2);
+                if(canonical!==undefined)return canonical;
+                // Legacy/noncanonical scalars retain the established normalizer.
                 let meta=read(id,NONE);
                 if(meta===undefined){
                     const projected=projectDurable(job);
@@ -689,6 +693,16 @@ const HOST:&str=r####"(() => {
     }
     const scheduledSort=items=>collection(1,items,items.flatMap(item=>[Number(item?.dueTs||0),Number(item?.createdAt||0)]));
     const scheduledId=value=>typeof value==='string'?'s:'+value:'!';
+    const scheduledState=item=>String(Math.max(0,['','pending','firing','completed','failed','cancelled'].indexOf(item?.status)));
+    const scheduledRecordId=item=>typeof item?.id==='string'?JSON.stringify(item.id):'null';
+    function scheduledRecoveryPlan(items){
+        return workerCollection(10,0,items.flatMap(item=>[scheduledRecordId(item),scheduledState(item)]));
+    }
+    function scheduledUpsertPlan(items,next){
+        return workerCollection(11,next.__nativeClaim||0,[scheduledRecordId(next),
+            next.status==='completed'||next.status==='failed'?'1':'0',
+            ...items.flatMap(item=>[scheduledRecordId(item),scheduledState(item)])]);
+    }
     const scheduledLookup=(items,id)=>collection(2,items,[scheduledId(id),...items.map(item=>scheduledId(item?.id))]);
     const scheduledWithout=(items,id)=>collection(3,items,[scheduledId(id),...items.map(item=>scheduledId(item?.id))]);
     const scheduledDue=(items,id,now)=>collection(4,items,[now,id?scheduledId(id):'',...items.flatMap(item=>[scheduledId(item?.id),Math.max(0,['','pending','firing','completed','failed','cancelled'].indexOf(item?.status)),Number(item?.dueTs||0)])]);
@@ -1050,7 +1064,7 @@ const HOST:&str=r####"(() => {
             (Number(!!job.waitForIdleBeforeSend) << 6);
         return call('cpo_queue_next', [flags, phase, job.queue.length]);
     }
-    const api = { completedRunCount, workerCollection, backgroundWaitTimeout, genericProviderResponse, providerSurface, providerNavigation, providerTurnMetadata, invalidateProviderTurn, providerLastAssistant, providerGenerationState, providerMarker, providerButtons, providerGenerationText, providerDiagnostics, providerTurnSnapshot, providerBoundResponse, providerSemanticButton, classifyFailure, bindingDecision, scheduledMutation, sequenceName, validSequenceName, sequenceVariables, keyboardEvent, localDateParts, localDateMatches, localDateInput, timestampValid, timestampMath, batch, textBatch, scheduledSort, scheduledLookup, scheduledWithout, scheduledDue, identityKey, continuationHandoff, supportedTabs, popupStatus, popupRunningLabel, popupScheduledLabel, popupStats, providerCatalog, diagnosticText, diagnosticPick, sanitizeDiagnostic, createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
+    const api = { scheduledRecoveryPlan, scheduledUpsertPlan, completedRunCount, workerCollection, backgroundWaitTimeout, genericProviderResponse, providerSurface, providerNavigation, providerTurnMetadata, invalidateProviderTurn, providerLastAssistant, providerGenerationState, providerMarker, providerButtons, providerGenerationText, providerDiagnostics, providerTurnSnapshot, providerBoundResponse, providerSemanticButton, classifyFailure, bindingDecision, scheduledMutation, sequenceName, validSequenceName, sequenceVariables, keyboardEvent, localDateParts, localDateMatches, localDateInput, timestampValid, timestampMath, batch, textBatch, scheduledSort, scheduledLookup, scheduledWithout, scheduledDue, identityKey, continuationHandoff, supportedTabs, popupStatus, popupRunningLabel, popupScheduledLabel, popupStats, providerCatalog, diagnosticText, diagnosticPick, sanitizeDiagnostic, createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
     globalThis.CpoQueueEngine = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();

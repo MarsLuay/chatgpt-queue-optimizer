@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 25);
+    assert.equal(e.cpo_queue_abi(), 26);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -728,4 +728,24 @@ test('native worker collections keep bounded logs and isolate exact turn and sch
     assert.equal(w(8,claim+1,['"id"']),0);assert.equal(w(9,0,['"id"']),claim);
     assert.equal(w(8,claim,['"id"']),1);assert.equal(w(9,0,['"id"']),0);
     assert.equal(engine.completedRunCount(5),6);
+});
+
+
+test('native canonical checkpoint matches durable projection and scheduler plans honor active claims',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    const jobs=engine.createLiveJobs();
+    jobs.set(5,{tabId:5,queue:['one','two','\\ud800'],currentMessage:'active',completedCount:4,isRunning:true,conversationId:'id',startedAt:1000});
+    const job=jobs.get(5),expected=engine.projectDurable(job).value;
+    expected.queue=[...expected.queue];
+    const actual=jobs.checkpoint(job);
+    for(const key of Object.keys(expected))if(expected[key]===undefined)delete expected[key];
+    assert.deepEqual(actual,expected);assert.equal(actual.totalMessages,8);
+    const items=[{id:'pending',status:'pending'},{id:'active',status:'firing'},{id:'abandoned',status:'firing'}];
+    const lease=engine.workerCollection(7,0,['"active"']);
+    assert.deepEqual(engine.scheduledRecoveryPlan(items),[4,0,5]);
+    assert.equal(engine.scheduledUpsertPlan(items,{id:'new',status:'pending'}),0);
+    assert.equal(engine.scheduledUpsertPlan(items,{id:'active',status:'completed',__nativeClaim:lease}),2);
+    assert.equal(engine.scheduledUpsertPlan(items,{id:'active',status:'completed',__nativeClaim:lease+1}),null);
+    assert.equal(engine.scheduledUpsertPlan([...items,items[0]],{id:'pending',status:'pending'}),null);
 });

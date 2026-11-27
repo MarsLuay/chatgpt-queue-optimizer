@@ -3679,15 +3679,10 @@ function createScheduledAlarm(item) {
 async function persistScheduledItem(nextItem) {
     return withScheduledStorageLock(async () => {
         const items = await readScheduledMessages();
-        const previous=findScheduledItem(items,nextItem.id);
-        const index=items.indexOf(previous);
-        const terminal=nextItem.status==='completed'||nextItem.status==='failed';
-        if(terminal&&nextItem.__nativeClaim&&workerCollection(9,0,[JSON.stringify(String(nextItem.id))])!==nextItem.__nativeClaim)throw new Error('Native scheduled claim expired before settlement.');
-        if(globalThis.CpoQueueEngine?.call('cpo_background_schedule_guard',[2,
-            Number(terminal)|(Number(!!previous)<<1)|(Number(previous?.status==='firing')<<2)])!==0)
-            throw new Error('Scheduled claim changed before settlement; no record overwritten.');
-        if(index>=0)items[index]=nextItem;
-        else items.push(nextItem);
+        const index=globalThis.CpoQueueEngine?.scheduledUpsertPlan(items,nextItem);
+        if(index==null)throw new Error('Scheduled claim changed before settlement or ambiguous stored ID; no record overwritten.');
+        if(index===0)items.push(nextItem);
+        else items[index-1]=nextItem;
         await writeScheduledMessages(items);
         notifyRuntime({
             action: 'scheduledMessagesUpdated',
@@ -4043,28 +4038,25 @@ async function processDueScheduledMessages(source = 'manual', onlyId = null, now
 }
 
 async function recoverScheduledMessages(source = 'startup') {
-    const items = await withScheduledStorageLock(async () => {
-        const items = await readScheduledMessages();
-        let changed = false;
-
-        for (const item of items) {
-            if (scheduledAction(5, item) === 5) {
-            const active=workerCollection(9,0,[JSON.stringify(String(item.id))]);
-            if(active==null)throw new Error('Native scheduled recovery ownership unavailable.');
-            if(active)continue;
+    await withScheduledStorageLock(async () => {
+        const items=await readScheduledMessages();
+        const plan=globalThis.CpoQueueEngine?.scheduledRecoveryPlan(items);
+        if(!Array.isArray(plan)||plan.length!==items.length)throw new Error('Native scheduled recovery plan unavailable.');
+        let changed=false;
+        for(let i=0;i<items.length;i++){
+            if(plan[i]!==5)continue;
+            const item=items[i];
             if(!globalThis.CpoQueueEngine.scheduledMutation(5,item))throw new Error('Native scheduled recovery rejected.');
-            clearScheduledAlarm(item.id);
-                changed = true;
-            }
+            changed=true;
         }
-        if (changed) await writeScheduledMessages(items);
-        return items;
+        if(changed)await writeScheduledMessages(items);
+        // Re-arm only after the durable state is committed and before
+        // another storage transaction can cancel or replace the record.
+        for(let i=0;i<items.length;i++){
+            if(plan[i]===5)clearScheduledAlarm(items[i].id);
+            else if(plan[i]===4)createScheduledAlarm(items[i]);
+        }
     });
-
-    for (const item of items) {
-        if (scheduledAction(5, item) === 4) createScheduledAlarm(item);
-    }
-
     return processDueScheduledMessages(source);
 }
 

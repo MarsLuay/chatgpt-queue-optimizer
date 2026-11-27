@@ -7,6 +7,7 @@ pub use background_controller::*;
 mod background_runtime;
 mod background_schedule;
 mod worker_collections;
+mod durable_projection;
 #[no_mangle]
 pub extern "C" fn cpo_completed_run_count(count:f64)->f64{
     if !count.is_finite()||count<0.0||count.fract()!=0.0{1.0}else{(count+1.0).min(9007199254740991.0)}
@@ -1330,7 +1331,11 @@ mod live_state {
         fn read(&mut self, id: u32, field: u32, index: u32) -> u32 {
             self.output.clear();
             let Some(job) = self.jobs.get(&id) else { return 0; };
-            if field == u32::MAX-1 { self.output=job.snapshot(); }
+            if field == u32::MAX-2 {
+                let Some(bytes)=super::durable_projection::project(&job.fields,&job.queue)else{return 0;};
+                self.output=bytes;
+            }
+            else if field == u32::MAX-1 { self.output=job.snapshot(); }
             else if field == METADATA {
                 let Some((revision, bytes)) = &job.metadata else { return 0; };
                 if *revision != job.revision { return 0; }

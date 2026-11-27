@@ -93,6 +93,43 @@ impl Worker{
                 self.scheduled.remove(f[0]);1
             },
             9=>if f.len()==1{self.scheduled.get(f[0]).copied().unwrap_or(0)}else{NONE},
+            // Batch startup recovery: one action per item, in input order.
+            // State and due are browser storage facts; lease ownership is
+            // checked directly in Rust. Invalid frames never change state.
+            10=>{
+                if f.len()%2!=0{return NONE;}
+                let mut actions=Vec::with_capacity(f.len()/2);
+                for row in f.chunks_exact(2){
+                    let state=std::str::from_utf8(row[1]).ok().and_then(|s|s.parse::<u32>().ok()).unwrap_or(NONE);
+                    if state>5{return NONE;}
+                    let action=super::cpo_schedule_action(5,state,0.0,0.0);
+                    actions.push(if action==5&&self.scheduled.contains_key(row[0]){0}else{action});
+                }
+                self.output.push(b'[');
+                for (i,action) in actions.iter().enumerate(){
+                    if i!=0{self.output.push(b',');}
+                    self.output.push(b'0'+*action as u8);
+                }
+                self.output.push(b']');self.output.len() as u32
+            },
+            // Upsert index: target ID, terminal flag, then pairs of
+            // existing ID/state. Require exact active claim for settlement.
+            // 0 append, 1..n replace, NONE reject.
+            11=>{
+                if f.len()<2||(f.len()-2)%2!=0||!id(f[0]){return NONE;}
+                let terminal=match f[1]{b"0"=>false,b"1"=>true,_=>return NONE};
+                if terminal&&(token==0||self.scheduled.get(f[0])!=Some(&token)){return NONE;}
+                let mut found=None;
+                for (i,row) in f[2..].chunks_exact(2).enumerate(){
+                    if row[0]==f[0]{
+                        if found.is_some(){return NONE;} // ambiguous persistent ID
+                        if terminal&&row[1]!=b"2"{return NONE;}
+                        found=Some(i as u32+1);
+                    }
+                }
+                if terminal&&found.is_none(){return NONE;}
+                found.unwrap_or(0)
+            },
             _=>NONE
         }
     }
