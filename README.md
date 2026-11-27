@@ -306,3 +306,7 @@ The Rust browser engine selects combined DOM-order turn discovery or individual-
 ### Native bounded turn metadata cache (queue ABI 17)
 
 Completed-turn fingerprints, normalized-prefix error detection, text presence and memoization now run in Rust. The native cache retains at most 4,096 metadata records keyed by weak browser identity tokens; no complete prompt or DOM node is retained by it. Mutation callbacks invalidate affected tokens, and structural/periodic reconciliation drops the scope. Streaming text processing uses fixed-size UTF-16 buffers and avoids allocating normalized copies of unrelated turns. Exact matching still uses the actual normalized browser text. Last-assistant error/completion settlement also uses native policy. Browser engine ABI remains 11. Native compilation and browser parity are unverified.
+
+### Native streaming exact-match and turn traversal (browser ABI 12)
+
+The browser engine now drives the provider turn-observation loop, role classification, cache eligibility, candidate verification and assistant-only inspection. Exact expected-text matching compares normalized UTF-16 streams with two fixed-size buffers, preserving whitespace semantics and surrogate code units without allocating normalized full-text copies. The bridge exposes only DOM facts and call-local text chunks, and the queue engine retains ownership of metadata and snapshot settlement. No native compilation or live browser parity verification has been performed.

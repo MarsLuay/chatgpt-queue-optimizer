@@ -20,7 +20,7 @@ fn h(op: u32, a: u32, b: u32, c: u32) -> u32 {
 }
 
 #[no_mangle]
-pub extern "C" fn cpo_browser_abi() -> u32 { 11 }
+pub extern "C" fn cpo_browser_abi() -> u32 { 12 }
 
 #[cfg(target_arch = "wasm32")]
 mod sequence;
@@ -883,3 +883,102 @@ pub extern "C" fn cpo_first_matching_selector(count:u32)->u32{
     }
     accepted
  }
+
+
+// Incremental ECMAScript whitespace normalization over UTF-16 code units.
+// No heap allocations or normalized copies; preserve unpaired surrogates.
+#[cfg(any(test,target_arch="wasm32"))]
+mod provider_text {
+    pub const CHUNK:usize=1024;
+    fn whitespace(c:u16)->bool{
+        matches!(c,0x0009..=0x000d|0x0020|0x00a0|0x1680|0x2000..=0x200a|0x2028|0x2029|0x202f|0x205f|0x3000|0xfeff)
+    }
+    struct Normalized<I>{source:I,started:bool,pending:bool,held:Option<u16>}
+    impl<I:Iterator<Item=u16>> Normalized<I>{
+        fn new(source:I)->Self{Self{source,started:false,pending:false,held:None}}
+    }
+    impl<I:Iterator<Item=u16>> Iterator for Normalized<I>{
+        type Item=u16;
+        fn next(&mut self)->Option<u16>{
+            if let Some(unit)=self.held.take(){return Some(unit);}
+            for unit in self.source.by_ref(){
+                if whitespace(unit){
+                    if self.started{self.pending=true;}
+                }else{
+                    self.started=true;
+                    if self.pending{
+                        self.pending=false;self.held=Some(unit);return Some(32);
+                    }
+                    return Some(unit);
+                }
+            }
+            None
+        }
+    }
+    pub fn equal<A:Iterator<Item=u16>,B:Iterator<Item=u16>>(a:A,b:B)->bool{
+        Normalized::new(a).eq(Normalized::new(b))
+    }
+    #[cfg(target_arch="wasm32")]
+    struct Source{side:u32,offset:u32,buffer:[u16;CHUNK],pos:usize,len:usize,done:bool}
+    #[cfg(target_arch="wasm32")]
+    impl Source{
+        fn new(side:u32)->Self{Self{side,offset:0,buffer:[0;CHUNK],pos:0,len:0,done:false}}
+    }
+    #[cfg(target_arch="wasm32")]
+    impl Iterator for Source{
+        type Item=u16;
+        fn next(&mut self)->Option<u16>{
+            if self.pos==self.len{
+                if self.done{return None;}
+                let count=super::h(173,self.side,self.offset,self.buffer.as_mut_ptr() as u32) as usize;
+                if count>CHUNK{core::arch::wasm32::unreachable();}
+                if count==0{self.done=true;return None;}
+                self.offset=self.offset.checked_add(count as u32).unwrap_or_else(||core::arch::wasm32::unreachable());
+                self.pos=0;self.len=count;self.done=count<CHUNK;
+            }
+            let unit=self.buffer[self.pos];self.pos+=1;Some(unit)
+        }
+    }
+    #[cfg(target_arch="wasm32")]
+    impl Drop for Source{
+        fn drop(&mut self){for unit in &mut self.buffer{unsafe{core::ptr::write_volatile(unit,0);}}}
+    }
+    #[cfg(target_arch="wasm32")]
+    pub fn host_equal()->bool{equal(Source::new(0),Source::new(1))}
+    #[cfg(test)]
+    mod tests{
+        use super::*;
+        fn compare(a:&str,b:&str)->bool{equal(a.encode_utf16(),b.encode_utf16())}
+        #[test]fn whitespace_and_exact_boundaries(){
+            assert!(compare("  a\n\t b \u{feff}","a b"));
+            assert!(compare("   ","\n"));
+            assert!(!compare("a b","ab"));
+            assert!(!compare("a b","a B"));
+            assert!(!compare("same prefix","same prefix extra"));
+            assert!(compare(&format!("{}  \n  b","a".repeat(CHUNK-1)),&format!("{} b","a".repeat(CHUNK-1))));
+            assert!(equal([0xd800,32,0xdc00].into_iter(),[0xd800,9,0xdc00].into_iter()));
+            assert!(!equal([0xd800].into_iter(),[0xfffd].into_iter()));
+        }
+    }
+}
+#[cfg(target_arch="wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_provider_exact_text()->u32{provider_text::host_equal() as u32}
+
+// Native owns iteration, role selection, history-cache eligibility, exact
+// candidate verification and assistant-only inspection. JS only reads DOM
+// properties and transfers metadata to the separate native queue engine.
+#[cfg(target_arch="wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_provider_scan_turns(count:u32,cache:u32,exact:u32)->u32{
+    for index in 0..count{
+        let role=cpo_dom_role(h(170,index,0,0));
+        let cacheable=(cache!=0&&index<count.saturating_sub(2)) as u32;
+        let facts=h(171,role,cacheable,0);
+        let matched=exact!=0&&facts&2!=0&&role!=2&&provider_text::host_equal();
+        let assistant=if role==2{h(174,0,0,0)&14}else{0};
+        let flags=u32::from(matched)|assistant|((facts&1)<<4);
+        if h(175,index,role,flags)!=1{return 0;}
+    }
+    1
+}

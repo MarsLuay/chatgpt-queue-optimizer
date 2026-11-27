@@ -21,11 +21,11 @@
                     cpo: { host: (op, a, b, c) => this.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
                 });
                 const core = result.instance.exports;
-                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 11 ||
+                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 12 ||
                     !['cpo_collect_resources', 'cpo_discover_messages', 'cpo_execute_media',
                         'cpo_apply_window', 'cpo_window_visible', 'cpo_capture_history', 'cpo_process_mutations',
                         'cpo_cache_ttl', 'cpo_cache_valid', 'cpo_cache_nodes_valid', 'cpo_mutation_delay', 'cpo_provider_selectors', 'cpo_dom_composer_write', 'cpo_dom_composer_read',
-                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool', 'cpo_ui_render', 'cpo_ui_sequence_edit', 'cpo_ui_next_limit', 'cpo_ui_sequence_select', 'cpo_ui_variables', 'cpo_ui_saved_sequence', 'cpo_sequence_import', 'cpo_sequence_substitute', 'cpo_event_ready','cpo_restore_window','cpo_restore_journal','cpo_intersection_transition','cpo_message_predicate','cpo_first_matching_selector','cpo_dom_event_ancestor','cpo_dom_normalize_turn','cpo_dom_last_assistant','cpo_provider_turns'].every(name => typeof core[name] === 'function')) {
+                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool', 'cpo_ui_render', 'cpo_ui_sequence_edit', 'cpo_ui_next_limit', 'cpo_ui_sequence_select', 'cpo_ui_variables', 'cpo_ui_saved_sequence', 'cpo_sequence_import', 'cpo_sequence_substitute', 'cpo_event_ready','cpo_restore_window','cpo_restore_journal','cpo_intersection_transition','cpo_message_predicate','cpo_first_matching_selector','cpo_dom_event_ancestor','cpo_dom_normalize_turn','cpo_dom_last_assistant','cpo_provider_turns','cpo_provider_exact_text','cpo_provider_scan_turns'].every(name => typeof core[name] === 'function')) {
                     throw new Error('Browser WASM ABI mismatch');
                 }
                 this.exports = core;
@@ -159,6 +159,15 @@
             return this.invoke({root,selectors,seen:new Set(),nodes:[]},(core,ctx)=>{
                 if(core.cpo_provider_turns(selectors.length)!==ctx.nodes.length)throw new Error('Native turn discovery count mismatch');
                 return ctx.nodes;
+            });
+        }
+        providerExactText(left,right){
+            return this.invoke({rawText:String(left??''),expectedText:String(right??'')},core=>core.cpo_provider_exact_text()===1);
+        }
+        providerScanTurns(adapter,turns,expectedText,expectedTextFingerprint,exactRequired){
+            return this.invoke({adapter,turns,expectedText,expectedTextFingerprint,rows:[]},(core,ctx)=>{
+                if(core.cpo_provider_scan_turns(turns.length,Number(adapter._turnScanCacheEnabled),Number(exactRequired))!==1)throw new Error('Native turn observation failed');
+                return ctx.rows;
             });
         }
         eventAncestor(target,selectors,exclude,predicate,signalKey){
@@ -524,6 +533,45 @@
                     const node=ctx.candidates[a];
                     if(!node||ctx.seen.has(node))return 0;
                     ctx.seen.add(node);ctx.nodes.push(node);return 1;
+                }
+                case 170:{
+                    const node=ctx.turns[a];
+                    ctx.node=node;ctx.rawText=null;ctx.metadata=null;
+                    const attr=String(node?.getAttribute?.('data-message-author-role')||'').toLowerCase();
+                    return Number(attr==='user')|(Number(attr==='assistant')<<1)|
+                        (Number(!!node?.querySelector?.('[data-message-author-role="user"]'))<<2)|
+                        (Number(!!node?.querySelector?.('[data-message-author-role="assistant"]'))<<3);
+                }
+                case 171:{
+                    const token=b?ctx.adapter.turnCacheToken(ctx.node):0;
+                    const readText=()=>ctx.rawText??(ctx.rawText=String(ctx.node?.innerText||ctx.node?.textContent||''));
+                    ctx.metadata=requireNative(globalThis.CpoQueueEngine?.providerTurnMetadata(b?ctx.adapter._turnCacheScope:0,token,a,readText));
+                    return Number(ctx.metadata.hasText)|(Number(ctx.metadata.fingerprint===ctx.expectedTextFingerprint)<<1);
+                }
+                case 173:{
+                    const text=a===1?ctx.expectedText:(ctx.rawText??(ctx.rawText=String(ctx.node?.innerText||ctx.node?.textContent||'')));
+                    const count=Math.min(1024,Math.max(0,text.length-b));
+                    const input=new Uint16Array(this.exports.memory.buffer,c,1024);
+                    for(let i=0;i<count;i++)input[i]=text.charCodeAt(b+i);
+                    return count;
+                }
+                case 174:{
+                    const node=ctx.node;
+                    const streaming=!!node.querySelector?.('[data-message-streaming="true"], [data-is-streaming="true"], .result-streaming');
+                    // These nested synchronous observations use their own
+                    // call-local contexts. Restore the outer scan even on error.
+                    const outer=this.context;
+                    this.context=null;
+                    try{
+                        const error=hasAssistantErrorStop(node,this);
+                        const incomplete=hasIncompleteToolTurn(node,this);
+                        return (Number(streaming)<<1)|(Number(error)<<2)|(Number(incomplete)<<3);
+                    }finally{this.context=outer;}
+                }
+                case 175:{
+                    ctx.rows.push([b,ctx.node?.getAttribute?.('data-message-id')||'',ctx.node?.getAttribute?.('data-testid')||'',ctx.metadata.fingerprint,c,ctx.metadata.errorSignal]);
+                    ctx.node=null;ctx.rawText=null;ctx.metadata=null;
+                    return 1;
                 }
                 case 80: {
                     const selector = ctx.selectors[a];
@@ -1358,29 +1406,14 @@
             snapshot.conversationId = identity?.conversationId || null;
             snapshot.conversationKey = identity?.key || '';
 
-            const expectedText = normalizeCommandText(options.expectedText || '');
-            const expectedTextFingerprint = expectedText ? fingerprintCommandText(expectedText) : '';
-            const expectedFingerprint = options.expectedFingerprint || expectedTextFingerprint;
-            const turns = this.getConversationTurns(doc);
-            const rows=[];
-            for(let index=0;index<turns.length;index++){
-                const node=turns[index];
-                const role=getNodeRole(node,this._nativeSelectorEngine);
-                const cacheable=requireNative(globalThis.CpoQueueEngine?.call('cpo_turn_cache_eligible',[Number(this._turnScanCacheEnabled),index,turns.length]))===1;
-                const roleCode=role==='user'?1:role==='assistant'?2:0;
-                const token=cacheable?this.turnCacheToken(node):0;
-                let raw=null;
-                const readText=()=>raw??(raw=String(node?.innerText||node?.textContent||''));
-                const {fingerprint,hasText,errorSignal}=requireNative(globalThis.CpoQueueEngine?.providerTurnMetadata(cacheable?this._turnCacheScope:0,token,roleCode,readText));
-                const exact=!!expectedText&&fingerprint===expectedTextFingerprint&&normalizeCommandText(readText())===expectedText;
-                const assistant=role==='assistant';
-                const streaming=assistant&&!!node.querySelector?.('[data-message-streaming="true"], [data-is-streaming="true"], .result-streaming');
-                const errorStop=assistant&&hasAssistantErrorStop(node,this._nativeSelectorEngine);
-                const incomplete=assistant&&hasIncompleteToolTurn(node,this._nativeSelectorEngine);
-                const flags=Number(exact)|(Number(streaming)<<1)|(Number(errorStop)<<2)|(Number(incomplete)<<3)|(Number(hasText)<<4);
-                rows.push([role==='user'?1:assistant?2:0,node?.getAttribute?.('data-message-id')||'',node?.getAttribute?.('data-testid')||'',fingerprint,flags,errorSignal]);
-            }
-            return {...snapshot,...requireNative(globalThis.CpoQueueEngine?.providerTurnSnapshot(rows,expectedFingerprint,!!expectedText))};
+            const expectedText=String(options.expectedText||'');
+            const expected=expectedText?requireNative(globalThis.CpoQueueEngine?.providerTurnMetadata(0,0,1,()=>expectedText)):null;
+            const exactRequired=!!expected?.hasText;
+            const expectedTextFingerprint=exactRequired?expected.fingerprint:'';
+            const expectedFingerprint=options.expectedFingerprint||expectedTextFingerprint;
+            const turns=this.getConversationTurns(doc);
+            const rows=requireNative(this._nativeLifecycle?.providerScanTurns(this,turns,expectedText,expectedTextFingerprint,exactRequired));
+            return {...snapshot,...requireNative(globalThis.CpoQueueEngine?.providerTurnSnapshot(rows,expectedFingerprint,exactRequired))};
         }
 
         getCommandResponseState(doc = (typeof document !== 'undefined' ? document : null), binding = {}, generationState = null) {

@@ -23,7 +23,7 @@ async function engine(optimizer = owner()) {
         cpo: { host: (op, a, b, c) => bridge.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
     });
     bridge.exports = result.instance.exports;
-    assert.equal(bridge.exports.cpo_browser_abi(), 11);
+    assert.equal(bridge.exports.cpo_browser_abi(), 12);
     return bridge;
 }
 
@@ -363,4 +363,30 @@ test('native turn discovery uses DOM order and deduplicates selector fallback',{
     assert.deepEqual(bridge.providerTurns(root,['a','b']),[b,a]);
     const fallback={querySelectorAll(selector){if(selector==='a,b')throw new Error('invalid combined query');return selector==='a'?[a,b]:[b];}};
     assert.deepEqual(bridge.providerTurns(fallback,['a','b']),[a,b]);
+});
+
+test('native exact text comparison normalizes streamed UTF-16 without hash-only acknowledgement',{skip},async()=>{
+    const bridge=await engine();
+    assert.equal(bridge.providerExactText('  a\n\t b  ','a b'),true);
+    assert.equal(bridge.providerExactText('a b','ab'),false);
+    assert.equal(bridge.providerExactText('same prefix','same prefix extra'),false);
+    const prefix='a'.repeat(1023);
+    assert.equal(bridge.providerExactText(prefix+'  \n b',prefix+' b'),true);
+    assert.equal(bridge.providerExactText(prefix+'  \n b',prefix+' c'),false);
+    assert.equal(bridge.providerExactText('\ud800 \udc00','\ud800\t\udc00'),true);
+    assert.equal(bridge.providerExactText('\ud800','\ufffd'),false);
+    assert.equal(bridge.context,null);
+});
+test('native provider traversal collects rows and skips assistant-only inspection on users',{skip},async()=>{
+    const bridge=await engine();
+    const queue=require('../rust-queue-bridge.js');
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(path.join(__dirname,'..','optimizer_queue.wasm')),{});
+    queue.install(instance.exports);
+    const expected='hello world';
+    const node={innerText:' hello\n world ',getAttribute:k=>k==='data-message-author-role'?'user':k==='data-message-id'?'u1':null,querySelector:()=>null};
+    const adapter={_turnScanCacheEnabled:false};
+    const rows=bridge.providerScanTurns(adapter,[node],expected,queue.fingerprint(expected),true);
+    const snapshot=queue.providerTurnSnapshot(rows,queue.fingerprint(expected),true);
+    assert.equal(snapshot.matchedUserTurnId,'u1');
+    assert.equal(bridge.context,null);
 });
