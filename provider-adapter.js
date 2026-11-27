@@ -226,7 +226,11 @@
     }
 
     function normalizeCommandText(text) {
-        return globalThis.CpoQueueEngine?.textBatch?.(14,[String(text||'')]) ?? String(text || '').replace(/\s+/g, ' ').trim();
+        const value=String(text||'');
+        // Large conversation text should not grow WASM linear memory merely
+        // to normalize a browser-owned string.
+        const native=value.length<=65536?globalThis.CpoQueueEngine?.textBatch?.(14,[value]):null;
+        return native??value.replace(/\s+/g, ' ').trim();
     }
 
     function fingerprintCommandText(text) {

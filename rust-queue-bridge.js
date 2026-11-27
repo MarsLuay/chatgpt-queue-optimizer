@@ -582,9 +582,10 @@
         return indices.map(value=>{const i=Number(value);if(!Number.isInteger(i)||i<0||i>=items.length)throw new Error('Invalid native collection index');return items[i];});
     }
     const scheduledSort=items=>collection(1,items,items.flatMap(item=>[Number(item?.dueTs||0),Number(item?.createdAt||0)]));
-    const scheduledLookup=(items,id)=>collection(2,items,[String(id),...items.map(item=>String(item?.id??''))]);
-    const scheduledWithout=(items,id)=>collection(3,items,[String(id),...items.map(item=>String(item?.id??''))]);
-    const scheduledDue=(items,id,now)=>collection(4,items,[now,id||'',...items.flatMap(item=>[item?.id??'',Math.max(0,['','pending','firing','completed','failed','cancelled'].indexOf(item?.status)),Number(item?.dueTs||0)])]);
+    const scheduledId=value=>typeof value==='string'?'s:'+value:'!';
+    const scheduledLookup=(items,id)=>collection(2,items,[scheduledId(id),...items.map(item=>scheduledId(item?.id))]);
+    const scheduledWithout=(items,id)=>collection(3,items,[scheduledId(id),...items.map(item=>scheduledId(item?.id))]);
+    const scheduledDue=(items,id,now)=>collection(4,items,[now,id?scheduledId(id):'',...items.flatMap(item=>[scheduledId(item?.id),Math.max(0,['','pending','firing','completed','failed','cancelled'].indexOf(item?.status)),Number(item?.dueTs||0)])]);
     const identityKey=(provider,type,id,key='')=>textBatch(5,[provider,type,id??'',key||'']);
     function continuationHandoff(context){
         return textBatch(6,[context.runId||'',Number(context.conversationGeneration||0),Number(context.completedCount||0),Number(context.currentCommandNumber||0),Number(context.remainingCount||0),Number(context.pendingMessageLength||0)]);
@@ -611,7 +612,7 @@
         const fields=[title,String(response.messageCount),d.optimizerEngine??'Unknown',d.browserEngine??'Unknown',String(response.hiddenCount),String(response.visibleCount),d.containerFound?'Found':'Missing',d.initialized?'Yes':'No',p.scans??0,p.lastScanMs??0,p.lastWindowMs??0,p.mutationSkips??0];
         if(r){
             const m=r.mediaEviction||{},mib=bytes=>typeof bytes==='number'?(bytes/1048576).toFixed(2)+' MiB':'Unavailable';
-            fields.push(...[r.sampledTurns,r.totalTurns,r.truncatedTurns,r.nodes,r.textChars,r.images,r.media,r.surfaces,r.units,r.adaptiveEnabled?r.budget+' units; target '+r.adaptiveTarget+' turns':'Off',r.manuallyExpanded?'Yes':'No',r.cachedMessageRefs,m.imagesEvicted??0,m.playbackEvicted??0,m.restored??0,mib(m.estimatedImageBytes),mib(r.wasmLinearBytes),mib(r.usedJsHeapBytes)].map(String),'','','','');
+            fields.push(...[r.sampledTurns,r.totalTurns,r.truncatedTurns,r.nodes,r.textChars,r.images,r.media,r.surfaces,r.units,r.adaptiveEnabled?r.budget+' units; target '+r.adaptiveTarget+' turns':'Off',r.manuallyExpanded?'Yes':'No',r.cachedMessageRefs,m.imagesEvicted??0,m.playbackEvicted??0,m.restored??0,mib(m.estimatedImageBytes),mib(r.wasmLinearBytes),mib(r.usedJsHeapBytes)] .map(String));
         }
         return batch(13,fields);
     }

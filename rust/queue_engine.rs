@@ -1397,11 +1397,11 @@ mod presentation_batch {
     // Native statistics templates. The host supplies exact ECMAScript string
     // values and locale-dependent numbers; all line assembly happens here.
     fn stats(f:&[&[u16]])->Option<Vec<Vec<u16>>>{
-        if f.len()!=12&&f.len()!=34{return None;}
+        if f.len()!=12&&f.len()!=30{return None;}
         let mut result=Vec::new();
         let patterns=["Target: ","Total messages: ","Optimizer engine: ","Browser execution engine: ","Hidden: ","Visible: ","Container: ","Initialized: ","DOM scans: ","Last scan: ","Last window: ","Streaming mutation batches skipped: "];
         for (i,label) in patterns.iter().enumerate(){let mut line=ascii(label);line.extend_from_slice(f[i]);if i==9||i==10{append(&mut line," ms");}result.push(line);}
-        if f.len()==34{
+        if f.len()==30{
             result.push(ascii("Resource sample (recent turns only):"));
             let specs:&[&[(&str,usize)]]=&[
                 &[("Sampled: ",12),("/",13),("; capped turns: ",14)],
@@ -1428,6 +1428,7 @@ mod presentation_batch {
             1=>{ // stable due-time sort, then creation time
                 if f.len()%2!=0{return None;}
                 let mut rows:Vec<_>=f.chunks_exact(2).enumerate().map(|(i,v)|(i,number(v[0]),number(v[1]))).collect();
+                if rows.iter().any(|r|!r.1.is_finite()||!r.2.is_finite()){return None;}
                 rows.sort_by(|a,b|match super::cpo_schedule_compare(a.1,b.1,a.2,b.2){0=>std::cmp::Ordering::Less,2=>std::cmp::Ordering::Greater,_=>std::cmp::Ordering::Equal});
                 Some(rows.iter().map(|r|ascii(&r.0.to_string())).collect())
             },
@@ -1482,7 +1483,11 @@ mod presentation_batch {
     pub extern "C" fn cpo_batch_output()->usize{BUFFER.with(|b|b.borrow().output.as_ptr() as usize)}
     #[no_mangle]
     pub extern "C" fn cpo_batch_wipe(){
-        BUFFER.with(|b|{let mut b=b.borrow_mut();b.input.fill(0);b.input.clear();b.output.fill(0);b.output.clear();});
+        BUFFER.with(|b|{let mut b=b.borrow_mut();b.input.fill(0);b.input.clear();b.output.fill(0);b.output.clear();
+            // Do not retain unusually large transfer buffers in the allocator.
+            if b.input.capacity()>65536{b.input.shrink_to(65536);}
+            if b.output.capacity()>65536{b.output.shrink_to(65536);}
+        });
     }
     #[cfg(test)]
     mod tests{
