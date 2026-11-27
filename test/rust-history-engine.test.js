@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { CpoHistoryStore, fallbackNext } = require('../history-store.js');
+const { CpoHistoryStore } = require('../history-store.js');
 
 const wasmPath = path.join(__dirname, '..', 'optimizer_history.wasm');
 const skip = !fs.existsSync(wasmPath) && 'Build WASM first using Installers/build_optimizer.py';
@@ -30,22 +30,17 @@ test('Rust codec round-trips Unicode and rejects corrupt or out-of-order rows', 
     const scratch = new Uint8Array(store.core.memory.buffer, store.core.cpo_history_buffer(),
         store.core.cpo_history_capacity());
     assert.ok(scratch.every(byte => byte === 0));
-    // JS fallback can read native rows and Rust can read legacy object rows.
+    // Native decoding requires the engine; legacy object rows remain readable.
     const fallback = new CpoHistoryStore(null);
-    assert.deepEqual(fallback.decodeRow(result.stored, 7), row);
+    assert.throws(() => fallback.decodeRow(result.stored, 7), /Required Rust/);
     assert.deepEqual(store.decodeRow(row, 7), row);
 });
 
-test('Rust transaction sequencing agrees with the compatibility path', { skip }, async () => {
-    const store = await nativeStore();
-    for (let kind = 0; kind <= 5; kind++) {
-        for (let previous = 0; previous <= 7; previous++) {
-            for (const valid of [0, 1]) for (const remaining of [0, 1, 16]) {
-                assert.equal(store.core.cpo_history_next(kind, previous, valid, remaining),
-                    fallbackNext(kind, previous, valid, remaining));
-            }
-        }
-    }
+test('history storage refuses to run without its native engine', () => {
+    const store=new CpoHistoryStore(null);
+    assert.throws(()=>store.pageStart(30,0),/Required Rust/);
+    assert.throws(()=>store.pageSize(30,0),/Required Rust/);
+    assert.throws(()=>store.prepareRow({index:0,role:'user',text:'x'},0,0),/Required Rust/);
 });
 
 function fakeRequest(value) {
@@ -100,7 +95,7 @@ test('history transport creates, appends, finalizes, pages and deletes via nativ
     }
 });
 
-test('compressed rows are smaller and readable with and without WASM', { skip }, async () => {
+test('compressed rows are smaller and require WASM to decode', { skip }, async () => {
     const store = await nativeStore();
     const row = { index: 0, role: 'assistant', text: 'Repeated Unicode text 🌍 café. '.repeat(500), truncated: false };
     const record = store.prepareRow(row, 0, 0);
@@ -108,11 +103,11 @@ test('compressed rows are smaller and readable with and without WASM', { skip },
     assert.ok(record.stored.length < Buffer.byteLength(row.text));
     assert.deepEqual(store.decodeRow(record.stored, 0), row);
     const fallback = new CpoHistoryStore(null);
-    assert.deepEqual(fallback.decodeRow(record.stored, 0), row);
+    assert.throws(() => fallback.decodeRow(record.stored, 0), /Required Rust/);
     const bad = record.stored.slice();
     bad[16] = 128; bad[17] = 0; bad[18] = 0;
     assert.throws(() => store.decodeRow(bad, 0), /Corrupt/);
-    assert.throws(() => fallback.decodeRow(bad, 0), /Corrupt/);
+    assert.throws(() => fallback.decodeRow(bad, 0), /Required Rust/);
     const scratch = new Uint8Array(store.core.memory.buffer, store.core.cpo_history_output(),
         store.core.cpo_history_capacity());
     assert.ok(scratch.every(byte => byte === 0));
