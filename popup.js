@@ -2414,6 +2414,7 @@ The sequence should do the following: `;
         const lines = [
             `Target: ${cleanTabTitle(tab.title)}`,
             `Total messages: ${response.messageCount}`,
+            `Optimizer engine: ${response.debugInfo?.optimizerEngine ?? 'Unknown'}`,
             `Hidden: ${response.hiddenCount}`,
             `Visible: ${response.visibleCount}`,
             `Container: ${response.debugInfo?.containerFound ? 'Found' : 'Missing'}`,
