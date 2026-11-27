@@ -170,7 +170,7 @@ fn install(repo:&Path, browser:&str, paths:&[Option<String>;3])->Result<()>{
 fn npm()->Command{
     if cfg!(windows){Command::new("npm.cmd")}else{Command::new("npm")}
 }
-fn publish(repo:&Path,local_only:bool)->Result<()>{
+fn publish(repo:&Path,local_only:bool,configured:Option<(String,String)>)->Result<()>{
     let version=package(repo)?;
     let source=repo.join("build/firefox-src");let artifacts=repo.join("build/amo-artifacts");
     fs::create_dir_all(&artifacts)?;
@@ -185,11 +185,12 @@ fn publish(repo:&Path,local_only:bool)->Result<()>{
     println!("Started isolated Firefox test for v{version}; see build/logs/upload-firefox-test.log.");
     if local_only{return Ok(());}
     // Never expose signing secrets on a command line or in raw logs.
-    let key=env::var("WEB_EXT_API_KEY").unwrap_or_default();let secret=env::var("WEB_EXT_API_SECRET").unwrap_or_default();
+    let (key,secret)=configured.unwrap_or_else(||(env::var("WEB_EXT_API_KEY").unwrap_or_default(),env::var("WEB_EXT_API_SECRET").unwrap_or_default()));
     if key.trim().is_empty()||secret.trim().is_empty(){return Err(err("Set WEB_EXT_API_KEY and WEB_EXT_API_SECRET before explicit publishing."));}
     let result=npm().current_dir(repo).args(["exec","--yes","--package=web-ext@10.7.0","--","web-ext","sign","--source-dir"]).arg(&source)
-        .arg("--artifacts-dir").arg(&artifacts).args(["--channel","listed","--approval-timeout","0","--no-input","--no-config-discovery"]).output()?;
-    let redact=|bytes:&[u8]|String::from_utf8_lossy(bytes).replace(&key,"[redacted]").replace(&secret,"[redacted]");
+        .arg("--artifacts-dir").arg(&artifacts).args(["--channel","listed","--approval-timeout","0","--no-input","--no-config-discovery"])
+        .env("WEB_EXT_API_KEY",&key).env("WEB_EXT_API_SECRET",&secret).output()?;
+    let redact=|bytes:&[u8]|String::from_utf8_lossy(bytes).replace(key.as_str(),"[redacted]").replace(secret.as_str(),"[redacted]");
     let message=format!("{}\n{}",redact(&result.stdout),redact(&result.stderr));
     fs::write(logs.join("upload.log"),&message)?;println!("{message}");
     if !result.status.success(){return Err(err("AMO submission failed; see redacted upload.log"));}
@@ -227,7 +228,7 @@ fn managed_publish(repo:&Path)->Result<()>{
     // touching the release version. The final signed package is rebuilt.
     package(repo)?;
     checked(npm().current_dir(repo).args(["ci","--ignore-scripts","--no-audit","--no-fund"]))?;
-    checked(&mut npm().current_dir(repo).args(["run","check"]))?;
+    checked(npm().current_dir(repo).args(["run","check"]))?;
     for (_,source) in MODULES{
         let executable=repo.join("build").join(format!("release-test-{}{}",source.trim_end_matches(".rs"),env::consts::EXE_SUFFIX));
         checked(Command::new("rustc").current_dir(repo).args(["--edition=2021","--test"]).arg(repo.join("rust").join(source)).arg("-o").arg(&executable))?;
@@ -244,9 +245,7 @@ fn managed_publish(repo:&Path)->Result<()>{
     let next=format!("{}.{}.{}",parts[0],parts[1],parts[2].checked_add(1).ok_or_else(||err("Version overflow"))?);
     base["version"]=json!(next);
     fs::write(&path,serde_json::to_string_pretty(&base)?+"\n")?;
-    env::set_var("WEB_EXT_API_KEY",&key);env::set_var("WEB_EXT_API_SECRET",&secret);
-    let submission=publish(repo,false);
-    env::remove_var("WEB_EXT_API_KEY");env::remove_var("WEB_EXT_API_SECRET");
+    let submission=publish(repo,false,Some((key,secret)));
     if let Err(e)=submission{
         eprintln!("Keeping the bumped manifest because submission may already have started. Inspect AMO and git status before retrying.");
         return Err(e);
@@ -273,7 +272,7 @@ fn run()->Result<()>{
     let repo=repo.unwrap_or_else(||PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")).canonicalize()?;
     if !repo.join("manifest.json").is_file(){return Err(err("Missing extension manifest"));}
     match action.as_str(){"package"=>{package(&repo)?;},"install"=>install(&repo,&browser,&paths)?,
-        "publish"=>publish(&repo,local_only)?, "managed-publish"=>managed_publish(&repo)?,_=>return Err(err("Expected package, install, publish or managed-publish"))}
+        "publish"=>publish(&repo,local_only,None)?, "managed-publish"=>managed_publish(&repo)?,_=>return Err(err("Expected package, install, publish or managed-publish"))}
     Ok(())
 }
 fn main(){if let Err(error)=run(){eprintln!("[ERROR] {error}");std::process::exit(1);}}
