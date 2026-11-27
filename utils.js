@@ -110,29 +110,34 @@ const CpoBrowserApi = Object.freeze({
             return true;
         });
     },
-    invoke(operation, ...args) {
-        const operations = {
-            localGet:['storage','local','get'], localSet:['storage','local','set'],
-            syncGet:['storage','sync','get'], syncSet:['storage','sync','set'],
-            tabGet:['tabs','get'], tabQuery:['tabs','query'], tabUpdate:['tabs','update'],
-            tabCreate:['tabs','create'], tabSend:['tabs','sendMessage'],
-            runtimeSend:['runtime','sendMessage']
+    async invoke(operation, ...args) {
+        // The platform bindings contain paths, not routing or retry policy.
+        const paths = [null,['storage','local','get'],['storage','local','set'],
+            ['storage','sync','get'],['storage','sync','set'],['tabs','get'],
+            ['tabs','query'],['tabs','update'],['tabs','create'],['tabs','sendMessage'],
+            ['runtime','sendMessage'],['tabs','discard'],['tabs','reload']];
+        const engine=globalThis.CpoQueueEngine;
+        const ready=await engine?.load();
+        let code=ready?engine.eventCode(2,operation):null;
+        // Storage reads/writes and read-only tab inspection must survive a
+        // missing engine so that a failed upgrade cannot destroy saved jobs.
+        // No tab navigation, submission, reload or discard is authorized here.
+        if(code==null)code=({localGet:1,localSet:2,syncGet:3,syncSet:4,tabGet:5,tabQuery:6})[operation]||0;
+        const path=paths[code];
+        if(!path)throw new Error('Browser operation unavailable: '+operation);
+        const find=root=>{
+            const parent=path.slice(0,-1).reduce((value,key)=>value?.[key],root);
+            return [parent,parent?.[path[path.length-1]]];
         };
-        const path=operations[operation];
-        if(!path)return Promise.reject(new Error('Unknown browser API operation'));
-        const parent=path.slice(0,-1).reduce((value,key)=>value?.[key],globalThis.chrome);
-        const method=parent?.[path[path.length-1]];
-        if(typeof method!=='function')return Promise.reject(new Error('Browser API unavailable: '+operation));
-        // Firefox's Promise-only API is selected before invocation. Never
-        // repeat a potentially mutating request after an uncertain failure.
-        const browserParent=path.slice(0,-1).reduce((value,key)=>value?.[key],globalThis.browser);
-        const browserMethod=browserParent?.[path[path.length-1]];
-        if(typeof browserMethod==='function'){
-            try{return Promise.resolve(browserMethod.apply(browserParent,args));}
-            catch(error){return Promise.reject(error);}
-        }
-        return extensionApiPromise(done=>method.apply(parent,[...args,done]));
+        const [promiseParent,promiseMethod]=find(globalThis.browser);
+        const [callbackParent,callbackMethod]=find(globalThis.chrome);
+        const flags=Number(typeof promiseMethod==='function')|(Number(typeof callbackMethod==='function')<<1);
+        const mode=ready?engine.call('cpo_api_mode',[code,args.length,flags]):args.length===1?(flags&1?1:flags&2?2:0):0;
+        if(mode===1)return promiseMethod.apply(promiseParent,args);
+        if(mode===2)return extensionApiPromise(done=>callbackMethod.apply(callbackParent,[...args,done]));
+        throw new Error('Browser API not authorized or unavailable: '+operation);
     }
+
 });
 
 function isGeminiUrl(url) {
