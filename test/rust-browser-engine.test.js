@@ -494,3 +494,37 @@ test('generated host primitives perform only scoped browser operations',{skip},(
     assert.equal(bindings.dispatchHostPrimitive(124,1,0,0,ctx),98);
     assert.throws(()=>bindings.dispatchHostPrimitive(999,0,0,0,ctx),/Unknown Rust browser host operation/);
 });
+
+test('native media protection and conflict decisions preserve application sources',{skip},async()=>{
+    const optimizer=owner(),bridge=await engine(optimizer);
+    for(const value of ['blob:local','a.png 1x, DATA:image/png;base64,x','x'.repeat(8193),'a.png, '+' '.repeat(250)+'mediasource:x']){
+        const img=element({srcset:value});
+        const root={querySelectorAll:()=>[img],contains:()=>true};
+        assert.equal(bridge.media(root,0),0);
+        assert.equal(img.getAttribute('srcset'),value);
+        assert.equal(optimizer.mediaOriginals.has(img),false);
+    }
+    const img=element({src:'https://example.test/blob:x',srcset:'ordinary.png 2x'});
+    const root={querySelectorAll:()=>[img],contains:()=>true};
+    assert.equal(bridge.media(root,0),1);
+    img.setAttribute('src','replacement.png');
+    assert.equal(bridge.media(root,1),0);
+    assert.equal(img.getAttribute('src'),'replacement.png');
+    assert.equal(img.hasAttribute('srcset'),false);
+    assert.equal(optimizer.mediaOriginals.has(img),false);
+    const legacy=element({'data-cpo-original-src':'old.png'});
+    assert.equal(bridge.media({querySelectorAll:()=>[legacy]},1),0);
+    assert.equal(legacy.getAttribute('src'),'old.png');
+    assert.equal(legacy.hasAttribute('data-cpo-original-src'),false);
+});
+test('native journal restoration retains new application attributes',{skip},async()=>{
+    const optimizer=owner(),bridge=await engine(optimizer);
+    const first=element({src:'one.png'}),second=element({src:'two.png'});
+    assert.equal(bridge.media({querySelectorAll:()=>[first,second]},0),2);
+    second.setAttribute('src','new.png');
+    assert.equal(bridge.restoreJournal([new WeakRef(first),new WeakRef(second)]),true);
+    assert.equal(first.getAttribute('src'),'one.png');
+    assert.equal(second.getAttribute('src'),'new.png');
+    assert.equal(optimizer.mediaOriginals.has(first),false);
+    assert.equal(optimizer.mediaOriginals.has(second),false);
+});

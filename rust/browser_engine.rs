@@ -264,15 +264,15 @@ pub extern "C" fn cpo_execute_media(mode: u32) -> u32 {
         if !restoring {
             let mut protected = false;
             for member in 0..count {
-                if h(32, member, mode, 0) != 0 { protected = true; break; }
+                if media_member_protected(member,playback) { protected = true; break; }
             }
             if protected || (playback && !playback_eligible(h(37, 0, 0, 0))) { continue; }
             let width = if playback { 0 } else { h(38, 0, 0, 0) };
             let height = if playback { 0 } else { h(38, 1, 0, 0) };
             let mut changed = false;
             // Restore/remove child sources before the principal element.
-            for member in 1..count { changed |= h(33, member, mode, 0) != 0; }
-            changed |= h(33, 0, mode, 0) != 0;
+            for member in 1..count { changed |= stash_media_member(member,playback); }
+            changed |= stash_media_member(0,playback);
             if changed {
                 if playback { h(39, 0, 0, 0); }
                 h(40, mode, width.saturating_mul(height).saturating_mul(4), 0);
@@ -281,20 +281,23 @@ pub extern "C" fn cpo_execute_media(mode: u32) -> u32 {
         } else {
             let mut replaced = false;
             for member in 0..count {
-                if h(35, member, 0, 0) != 0 { replaced = true; break; }
+                if media_member_conflict(member) { replaced = true; break; }
             }
             if replaced {
                 for member in 0..count { h(36, member, 0, 0); }
             } else {
                 let mut changed = false;
-                for member in 1..count { changed |= h(34, member, 0, 0) != 0; }
-                changed |= h(34, 0, 0, 0) != 0;
+                for member in 1..count { changed |= restore_media_member(member); }
+                changed |= restore_media_member(0);
                 if changed {
                     if playback && playback_reload_safe(h(37, 0, 0, 0)) { h(39, 0, 0, 0); }
                     changed_groups = changed_groups.saturating_add(1);
                 }
             }
-            if !playback { h(41, 0, 0, 0); } // legacy attribute recovery
+            if !playback {
+                let flags=h(41,0,0,0);
+                if flags&1!=0{h(184, u32::from(flags&14==2),0,0);}
+            } // legacy attribute recovery
         }
     }
     changed_groups
@@ -393,8 +396,11 @@ pub extern "C" fn cpo_restore_window(total:u32)->u32{
 #[no_mangle]
 pub extern "C" fn cpo_restore_journal(count:u32)->u32{
     for index in 0..count{
-        let flags=h(150,index,0,0);
-        if flags&1!=0{h(151,0,((flags&2)==0) as u32,0);}
+        if h(150,index,0,0)!=0{
+            if media_member_conflict(0){h(36,0,0,0);}
+            else{restore_media_member(0);}
+        }
+        h(151,0,0,0);
     }
     1
 }
@@ -439,7 +445,10 @@ pub extern "C" fn cpo_capture_history(total: u32, offset: u32) -> u32 {
 pub extern "C" fn cpo_process_mutations(count: u32, mode: u32, empty: u32) -> u32 {
     let mut structural = false;
     for index in 0..count {
-        let flags = h(70, index, mode, 0);
+        let selector=if mode==1{"[data-testid*=\"conversation-turn\"], [data-message-author-role], [data-message-id], article"}else{"[data-testid^=\"conversation-turn\"], [data-message-author-role]"};
+        let mut flags=h(70,index,selector.as_ptr() as u32,selector.len() as u32);
+        let attribute=DomFact::read(186,0,0);
+        if attribute.one_of(&["data-testid","data-message-author-role","data-message-id"]){flags|=1;}
         if mode == 1 {
             while h(73, 0, 0, 0) != 0 {}
         }
@@ -502,7 +511,7 @@ pub extern "C" fn cpo_dom_composer_write(provider: u32, mode: u32, flags: u32) -
             if flags & 4 != 0 { h(95,0,0,0); } // insert paragraph
         } else if provider == 2 { h(94,1,0,0); } // Gemini empty editor
     }
-    h(96,0,0,0); // dispatch input
+    h(96,u32::from(flags&4!=0),0,0); // native chooses insertion/deletion event
     1
 }
 #[cfg(target_arch = "wasm32")]
@@ -1148,4 +1157,96 @@ fn raw_fact_matching_and_css_tokens(){
     assert!(!fact_eq(&[101,114,114,111,114,45],"error"));
     assert!(b"queue-active_12".iter().all(|&c|class_token_char(c as u32)));
     assert!(!b"bad class".iter().all(|&c|class_token_char(c as u32)));
+}
+
+
+// Source strings stay browser-owned. Inspect a bounded UTF-16 stream for
+// application-owned URLs; oversize attributes are protected without copying.
+const MEDIA_LIMIT:u32=8192;
+const MEDIA_PREFIXES:[&[u8];3]=[b"blob:",b"data:",b"mediasource:"];
+struct MediaScan{boundary:bool,mask:u8,position:usize}
+impl MediaScan{
+    fn new()->Self{Self{boundary:true,mask:0,position:0}}
+    fn unit(&mut self,unit:u16)->bool{
+        if dom_whitespace(unit)||unit==44{
+            self.boundary=true;self.mask=0;self.position=0;return false;
+        }
+        if self.boundary{self.mask=7;self.position=0;self.boundary=false;}
+        if self.mask==0{return false;}
+        let lower=if (65..=90).contains(&unit){unit+32}else{unit};
+        for (index,prefix) in MEDIA_PREFIXES.iter().enumerate(){
+            let bit=1u8<<index;
+            if self.mask&bit==0{continue;}
+            if prefix.get(self.position).copied().map(u16::from)!=Some(lower){self.mask&=!bit;}
+            else if self.position+1==prefix.len(){return true;}
+        }
+        self.position+=1;false
+    }
+}
+#[cfg(target_arch="wasm32")]
+fn media_source(member:u32,attribute:u32)->(bool,bool){
+    let length=h(32,member,attribute,0);
+    if length==0{return (false,false);}
+    if length>MEDIA_LIMIT{return (true,true);}
+    let mut scan=MediaScan::new();
+    let mut scratch=[0u16;256];
+    let mut offset=0;
+    while offset<length{
+        let take=(length-offset).min(scratch.len() as u32);
+        let read=h(185,offset,scratch.as_mut_ptr() as u32,take);
+        if read!=take{core::arch::wasm32::unreachable();}
+        let protected=scratch[..read as usize].iter().any(|&unit|scan.unit(unit));
+        for unit in &mut scratch[..read as usize]{unsafe{core::ptr::write_volatile(unit,0);}}
+        if protected{return (true,true);}
+        offset+=read;
+    }
+    (true,false)
+}
+#[cfg(target_arch="wasm32")]
+fn media_member_protected(member:u32,playback:bool)->bool{
+    media_source(member,0).1||media_source(member,1).1||
+        (playback&&member==0&&media_source(member,2).1)
+}
+#[cfg(target_arch="wasm32")]
+fn stash_media_member(member:u32,playback:bool)->bool{
+    // Preserve the old source ordering: picture children lose srcset;
+    // image roots lose srcset then src; playback loses src only.
+    let candidates=if playback{1}else if member==0{3}else{2};
+    let mut mask=0u32;
+    for attribute in [1,0]{
+        if candidates&(1<<attribute)==0{continue;}
+        let (present,protected)=media_source(member,attribute);
+        if protected{return false;}
+        if present{mask|=1<<attribute;}
+    }
+    mask!=0&&h(33,member,mask,0)!=0
+}
+// Raw host flags: journal exists=1, original value exists=2, current
+// attribute exists=4, current differs from original=8. Native code alone
+// settles conflict, missing-attribute restoration and journal retirement.
+#[cfg(target_arch="wasm32")]
+fn media_member_conflict(member:u32)->bool{
+    (0..2).any(|attribute|h(35,member,attribute,0)&13==13)
+}
+#[cfg(target_arch="wasm32")]
+fn restore_media_member(member:u32)->bool{
+    let src=h(35,member,0,0);let srcset=h(35,member,1,0);
+    if src&1==0{return false;}
+    if src&13==13||srcset&13==13{h(36,member,0,0);return false;}
+    let mask=u32::from(src&6==2)|(u32::from(srcset&6==2)<<1);
+    h(34,member,mask,0)!=0
+}
+#[cfg(test)]
+#[test]
+fn protected_media_prefixes_and_boundaries(){
+    let protected=|s:&str|{let mut scanner=MediaScan::new();s.encode_utf16().any(|u|scanner.unit(u))};
+    assert!(protected("blob:object"));
+    assert!(protected("a.png 1x, DATA:image/png;base64,x"));
+    assert!(protected("a.png\u{feff}MediaSource:x"));
+    assert!(!protected("https://example.test/blob:x"));
+    assert!(!protected("prefixdata:x"));
+    assert!(!protected("data"));
+    let mut scanner=MediaScan::new();
+    assert!(!"a.png, med".encode_utf16().any(|u|scanner.unit(u)));
+    assert!("iasource:foo".encode_utf16().any(|u|scanner.unit(u)));
 }

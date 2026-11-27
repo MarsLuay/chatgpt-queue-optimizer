@@ -338,3 +338,7 @@ The Rust build and package commands now generate `rust-browser-bindings.js` dire
 ### Native DOM fact policy and generated host primitives (browser ABI 16)
 
 Resource classification, canonical-turn recognition, forbidden-tag checks, assistant error and incomplete-tool state matching, streamed tool-only text comparison and dynamic CSS token validation now execute in Rust. The bridge transfers bounded raw UTF-16 facts and applies browser effects. Fourteen mechanical host callbacks are generated from typed Rust descriptors. Remaining DOM queries, media journal operations and high-level host adapters still require browser-side implementation. Native compilation and live browser verification remain outstanding.
+
+### Native media and mutation decisions (browser ABI 17)
+
+Normal media eviction now streams source attributes into Rust for protected URL and length checks, selects source masks natively, and settles restoration conflicts, journal retirement and legacy attribute recovery in Rust. The host retains only weak DOM journals and executes approved browser mutations. Mutation selectors and identity-attribute classification are native, and Rust selects composer insertion/deletion event semantics. The independent emergency JavaScript recovery path remains intentionally available when WASM cannot execute. Native compilation and live browser verification remain outstanding.

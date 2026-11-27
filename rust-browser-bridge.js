@@ -426,16 +426,49 @@
                     ctx.group = [target, ...sources];
                     return ctx.group.length;
                 }
-                case 32: {
-                    const node = ctx.group[a];
-                    return Number(['src', 'srcset'].some(name => owner.isProtectedMediaSource(node.getAttribute(name))) ||
-                        (b >= 2 && a === 0 && owner.isProtectedMediaSource(node.currentSrc || '')));
+                case 32:{
+                    const node=ctx.group[a];
+                    ctx.mediaText=String((b===2?node.currentSrc:node.getAttribute(b===0?'src':'srcset'))||'');
+                    return ctx.mediaText.length;
                 }
-                case 33: return Number(owner.stashSources(ctx.group[a], b >= 2 ? ['src'] : a === 0 ? ['srcset', 'src'] : ['srcset']));
-                case 34: return Number(owner.restoreSources(ctx.group[a]));
-                case 35: {
+                case 185:{
+                    const text=ctx.mediaText;
+                    const count=Math.min(c,Math.max(0,text.length-a));
+                    const target=new Uint16Array(this.exports.memory.buffer,b,count);
+                    for(let i=0;i<count;i++)target[i]=text.charCodeAt(a+i);
+                    return count;
+                }
+                case 33:{
+                    const node=ctx.group[a],originals=owner.mediaOriginals.get(node)||{};
+                    const names=[];
+                    for(const [bit,name] of [[2,'srcset'],[1,'src']]){
+                        if(!(b&bit))continue;
+                        const value=node.getAttribute(name);
+                        if(value){originals[name]=value;names.push(name);}
+                    }
+                    if(!names.length)return 0;
+                    // Journal before touching the DOM; keep weak ownership
+                    // for emergency recovery if a browser effect throws.
+                    owner.mediaOriginals.set(node,originals);
+                    owner.trackSources(node);
+                    for(const name of names)if(node.getAttribute(name)===originals[name])node.removeAttribute(name);
+                    return 1;
+                }
+                case 34:{
                     const node=ctx.group[a],original=owner.mediaOriginals.get(node);
-                    return Number(!!original&&['src','srcset'].some(name=>node.hasAttribute(name)&&node.getAttribute(name)!==original[name]));
+                    if(!original)return 0;
+                    for(const [bit,name] of [[1,'src'],[2,'srcset']]){
+                        if((b&bit)&&!node.hasAttribute(name))node.setAttribute(name,original[name]);
+                    }
+                    owner.forgetSources(node);owner.mediaStats.restored++;
+                    return 1;
+                }
+                case 35:{
+                    const node=ctx.group[a],original=owner.mediaOriginals.get(node);
+                    if(!original)return 0;
+                    const name=b===0?'src':'srcset';
+                    const present=node.hasAttribute(name);
+                    return 1|(Number(Object.hasOwn(original,name))<<1)|(Number(present)<<2)|(Number(present&&node.getAttribute(name)!==original[name])<<3);
                 }
                 case 36: owner.forgetSources(ctx.group[a]); return 1;
                 case 37: {
@@ -454,13 +487,16 @@
                         owner.mediaStats.estimatedImageBytes = Math.min(Number.MAX_SAFE_INTEGER, owner.mediaStats.estimatedImageBytes + b);
                     }
                     return 1;
-                case 41: {
-                    const img = ctx.group[0];
-                    if (img.hasAttribute('data-cpo-original-src')) {
-                        const original = img.getAttribute('data-cpo-original-src');
-                        if (original && !img.hasAttribute('src') && !img.hasAttribute('srcset')) img.setAttribute('src', original);
-                        img.removeAttribute('data-cpo-original-src');
-                    }
+                case 41:{
+                    const img=ctx.group[0];
+                    return Number(img.hasAttribute('data-cpo-original-src'))|
+                        (Number(!!img.getAttribute('data-cpo-original-src'))<<1)|
+                        (Number(img.hasAttribute('src'))<<2)|(Number(img.hasAttribute('srcset'))<<3);
+                }
+                case 184:{
+                    const img=ctx.group[0];
+                    if(a)img.setAttribute('src',img.getAttribute('data-cpo-original-src'));
+                    img.removeAttribute('data-cpo-original-src');
                     return 1;
                 }
                 case 50: {
@@ -501,20 +537,17 @@
                         text: ctx.parts.join(' '), truncated: c === 1 });
                     ctx.parts = null;
                     return 1;
-                case 70: {
-                    const mutation = ctx.mutations[a];
-                    ctx.added = mutation.addedNodes || [];
-                    ctx.removed = mutation.removedNodes || [];
-                    ctx.dirtyNode = mutation.target?.nodeType === 3 ? mutation.target.parentElement : mutation.target;
-                    const selector = b === 1
-                        ? '[data-testid*="conversation-turn"], [data-message-author-role], [data-message-id], article'
-                        : '[data-testid^="conversation-turn"], [data-message-author-role]';
-                    ctx.turnSelector = selector;
-                    return (mutation.type === 'attributes' &&
-                        ['data-testid','data-message-author-role','data-message-id'].includes(mutation.attributeName) ? 1 : 0) |
-                        (mutation.target?.closest?.(selector) ? 2 : 0) |
-                        (ctx.added.length || ctx.removed.length ? 4 : 0);
+                case 70:{
+                    const mutation=ctx.mutations[a];
+                    ctx.added=mutation.addedNodes||[];
+                    ctx.removed=mutation.removedNodes||[];
+                    ctx.dirtyNode=mutation.target?.nodeType===3?mutation.target.parentElement:mutation.target;
+                    ctx.turnSelector=new TextDecoder().decode(new Uint8Array(this.exports.memory.buffer,b,c));
+                    ctx.mutationAttribute=mutation.type==='attributes'?mutation.attributeName:'';
+                    return (Number(!!mutation.target?.closest?.(ctx.turnSelector))<<1)|
+                        (Number(!!(ctx.added.length||ctx.removed.length))<<2);
                 }
+                case 186:return this.copyDomFact(ctx.mutationAttribute,c);
                 case 71: return ctx.added.length + ctx.removed.length;
                 case 72: {
                     const node = a < ctx.added.length ? ctx.added[a] : ctx.removed[a - ctx.added.length];
@@ -737,7 +770,7 @@
                 }
                 case 96:
                     if(typeof InputEvent==='function')ctx.element.dispatchEvent(new InputEvent('input',{
-                        bubbles:true,inputType:ctx.value?'insertText':'deleteContentBackward',data:ctx.value||null
+                        bubbles:true,inputType:a?'insertText':'deleteContentBackward',data:a?ctx.value:null
                     }));
                     return 1;
                 case 97: {
@@ -850,17 +883,12 @@
                 case 145:ctx.result.messages.push(ctx.value.slice(a,b));return 1;
                 case 147:return ctx.value.indexOf(ctx.needle,a)>>>0;
                 case 148:ctx.parts.push(ctx.value.slice(a,b));return 1;
-                case 150: {
-                    ctx.journalNode=ctx.entries[a]?.deref();
-                    const node=ctx.journalNode;
-                    const original=node&&owner.mediaOriginals.get(node);
-                    return !original?0:1|(Number(['src','srcset'].some(name=>node.hasAttribute(name)&&node.getAttribute(name)!==original[name]))<<1);
+                case 150:{
+                    const node=ctx.entries[a]?.deref();
+                    ctx.group=node?[node]:[];
+                    return Number(!!node&&owner.mediaOriginals.has(node));
                 }
-                case 151: {
-                    if(b)owner.restoreSources(ctx.journalNode);
-                    else owner.forgetSources(ctx.journalNode);
-                    ctx.journalNode=null;return 1;
-                }
+                case 151:ctx.group=[];return 1;
                 case 152: {
                     ctx.textWalker=ctx.doc.createTreeWalker(ctx.handles[a],4);
                     ctx.textNode=null;ctx.textOffset=0;return 1;
