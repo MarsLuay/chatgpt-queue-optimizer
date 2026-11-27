@@ -263,17 +263,11 @@ document.addEventListener('DOMContentLoaded', async function () {
     const CHATGPT_URL_PATTERNS = PROVIDER_URL_PATTERNS;
 
     function tabsQuery(queryInfo) {
-        return extensionApiPromise(
-            (done) => chrome.tabs.query(queryInfo, done),
-            () => chrome.tabs.query(queryInfo)
-        ).then((tabs) => Array.isArray(tabs) ? tabs : []);
+        return globalThis.CpoBrowserApi.invoke('tabQuery',queryInfo).then(tabs=>Array.isArray(tabs)?tabs:[]);
     }
 
     function tabsGet(tabId) {
-        return extensionApiPromise(
-            (done) => chrome.tabs.get(tabId, done),
-            () => chrome.tabs.get(tabId)
-        );
+        return globalThis.CpoBrowserApi.invoke('tabGet',tabId);
     }
 
     function executeScript(details) {
@@ -982,20 +976,15 @@ document.addEventListener('DOMContentLoaded', async function () {
     }
 
     function getVariablesFromTextList(textList) {
-        const regex = /{{(.*?)}}/g;
-        const vars = new Set();
-
-        textList.forEach(text => {
-            let match;
-            regex.lastIndex = 0;
-
-            while ((match = regex.exec(text)) !== null) {
-                if (match[1].trim()) {
-                    vars.add(match[1].trim());
-                }
+        const vars=new Set();
+        for(const text of textList){
+            const spans=ui.variables(text);
+            if(spans==null)throw new Error('Native variable scan unavailable');
+            for(const [start,end] of spans){
+                const name=globalThis.CpoQueueEngine.trim(text.slice(start,end));
+                if(name)vars.add(name);
             }
-        });
-
+        }
         return Array.from(vars);
     }
 
@@ -1285,7 +1274,9 @@ document.addEventListener('DOMContentLoaded', async function () {
         if (choice===1) {
             selectedSequenceName = newSeqName;
             sequenceDropdown.value = newSeqName;
-            messages = [...savedSequences[newSeqName]];
+            const loaded=ui.savedSequence(1,savedSequences,newSeqName,messages);
+            if(!loaded?.ok)return;
+            messages=loaded.messages;
             saveMessages();
             updateMessagesList();
             setSequenceEditMode('');
@@ -1295,7 +1286,9 @@ document.addEventListener('DOMContentLoaded', async function () {
         if (choice===3 && shouldLoadFirstSequence) {
             selectedSequenceName = names[0];
             sequenceDropdown.value = names[0];
-            messages = [...savedSequences[names[0]]];
+            const loaded=ui.savedSequence(1,savedSequences,names[0],messages);
+            if(!loaded?.ok)return;
+            messages=loaded.messages;
             saveMessages();
             updateMessagesList();
             setSequenceEditMode('');
@@ -1319,7 +1312,7 @@ document.addEventListener('DOMContentLoaded', async function () {
         if (editingSequenceName && savedSequences[editingSequenceName]) {
             const editedName = editingSequenceName;
 
-            savedSequences[editedName] = [...messages];
+            if(ui.savedSequence(0,savedSequences,editedName,messages)?.ok!==true){showErrorStatus('Could not save sequence.');return;}
 
             chrome.storage.local.set({ sequences: savedSequences }, () => {
                 selectedSequenceName = editedName;
@@ -1336,7 +1329,7 @@ document.addEventListener('DOMContentLoaded', async function () {
             const cleanName = globalThis.CpoQueueEngine.trim(name);
             if(['__proto__','constructor','prototype',EDIT_SEQUENCE_VALUE].includes(cleanName)){showErrorStatus('Reserved sequence name.');return;}
 
-            savedSequences[cleanName] = [...messages];
+            if(ui.savedSequence(0,savedSequences,cleanName,messages)?.ok!==true){showErrorStatus('Could not save sequence.');return;}
 
             chrome.storage.local.set({ sequences: savedSequences }, () => {
                 selectedSequenceName = cleanName;
@@ -1362,7 +1355,9 @@ document.addEventListener('DOMContentLoaded', async function () {
             selectedSequenceName = targetName;
             sequenceDropdown.value = targetName;
 
-            messages = [...savedSequences[targetName]];
+            const loaded=ui.savedSequence(1,savedSequences,targetName,messages);
+            if(!loaded?.ok)return;
+            messages=loaded.messages;
             saveMessages();
             updateMessagesList();
             refreshVarDropdown();
@@ -1377,7 +1372,9 @@ document.addEventListener('DOMContentLoaded', async function () {
 
         if (selectedValue && savedSequences[selectedValue]) {
             selectedSequenceName = selectedValue;
-            messages = [...savedSequences[selectedValue]];
+            const loaded=ui.savedSequence(1,savedSequences,selectedValue,messages);
+            if(!loaded?.ok)return;
+            messages=loaded.messages;
             saveMessages();
             updateMessagesList();
             refreshVarDropdown();
@@ -1392,7 +1389,7 @@ document.addEventListener('DOMContentLoaded', async function () {
                 : sequenceDropdown.value;
 
         if (name && savedSequences[name]) {
-            delete savedSequences[name];
+            if(ui.savedSequence(2,savedSequences,name,messages)?.ok!==true)return;
 
             chrome.storage.local.set({ sequences: savedSequences }, () => {
                 messages = [];
@@ -1953,7 +1950,7 @@ The sequence should do the following: `;
             const finalName = getUniqueSequenceName(sequenceName);
 
             messages = importedSequence.messages;
-            savedSequences[finalName] = [...messages];
+            if(ui.savedSequence(0,savedSequences,finalName,messages)?.ok!==true){showErrorStatus('Could not save sequence.');return;}
 
             chrome.storage.local.set(
                 {
@@ -2058,9 +2055,7 @@ The sequence should do the following: `;
     }
 
     function setSyncStorage(items) {
-        return new Promise((resolve) => {
-            chrome.storage.sync.set(items, resolve);
-        });
+        return globalThis.CpoBrowserApi.invoke('syncSet',items);
     }
 
     async function scheduleOptimizerAutoSave() {
@@ -2126,10 +2121,7 @@ The sequence should do the following: `;
     }
 
     async function sendOptimizerMessage(tabId, message) {
-        return extensionApiPromise(
-            (done) => chrome.tabs.sendMessage(tabId, message, done),
-            () => chrome.tabs.sendMessage(tabId, message)
-        );
+        return globalThis.CpoBrowserApi.invoke('tabSend',tabId,message);
     }
 
     async function ensureOptimizerContentScript(tabId) {
