@@ -11,7 +11,7 @@ async function nativeStore() {
     const store = new CpoHistoryStore(null);
     const result = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     store.core = result.instance.exports;
-    assert.equal(store.core.cpo_history_abi(), 2);
+    assert.equal(store.core.cpo_history_abi(), 3);
     return store;
 }
 
@@ -116,4 +116,18 @@ test('compressed rows are smaller and readable with and without WASM', { skip },
     const scratch = new Uint8Array(store.core.memory.buffer, store.core.cpo_history_output(),
         store.core.cpo_history_capacity());
     assert.ok(scratch.every(byte => byte === 0));
+});
+
+test('native reader application controls and capture transitions', {skip}, async () => {
+    const store=await nativeStore();
+    const e=store.core;
+    assert.equal(e.cpo_reader_buttons(2|4|8|16,16,40),63);
+    assert.equal(e.cpo_reader_buttons(1|2|4|8,0,40),0);
+    assert.equal(e.cpo_reader_move(0,0),0);
+    assert.equal(e.cpo_reader_move(16,1),32);
+    assert.equal(e.cpo_reader_batch(16,20,4,20,3),1);
+    assert.equal(e.cpo_reader_batch(16,20,5,21,3),0);
+    assert.equal(e.cpo_reader_batch(0,20,4,4,1),0);
+    assert.equal(e.cpo_reader_continue(4096,5000,16,16),0);
+    assert.equal(e.cpo_reader_partial(4096,5000,0),1);
 });
