@@ -48,7 +48,11 @@ press a key, then returns the installer exit code. Packaging output and browser
 setup diagnostics (including stderr, failing setup stage, per-browser exit
 codes and total elapsed time) stream to the console and are retained in a
 unique timestamped `build/logs/install-local-*.log` file for each run. The
-exact log path is printed at the beginning and end of the run. If PowerShell
+exact log path is printed at the beginning and end of the run. Before the
+batch pauses, the coordinator prints the complete saved log between BEGIN
+and END FULL INSTALLER LOG markers so it can be copied directly from the
+console. Python detection records each candidate and continues to the next
+candidate if the first cannot run. If PowerShell
 cannot start or initialize logging, the batch still pauses and displays the
 failure; in that case a log may not exist. Google Chrome and installing both browsers (`-Browser All`) remain
 available only through explicit command-line selection:
