@@ -20,7 +20,10 @@ fn h(op: u32, a: u32, b: u32, c: u32) -> u32 {
 }
 
 #[no_mangle]
-pub extern "C" fn cpo_browser_abi() -> u32 { 5 }
+pub extern "C" fn cpo_browser_abi() -> u32 { 6 }
+
+#[cfg(target_arch = "wasm32")]
+mod sequence;
 
 const MAX_TURNS: u32 = 32;
 const MAX_NODES: u32 = 512;
