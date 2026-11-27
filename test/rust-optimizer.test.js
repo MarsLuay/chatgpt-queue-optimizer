@@ -28,7 +28,10 @@ test('compiled Rust WASM implements the same window and batch policy', {
 }, async () => {
     const { instance } = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const core = instance.exports;
-    assert.equal(core.cpo_abi_version(), 1);
+    assert.equal(core.cpo_abi_version(), 2);
+    assert.equal(core.cpo_resource_units(100, 129, 2, 1, 1, 0), 422);
+    assert.equal(core.cpo_adaptive_window(500, 50, 20, 4000, 4000), 20);
+    assert.equal(core.cpo_adaptive_window(500, 50, 20, 4000, 1), 8);
     assert.equal(core.cpo_expand_count(500, 50, 25), 75);
     assert.equal(core.cpo_hidden_count(500, 50), 450);
     assert.equal(core.cpo_offscreen_end(500), 492);
@@ -53,4 +56,23 @@ test('native failure falls back to JS without breaking conversation window', () 
     assert.equal(instance.policyVisible(500), 50);
     assert.equal(instance.nativeCore, null);
     assert.equal(instance.nativeCoreState, 'unavailable');
+});
+
+test('adaptive budget selects a bounded recent window and matches native policy', async () => {
+    const js = optimizer();
+    js.config.resourceBudget = 4000;
+    js.getResourceSample = () => ({ sampledTurns: 20, units: 4000 });
+    const messages = { length: 500 };
+    assert.equal(js.policyAdaptiveTarget(messages), 20);
+    js.config.resourceBudget = 1;
+    assert.equal(js.policyAdaptiveTarget(messages), 8);
+    if (fs.existsSync(wasmPath)) {
+        const { instance } = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
+        js.nativeCore = instance.exports;
+        for (const budget of [1, 4000, 100000]) {
+            js.config.resourceBudget = budget;
+            assert.equal(js.policyAdaptiveTarget(messages),
+                Math.min(50, Math.max(8, Math.floor(budget / 200))));
+        }
+    }
 });
