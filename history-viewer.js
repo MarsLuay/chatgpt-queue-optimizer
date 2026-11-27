@@ -24,15 +24,13 @@
         req.onerror = () => reject(req.error || new Error('Local database request failed.'));
     });
     function getTab(id) {
-        return extensionApiPromise(done => chrome.tabs.get(id, done), () => chrome.tabs.get(id));
+        return globalThis.CpoBrowserApi.invoke('tabGet',id);
     }
     function sendToTab(id, message) {
-        return extensionApiPromise(done => chrome.tabs.sendMessage(id, message, done),
-            () => chrome.tabs.sendMessage(id, message));
+        return globalThis.CpoBrowserApi.invoke('tabSend',id,message);
     }
     function sendRuntime(message) {
-        return extensionApiPromise(done => chrome.runtime.sendMessage(message, done),
-            () => chrome.runtime.sendMessage(message));
+        return globalThis.CpoBrowserApi.invoke('runtimeSend',message);
     }
     function setStatus(message) { el('status').textContent = message; }
     function updateButtons() {
@@ -155,11 +153,9 @@
         let tab;
         try { tab = await getTab(saved.tabId); } catch {}
         if (tab?.url === saved.url && !tab.incognito) {
-            await extensionApiPromise(done => chrome.tabs.update(tab.id, { active: true }, done),
-                () => chrome.tabs.update(tab.id, { active: true }));
+            await globalThis.CpoBrowserApi.invoke('tabUpdate',tab.id,{active:true});
         } else {
-            await extensionApiPromise(done => chrome.tabs.create({ url: saved.url }, done),
-                () => chrome.tabs.create({ url: saved.url }));
+            await globalThis.CpoBrowserApi.invoke('tabCreate',{url:saved.url});
         }
     }));
     deleteButton.addEventListener('click', () => run(async () => {
