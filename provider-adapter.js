@@ -901,8 +901,7 @@
             const now = Date.now();
             const cache = this._turnListCache;
             if (this._turnScanCacheEnabled && cache?.doc === doc &&
-                (this._nativeLifecycle?.cacheValid(1, cache.createdAt, true,
-                    cache.nodes.every(node => node.isConnected !== false), now) ??
+                (this._nativeLifecycle?.cacheNodesValid(1, cache.createdAt, cache.nodes, now) ??
                  (now >= cache.createdAt && now - cache.createdAt < 8000 &&
                     cache.nodes.every(node => node.isConnected !== false)))) {
                 return cache.nodes;
