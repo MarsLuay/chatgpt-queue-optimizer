@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ChatGPT Optimizer — local history</title>
+<link rel="stylesheet" href="history-viewer.css">
+</head>
+<body>
+<main>
+<h1>Local conversation history</h1>
+<p>This experimental reader stores a bounded plain-text snapshot of the currently loaded conversation. It does not preserve attachments, interactive widgets, formatting, branches or unsaved content. The original ChatGPT conversation remains authoritative.</p>
+<p>Snapshots stay in this browser's extension storage until replaced or deleted. Only one snapshot is retained per browser profile. Do not capture sensitive chats on a shared profile.</p>
+<div class="actions">
+<button id="capture">Capture selected chat (replace previous snapshot)</button>
+<button id="discard" disabled>Unload original tab to release RAM</button>
+<button id="original" disabled>Open original conversation</button>
+<button id="delete" disabled>Delete saved snapshot</button>
+</div>
+<p id="status" role="status" aria-live="polite">Opening local storage…</p>
+<nav class="actions" aria-label="History pages">
+<button id="prev" disabled>Previous</button>
+<span id="page">No snapshot</span>
+<button id="next" disabled>Next</button>
+</nav>
+<div id="turns"></div>
+</main>
+<script src="utils.js"></script>
+<script src="history-viewer.js"></script>
+</body>
+</html>
