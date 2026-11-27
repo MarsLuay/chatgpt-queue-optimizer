@@ -408,6 +408,14 @@ const HOST:&str=r####"(() => {
             canPersist(){return !broken&&!!core&&(!engine||engine===core);},
             revision(){return native(e=>e.cpo_live_epoch());},
             transaction,
+            waitControl(job,token,op,a=0,b=0,now=Date.now()){
+                const id=ids.get(job);
+                if(!id||handles.get(ownerTabs.get(job))!==job)return null;
+                return native(e=>{
+                    const result=e.cpo_live_wait(id,token,op,a,b,now)>>>0;
+                    return result===0xffffffff?null:result;
+                });
+            },
             processing(job,op){
                 const id=ids.get(job);
                 if(!id||handles.get(ownerTabs.get(job))!==job)return null;

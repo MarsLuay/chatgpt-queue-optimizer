@@ -4,6 +4,8 @@ mod browser_api;
 mod queue_schema;
 mod background_controller;
 pub use background_controller::*;
+mod background_runtime;
+pub use background_runtime::{cpo_background_grant,cpo_background_restore,cpo_background_poll_gate};
 use queue_schema::DURABLE_FIELDS;
 use browser_api::API_EVENTS;
 pub use browser_api::{cpo_api_mode,cpo_api_path,cpo_injection_route,cpo_async_transition};
@@ -843,6 +845,7 @@ mod live_state {
         queue: VecDeque<Vec<u8>>,
         revision: u64,
         metadata: Option<(u64, Vec<u8>)>,
+        wait: Option<super::background_runtime::ResponseWait>,
     }
     // Field indices are obtained from the canonical durable schema.
     fn field(name:&str)->usize{super::DURABLE_FIELDS.iter().position(|f|f.name==name).expect("known job field")}
@@ -956,7 +959,7 @@ mod live_state {
             out.push(b'}');out
         }
         fn new() -> Self {
-            Self { fields: vec![None; super::DURABLE_FIELDS.len()+1], queue: VecDeque::new(), revision: 0, metadata: None }
+            Self { fields: vec![None; super::DURABLE_FIELDS.len()+1], queue: VecDeque::new(), revision: 0, metadata: None, wait:None }
         }
         fn dirty(&mut self, revision: u64) { self.revision = revision; self.metadata = None; }
     }
@@ -964,6 +967,7 @@ mod live_state {
     struct Store {
         jobs: BTreeMap<u32, Job>,
         next: u32,
+        next_wait:u32,
         epoch: u64,
         input: Vec<u8>,
         output: Vec<u8>,
@@ -1039,6 +1043,48 @@ mod live_state {
             self.output=value;
             self.changed(id);
             u32::try_from(self.output.len()).ok().and_then(|v|v.checked_add(1)).unwrap_or(0)
+        }
+        // Per-job native wait lease. A completed or replaced worker cannot
+        // publish a heartbeat, increment samples or release a successor's lease.
+        fn wait_control(&mut self,id:u32,token:u32,op:u32,a:u32,b:u32,now:f64)->u32{
+            if !now.is_finite()||now<0.0{return u32::MAX;}
+            let Some(job)=self.jobs.get_mut(&id)else{return u32::MAX;};
+            if op==0{
+                if job.wait.is_some(){return 0;}
+                let Some(next)=self.next_wait.checked_add(1)else{return 0;};
+                self.next_wait=next;
+                job.wait=Some(super::background_runtime::ResponseWait::new(next,now));
+                return next;
+            }
+            if token==0||!job.wait.as_ref().is_some_and(|w|w.token==token){return u32::MAX;}
+            let mut wait=job.wait.take().unwrap();
+            let mut dirty=false;
+            let result=match op{
+                1=>{if wait.polling{0}else{wait.polling=true;1}},
+                2=>{wait.polling=false;1},
+                3=>wait.sample(a,b),
+                4=>{
+                    let generating=if a&2!=0{TRUE}else{FALSE};
+                    let research=if a&4!=0{TRUE}else{FALSE};
+                    if job.get("sawGenerating")!=generating{job.set("sawGenerating",generating);dirty=true;}
+                    if job.get("sawDeepResearch")!=research{job.set("sawDeepResearch",research);dirty=true;}
+                    let fields=["sawGenerating","sawDeepResearch","currentPhase","deliveryState","lastResponsePhase",
+                        "submittedUserTurnId","assistantTurnId","submissionAckSource","terminalAckSource"];
+                    let signature=fields.map(|name|job.get(name));
+                    if wait.persist(a&1!=0,now,&signature){
+                        let time=now.to_string();
+                        if job.get("updatedAt")!=time.as_bytes(){job.set("updatedAt",time.as_bytes());dirty=true;}
+                        1
+                    }else{0}
+                },
+                5=>wait.progress_log(now),
+                6=>return 1, // drop lease
+                7=>(!wait.polling) as u32,
+                _=>u32::MAX
+            };
+            job.wait=Some(wait);
+            if dirty{self.changed(id);}
+            result
         }
         fn processing(&mut self,id:u32,op:u32)->u32{
             let Some(job)=self.jobs.get_mut(&id)else{return 0;};
@@ -1259,6 +1305,10 @@ mod live_state {
     #[no_mangle]
     pub extern "C" fn cpo_live_decision(id:u32,kind:u32,confirmed:u32)->u32{
         STORE.with(|s|s.borrow().decision(id,kind,confirmed))
+    }
+    #[no_mangle]
+    pub extern "C" fn cpo_live_wait(id:u32,token:u32,op:u32,a:u32,b:u32,now:f64)->u32{
+        STORE.with(|s|s.borrow_mut().wait_control(id,token,op,a,b,now))
     }
     #[no_mangle]
     pub extern "C" fn cpo_live_processing(id:u32,op:u32)->u32{

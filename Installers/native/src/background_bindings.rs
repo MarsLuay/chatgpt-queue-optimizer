@@ -11,6 +11,14 @@ pub fn generate(stage:&Path)->Result<()>{
 }
 const HOST:&str=r####"// Ephemeral one-use click grants; never persisted or transferred between jobs.
 const nativeClickGrants = new Map();
+function grantControl(op,tabId=0,lease=0,flags=0,now=Date.now()){
+    return globalThis.CpoQueueEngine?.numeric('cpo_background_grant',[op,tabId,lease,flags,now])??0;
+}
+function revokeClickGrant(tabId){
+    if(tabId==null){nativeClickGrants.clear();grantControl(4);}
+    else{nativeClickGrants.delete(tabId);grantControl(3,tabId);}
+}
+const restoreControl=(op,token=0)=>globalThis.CpoQueueEngine?.call('cpo_background_restore',[op,token])??0;
 const QUEUE_DEBUG_LOG_KEY = 'queueDebugLogs';
 const QUEUE_DURABLE_STATE_KEY = 'queueDurableJobs';
 const MAX_QUEUE_DEBUG_LOG_ENTRIES = 300;
@@ -631,10 +639,9 @@ globalThis.CpoBrowserApi.listen(
         if (code === 1) {
             const tabId=sender?.tab?.id;
             const grant=nativeClickGrants.get(tabId);
-            const flags=Number(!!grant)|(Number(grant?.token===request.token)<<1)|(Number(!!grant&&!grant.used)<<2)|
-                (Number(!!grant&&(!grant.job||jobs.processing(grant.job,2)===1))<<3);
-            const ok=engine?.numeric('cpo_background_click',[flags,Date.now(),grant?.expiresAt??0])===1;
-            if(ok)grant.used=true;
+            const flags=Number(!!grant&&grant.token===request.token)|
+                (Number(!!grant&&(!grant.job||jobs.processing(grant.job,2)===1))<<1);
+            const ok=!!grant&&grantControl(1,tabId,grant.lease,flags)===1;
             sendResponse({ok});
             return true;
         }
@@ -811,7 +818,7 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-    nativeClickGrants.delete(tabId);
+    revokeClickGrant(tabId);
     if(!jobs.canPersist()){
         if(jobs.has(tabId))emergencyStopQueues(tabId);
         return;
@@ -899,7 +906,13 @@ async function resumeDurableQueues(source = 'manual') {
         return 0;
     }
 
+    const lease=restoreControl(0);
+    if(!lease)return 0;
+    try{
+    await queueStateWrite;
+    if(restoreControl(1,lease)!==1)return 0;
     const data = await readLocalStorage([QUEUE_DURABLE_STATE_KEY]);
+    if(restoreControl(1,lease)!==1)return 0;
     const durableJobs = data[QUEUE_DURABLE_STATE_KEY] && typeof data[QUEUE_DURABLE_STATE_KEY] === 'object'
         ? data[QUEUE_DURABLE_STATE_KEY]
         : {};
@@ -933,6 +946,7 @@ async function resumeDurableQueues(source = 'manual') {
     }
 
     return restoredJobs.length;
+    }finally{restoreControl(2,lease);}
 }
 
 /**
@@ -1468,11 +1482,12 @@ function handleRetryPausedJob(request, sendResponse) {
 function emergencyStopQueues(tabId, sendResponse=()=>{}) {
     const all=tabId==null;
     const found=all?jobs.size>0:jobs.has(tabId);
+    restoreControl(3);
     if(all){
-        nativeClickGrants.clear();
+        revokeClickGrant(null);
         jobs.clear();
     }else{
-        nativeClickGrants.delete(tabId);
+        revokeClickGrant(tabId);
         jobs.delete(tabId);
     }
     globalThis.CpoQueueEngine?.numeric('cpo_background_checkpoint',[5,0]);
@@ -1504,9 +1519,10 @@ function emergencyStopQueues(tabId, sendResponse=()=>{}) {
 
 function handleStopSequence(request, sendResponse) {
     const tabId = request.tabId;
-    if(tabId&&!jobs.canPersist()){emergencyStopQueues(tabId,sendResponse);return;}
+    if(tabId&&(!jobs.canPersist()||(!jobs.has(tabId)&&restoreControl(4)===1))){emergencyStopQueues(tabId,sendResponse);return;}
 
     if (tabId && jobs.has(tabId)) {
+        revokeClickGrant(tabId);
         const job = jobs.get(tabId);
         job.isRunning = false;
         job.isPaused = false;
@@ -1531,7 +1547,8 @@ function handleStopSequence(request, sendResponse) {
 }
 
 function handleStopAllSequences(sendResponse) {
-    if(!jobs.canPersist()){emergencyStopQueues(null,sendResponse);return;}
+    if(!jobs.canPersist()||restoreControl(4)===1){emergencyStopQueues(null,sendResponse);return;}
+    revokeClickGrant(null);
     for (const [tabId, job] of jobs.entries()) {
         job.isRunning = false;
         job.isPaused = false;
@@ -2771,10 +2788,9 @@ async function sendPromptToSpecificTab(tabId, text, expectedJob = jobs.get(tabId
                 return {ok:false,error:'Queue target changed before native submission.',details:{failureClass:'non-retryable'}};
             }
             const token=createRunId();
-            const expiry=globalThis.CpoQueueEngine?.timestampMath?.(0,Date.now(),15000);
-            if(expiry==null||!Number.isFinite(expiry))return {ok:false,error:'Native authorization expiry unavailable.',details:{failureClass:'non-retryable'}};
-            const grant={token,job,used:false,expiresAt:expiry};
-            if(nativeClickGrants.has(tabId)) return {ok:false,error:'A native submission is already pending.',details:{failureClass:'transient'}};
+            const lease=grantControl(0,tabId);
+            if(!lease)return {ok:false,error:'Native submission authorization unavailable or already pending.',details:{failureClass:'transient'}};
+            const grant={token,job,lease};
             nativeClickGrants.set(tabId,grant);
             try {
                 const native=await sendTabMessage(tabId,{type:'NATIVE_SUBMIT_PROMPT',text,expectedKey,token});
@@ -2783,6 +2799,7 @@ async function sendPromptToSpecificTab(tabId, text, expectedJob = jobs.get(tabId
                 results=[{result:{ok:false,error:'Native submission outcome could not be confirmed.',details:{failureClass:'submission-unconfirmed'}}}];
             } finally {
                 if(nativeClickGrants.get(tabId)===grant)nativeClickGrants.delete(tabId);
+                grantControl(2,tabId,lease);
             }
         } else {
             return {ok:false,error:'Required native submission engine unavailable. Reload the conversation after reinstalling the extension.',details:{failureClass:'non-retryable'}};
@@ -2841,7 +2858,7 @@ async function sendPromptToSpecificTab(tabId, text, expectedJob = jobs.get(tabId
 }
 
 async function waitForTabResponse(tabId, context = {}) {
-    await globalThis.CpoQueueEngine?.load();
+    if(!await globalThis.CpoQueueEngine?.load())return {ok:false,error:'Required Rust queue engine unavailable.',details:{failureClass:'non-retryable'}};
     const queueSettings = {
         ...QUEUE_SETTINGS_DEFAULTS,
         ...context.queueSettings
@@ -2871,13 +2888,16 @@ async function waitForTabResponse(tabId, context = {}) {
     let sawGenerating = liveJob?.sawGenerating === true;
     let sawDeepResearch = liveJob?.sawDeepResearch === true;
     let lastResearchPreview = '';
-    let lastProgressLogAt = startedAt;
-    let waitCursor=0;
+    let lease;
+    try{lease=jobs.waitControl(liveJob,0,0,0,0,startedAt);}catch{}
+    if(!lease)return {ok:false,error:'Queue stopped or a native response wait is already active.',details:{failureClass:'user-stop'}};
+    const waitNative=(op,a=0,b=0,now=Date.now())=>{
+        try{return jobs.waitControl(liveJob,lease,op,a,b,now);}catch{return null;}
+    };
     const sample=(op,needed=1)=>{
-        const next=globalThis.CpoQueueEngine?.call('cpo_background_wait_sample',[waitCursor,op,Math.min(32767,Math.max(1,Math.ceil(needed)))]);
+        const next=waitNative(3,op,Math.min(32767,Math.max(1,Math.ceil(needed))));
         if(next==null)throw new Error('Native response confirmation unavailable.');
-        waitCursor=next&0x3fffffff;
-        return !!(next&0x40000000);
+        return next===1;
     };
     const waitLabel = getWaitContextLabel(context);
     const commandBinding = getCommandBinding(liveJob, context);
@@ -2886,32 +2906,10 @@ async function waitForTabResponse(tabId, context = {}) {
 
     // Save delivery-state transitions promptly, but coalesce unchanged
     // heartbeat writes to avoid serializing large queued commands every poll.
-    let lastWaitPersistedAt = 0;
-    let lastWaitPersistedSignature = '';
-    const persistWaitSignals = (force = false) => {
-        const current = jobs.get(tabId);
-        if (!current||current!==liveJob) return;
-        current.sawGenerating = sawGenerating;
-        current.sawDeepResearch = sawDeepResearch;
-        const signature = [
-            current.sawGenerating, current.sawDeepResearch,
-            current.currentPhase, current.deliveryState, current.lastResponsePhase,
-            current.submittedUserTurnId, current.assistantTurnId,
-            current.submissionAckSource, current.terminalAckSource
-        ].join('|');
-        const now = Date.now();
-        if(globalThis.CpoQueueEngine?.numeric('cpo_background_wait_persist',[
-            Number(force)|(Number(signature===lastWaitPersistedSignature)<<1),now-lastWaitPersistedAt])!==1)return;
-        lastWaitPersistedSignature = signature;
-        lastWaitPersistedAt = now;
-        current.updatedAt = now;
-        updateRunningJobsStorage();
-    };
-
-    const resolveMaxWaitMs = () => {
-        return globalThis.CpoQueueEngine?.backgroundWaitTimeout(
-            Number(unlimited)|(Number(queueSettings.queueDeepResearchAware)<<1)|(Number(sawDeepResearch)<<2),
-            ordinaryMaxWaitMs,deepResearchMaxWaitMs)??0;
+    const persistWaitSignals=(force=false)=>{
+        if(jobs.get(tabId)!==liveJob)return;
+        const flags=Number(force)|(Number(sawGenerating)<<1)|(Number(sawDeepResearch)<<2);
+        if(waitNative(4,flags)===1)updateRunningJobsStorage();
     };
 
     const buildWaitDetails = (extra = {}) => {
@@ -2930,7 +2928,6 @@ async function waitForTabResponse(tabId, context = {}) {
     return new Promise((resolveRaw) => {
         let settled = false;
         let checkInterval = null;
-        let pollInFlight = false;
         const resolve = (value) => {
             if (settled) {
                 return;
@@ -2939,72 +2936,49 @@ async function waitForTabResponse(tabId, context = {}) {
             if (checkInterval) {
                 clearInterval(checkInterval);
             }
-            persistWaitSignals(true);
-            resolveRaw(value);
+            try{persistWaitSignals(true);}
+            catch(error){console.warn('Native wait checkpoint could not be saved:',error);}
+            finally{waitNative(6);resolveRaw(value);}
         };
         const pollGeneration = () => {
             if (settled) {
                 clearInterval(checkInterval);
                 return;
             }
-            if (pollInFlight) return;
+            const ready=waitNative(7);
+            if(ready===0)return;
+            if(ready==null){resolve({ok:false,error:'Queue ownership changed or native wait unavailable.',details:{failureClass:'user-stop'}});return;}
 
             const job = jobs.get(tabId);
 
-            if (!job || job!==liveJob || job.isStopped) {
-                resolve({
-                    ok: false,
-                    error: 'Queue was stopped.',
-                    details: buildWaitDetails({ failureClass: 'user-stop' })
-                });
+            const flags=Number(!!job&&job===liveJob&&!job.isStopped)|
+                (Number(!!job&&job===liveJob&&job.isRunning&&!job.isPaused)<<1)|
+                (Number(unlimited)<<2)|(Number(queueSettings.queueDeepResearchAware)<<3)|(Number(sawDeepResearch)<<4);
+            const now=Date.now();
+            const gate=globalThis.CpoQueueEngine?.numeric('cpo_background_poll_gate',[
+                flags,now-startedAt,ordinaryMaxWaitMs,deepResearchMaxWaitMs,
+                now-Number(job?.lastResearchProgressAt||startedAt),deepResearchStaleMs]);
+            if(gate==null){resolve({ok:false,error:'Native response poll admission unavailable.',details:{failureClass:'non-retryable'}});return;}
+            if(gate===1||gate===2){
+                resolve({ok:false,error:gate===1?'Queue was stopped.':'Queue was paused.',
+                    details:buildWaitDetails({failureClass:gate===1?'user-stop':'non-retryable'})});
                 return;
             }
-
-            if (job.isPaused || !job.isRunning) {
-                resolve({
-                    ok: false,
-                    error: 'Queue was paused.',
-                    details: buildWaitDetails({ failureClass: 'non-retryable' })
-                });
+            if(gate===3){
+                const researchTimeout=queueSettings.queueDeepResearchAware&&sawDeepResearch;
+                resolve({ok:false,error:researchTimeout?'Timed out waiting for Deep Research to finish.':
+                    hasCommandBinding?'No terminal response was confirmed for this command.':'Timed out waiting for ChatGPT response.',
+                    details:buildWaitDetails({failureClass:'timeout',timedOut:true,pendingWithoutTerminal:true})});
                 return;
             }
-
-            const maxWaitMs = resolveMaxWaitMs();
-            if (Date.now() - startedAt > maxWaitMs) {
-                const researchTimeout = queueSettings.queueDeepResearchAware && sawDeepResearch;
-                resolve({
-                    ok: false,
-                    error: researchTimeout
-                        ? 'Timed out waiting for Deep Research to finish.'
-                        : (hasCommandBinding
-                            ? 'No terminal response was confirmed for this command.'
-                            : 'Timed out waiting for ChatGPT response.'),
-                    details: buildWaitDetails({
-                        failureClass: 'timeout',
-                        timedOut: true,
-                        pendingWithoutTerminal: true
-                    })
-                });
+            if(gate===4){
+                resolve({ok:false,error:'Deep Research stalled without progress.',
+                    details:buildWaitDetails({failureClass:'stalled-research',stalledResearch:true})});
                 return;
-            }
-
-            if (!unlimited && queueSettings.queueDeepResearchAware && sawDeepResearch) {
-                const lastProgressAt = Number(job.lastResearchProgressAt || startedAt);
-                if (Date.now() - lastProgressAt > deepResearchStaleMs) {
-                    resolve({
-                        ok: false,
-                        error: 'Deep Research stalled without progress.',
-                        details: buildWaitDetails({
-                            failureClass: 'stalled-research',
-                            stalledResearch: true
-                        })
-                    });
-                    return;
-                }
             }
 
             try {
-                pollInFlight = true;
+                if(waitNative(1)!==1){resolve({ok:false,error:'Native poll lease unavailable.',details:{failureClass:'non-retryable'}});return;}
                 sendTabMessage(tabId, { type: 'CHECK_GENERATION_STATE', commandBinding }).then((response) => {
                     if (settled) {
                         return;
@@ -3145,8 +3119,6 @@ async function waitForTabResponse(tabId, context = {}) {
 
                     sawGenerating = sawGenerating || !!state.generating || phase === 'active' || incompleteToolTurn;
                     sawDeepResearch = sawDeepResearch || deepResearchActive;
-                    job.sawGenerating = sawGenerating;
-                    job.sawDeepResearch = sawDeepResearch;
                     job.deliveryState = hasCommandBinding ? 'active-response' : job.deliveryState;
                     job.lastResponsePhase = incompleteToolTurn ? 'incomplete-tool' : (phase || 'active');
                     if (responseState?.assistantTurnId) {
@@ -3161,7 +3133,7 @@ async function waitForTabResponse(tabId, context = {}) {
 
                     persistWaitSignals();
 
-                    if (Date.now() - lastProgressLogAt > 30000) {
+                    if (waitNative(5)===1) {
                         logQueueEvent(tabId, 'info', `Still waiting for ${waitLabel}.`, {
                             commandNumber: context.commandNumber || 0,
                             totalMessages: context.totalMessages || 0,
@@ -3173,7 +3145,6 @@ async function waitForTabResponse(tabId, context = {}) {
                             responsePhase: incompleteToolTurn ? 'incomplete-tool' : (phase || 'active'),
                             settings: queueSettings
                         });
-                        lastProgressLogAt = Date.now();
                     }
 
                     return;
@@ -3277,7 +3248,7 @@ async function waitForTabResponse(tabId, context = {}) {
 
                 sample(0);
 
-                if (queueSettings.queueUnlimitedRetryWait && Date.now() - lastProgressLogAt > 30000) {
+                if (queueSettings.queueUnlimitedRetryWait && waitNative(5)===1) {
                     logQueueEvent(tabId, 'info', `Unlimited wait mode is still waiting for ${waitLabel}.`, {
                         commandNumber: context.commandNumber || 0,
                         totalMessages: context.totalMessages || 0,
@@ -3289,7 +3260,6 @@ async function waitForTabResponse(tabId, context = {}) {
                         responsePhase: phase || 'pending',
                         settings: queueSettings
                     });
-                    lastProgressLogAt = Date.now();
                 }
                 }).catch((executionError) => {
                     if (settled) {
@@ -3305,10 +3275,10 @@ async function waitForTabResponse(tabId, context = {}) {
                         })
                     });
                 }).finally(() => {
-                    pollInFlight = false;
+                    waitNative(2);
                 });
             } catch (error) {
-                pollInFlight = false;
+                waitNative(2);
                 clearInterval(checkInterval);
                 resolve({
                     ok: false,

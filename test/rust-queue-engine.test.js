@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 22);
+    assert.equal(e.cpo_queue_abi(), 23);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -668,4 +668,28 @@ test('native worker processing lease, response samples and checkpoint revisions'
     assert.equal(e.cpo_background_checkpoint(3,rev),1);
     assert.equal(e.cpo_background_checkpoint(4,rev),1);
     assert.equal(e.cpo_background_checkpoint_update(rev,0),1);
+});
+
+
+test('native wait leases isolate concurrent jobs and reject retired completions',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    const jobs=engine.createLiveJobs();
+    jobs.set(1,{tabId:1,queue:['a'],isRunning:true});jobs.set(2,{tabId:2,queue:['b'],isRunning:true});
+    const a=jobs.get(1),b=jobs.get(2);
+    const x=jobs.waitControl(a,0,0,0,0,1000),y=jobs.waitControl(b,0,0,0,0,1000);
+    assert.ok(x&&y&&x!==y);assert.equal(jobs.waitControl(a,0,0),0);
+    assert.equal(jobs.waitControl(a,x,1),1);assert.equal(jobs.waitControl(a,x,1),0);
+    assert.equal(jobs.waitControl(b,y,1),1);assert.equal(jobs.waitControl(a,y,2),null);
+    assert.equal(jobs.waitControl(a,x,3,3,2),0);assert.equal(jobs.waitControl(a,x,3,3,2),1);
+    assert.equal(jobs.waitControl(a,x,4,2,0,1100),1);
+    const rev=jobs.revision();assert.equal(jobs.waitControl(a,x,4,2,0,1200),0);assert.equal(jobs.revision(),rev);
+    assert.equal(jobs.waitControl(a,x,6),1);assert.equal(jobs.waitControl(a,x,2),null);
+    jobs.delete(2);assert.equal(jobs.waitControl(b,y,2),null);
+    const e=instance.exports,grant=e.cpo_background_grant(0,1,0,0,1000);
+    assert.ok(grant);assert.equal(e.cpo_background_grant(1,1,grant,3,1001),1);
+    assert.equal(e.cpo_background_grant(1,1,grant,3,1002),0);
+    const restore=e.cpo_background_restore(0,0);assert.ok(restore);
+    assert.equal(e.cpo_background_restore(0,0),0);e.cpo_background_restore(3,0);
+    assert.equal(e.cpo_background_restore(1,restore),0);
 });
