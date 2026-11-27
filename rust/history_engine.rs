@@ -17,7 +17,7 @@ const MAX_TURNS: u32 = 4096;
 const PAGE: u32 = 16;
 
 #[no_mangle]
-pub extern "C" fn cpo_history_abi() -> u32 { 2 }
+pub extern "C" fn cpo_history_abi() -> u32 { 3 }
 
 // Snapshot row framing: magic, index, role, truncation flag, reserved bytes,
 // UTF-8 length, UTF-8 text. UTF-8 is validated on both encode and decode.
@@ -269,9 +269,52 @@ pub extern "C" fn cpo_history_wipe_output(size: u32) {
     for i in 0..4096 { unsafe { core::ptr::write_volatile(table.add(i),0); } }
 }
 
+// Button mask: capture, discard, original, delete, previous, next.
+#[no_mangle]
+pub extern "C" fn cpo_reader_buttons(flags:u32, start:u32, count:u32)->u32 {
+    if flags & 1 != 0 { return 0; }
+    let mut out=0;
+    if flags & 2 != 0 { out|=1; }
+    if flags & 4 != 0 { out|=8; }
+    if flags & 8 != 0 {
+        out|=4;
+        if flags & 16 != 0 {out|=2;}
+        if start>0 {out|=16;}
+        if start.saturating_add(PAGE)<count {out|=32;}
+    }
+    out
+}
+#[no_mangle]
+pub extern "C" fn cpo_reader_move(start:u32, forward:u32)->u32 {
+    if forward!=0 {start.saturating_add(PAGE)} else {start.saturating_sub(PAGE)}
+}
+#[no_mangle]
+pub extern "C" fn cpo_reader_batch(offset:u32,total:u32,rows:u32,next:u32,flags:u32)->u32 {
+    (flags&3==3 && rows<=PAGE && offset<=total && next<=total &&
+        offset.checked_add(rows)==Some(next)) as u32
+}
+#[no_mangle]
+pub extern "C" fn cpo_reader_continue(count:u32,total:u32,accepted:u32,received:u32)->u32 {
+    (count<MAX_TURNS && count<total && accepted>0 && accepted==received) as u32
+}
+#[no_mangle]
+pub extern "C" fn cpo_reader_partial(count:u32,total:u32,truncated:u32)->u32 {
+    (count<total || truncated!=0) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reader_navigation_and_capture() {
+        assert_eq!(cpo_reader_buttons(2|4|8|16,16,40),63);
+        assert_eq!(cpo_reader_buttons(1|2|4|8,0,40),0);
+        assert_eq!(cpo_reader_move(0,0),0);
+        assert_eq!(cpo_reader_batch(16,20,4,20,3),1);
+        assert_eq!(cpo_reader_batch(16,20,5,21,3),0);
+        assert_eq!(cpo_reader_continue(4096,5000,16,16),0);
+        assert_eq!(cpo_reader_partial(4096,5000,0),1);
+    }
     #[test]
     fn lz_roundtrip_and_malformed_tokens() {
         let input = b"the same sentence the same sentence the same sentence";
