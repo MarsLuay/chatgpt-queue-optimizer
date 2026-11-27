@@ -189,6 +189,8 @@
     }
 
     function fingerprintCommandText(text) {
+        const native = globalThis.CpoQueueEngine?.fingerprint(text);
+        if (native != null) return native;
         const normalized = normalizeCommandText(text);
         let hash = 2166136261;
         for (let i = 0; i < normalized.length; i += 1) {
