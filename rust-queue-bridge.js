@@ -22,9 +22,10 @@
             'cpo_durable_field_count','cpo_durable_field_rule','cpo_durable_field_name','cpo_durable_default',
             'cpo_durable_number','cpo_durable_boolean','cpo_durable_retry_mode','cpo_durable_trim',
             'cpo_setting_number','cpo_setting_bool','cpo_popup_status','cpo_popup_remaining','cpo_popup_schedule_actions',
-            'cpo_log_duplicate','cpo_log_keep_start','cpo_log_limit','cpo_log_sensitive'];
+            'cpo_log_duplicate','cpo_log_keep_start','cpo_log_limit','cpo_log_sensitive',
+            'cpo_event_code','cpo_content_event_kind','cpo_api_mode'];
         if (!names.every(name => typeof exports[name] === 'function') ||
-            exports.cpo_queue_abi() !== 6 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
+            exports.cpo_queue_abi() !== 7 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
         core = exports;
         durableSchema = null;
         status = 'Rust/WASM';
@@ -32,7 +33,7 @@
     function fail(error) {
         core = null;
         status = 'unavailable';
-        console.warn('CPO: native queue engine unavailable; using compatible JS execution.', error);
+        console.warn('CPO: native queue engine unavailable; native effects suspended.', error);
     }
     function load() {
         if (core || status === 'unavailable') return Promise.resolve(!!core);
@@ -388,6 +389,10 @@
     function sensitiveKey(normalized) {
         return withUnits(normalized,(e,n)=>e.cpo_log_sensitive(n));
     }
+    function eventCode(domain,name) {
+        if(typeof name!=='string'||name.length>64)return 0;
+        return withUnits(name,(e,n)=>e.cpo_event_code(domain,n));
+    }
     function tabDiscard(tab, stage, mode, minutes, now, provider, work=false, unchanged=false, safe=false) {
         const flags=Number(!!tab && Number.isInteger(tab.id)) |
             (Number(tab?.active===false)<<1) | (Number(tab?.status==='complete')<<2) |
@@ -434,7 +439,7 @@
             (Number(!!job.waitForIdleBeforeSend) << 6);
         return call('cpo_queue_next', [flags, phase, job.queue.length]);
     }
-    const api = { load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, remaining, scheduledActions, sensitiveKey, tabDiscard, install, get status() { return status; } };
+    const api = { load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, remaining, scheduledActions, sensitiveKey, eventCode, tabDiscard, install, get status() { return status; } };
     globalThis.CpoQueueEngine = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();
