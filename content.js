@@ -1738,32 +1738,21 @@
       this.state._autoLoadInProgress = false;
 
       this.state.observer = new IntersectionObserver(([entry]) => {
-        const now = entry && entry.isIntersecting;
-
-        if (!now && this.state._autoWasIntersecting) {
-          this.state._autoArmed = true;
+        if(!this.state.optimizerBound)return;
+        const flags=Number(!!entry?.isIntersecting)|
+            (Number(this.state._autoWasIntersecting)<<1)|
+            (Number(this.state._autoArmed)<<2)|
+            (Number(this.state._autoLoadInProgress)<<3)|
+            (Number(this.state.hiddenCount>0)<<4);
+        const action=this.browserEngine?.intersection(flags);
+        if(action==null){this.unbindOptimizer();return;}
+        this.state._autoArmed=!!(action&1);
+        this.state._autoWasIntersecting=!!(action&2);
+        if(action&4){
+            this.state._autoLoadInProgress=true;
+            try{this.showOlderMessages();}
+            finally{requestAnimationFrame(()=>{this.state._autoLoadInProgress=false;});}
         }
-
-        if (
-          now &&
-          !this.state._autoWasIntersecting &&
-          this.state._autoArmed &&
-          !this.state._autoLoadInProgress &&
-          this.state.hiddenCount > 0
-        ) {
-          this.state._autoArmed = false;
-          this.state._autoLoadInProgress = true;
-
-          try {
-            this.showOlderMessages();
-          } finally {
-            requestAnimationFrame(() => {
-              this.state._autoLoadInProgress = false;
-            });
-          }
-        }
-
-        this.state._autoWasIntersecting = !!now;
       }, {
         root: null,
         rootMargin: '0px 0px -45% 0px',
