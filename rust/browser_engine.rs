@@ -608,6 +608,33 @@ mod ui {
         }
         h(122,0,0,0)
     }
+    // Scan UTF-16 prompt placeholders without copying the entire text into
+    // linear memory. Report ranges only; the host materializes matched names.
+    #[no_mangle]
+    pub extern "C" fn cpo_ui_variables(length:u32)->u32{
+        let mut i=0;let mut opened=None;
+        while i<length {
+            let ch=h(124,i,0,0);
+            let next=if i+1<length{h(124,i+1,0,0)}else{0};
+            if matches!(ch,10|13|0x2028|0x2029){opened=None;i+=1;continue;}
+            if let Some(start)=opened {
+                if ch==125&&next==125{
+                    h(125,start,i,0);opened=None;i+=2;continue;
+                }
+            }else if ch==123&&next==123{
+                opened=Some(i+2);i+=2;continue;
+            }
+            i+=1;
+        }
+        1
+    }
+    // Saved sequence operations: save=0, load=1, delete=2.
+    #[no_mangle]
+    pub extern "C" fn cpo_ui_saved_sequence(action:u32,flags:u32)->u32{
+        if flags&1==0{return 0;}
+        if action>2 || (action!=0&&flags&2==0){return 0;}
+        h(126,action,0,0)
+    }
     // Sequence edit effects: add=0, replace=1, remove=2, clear=3.
     // A missing or empty input is rejected before any mutation.
     #[no_mangle]
