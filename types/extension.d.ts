@@ -425,3 +425,6 @@ declare var CpoRustBrowserBridge: any;
 
 // Native queue policy and fingerprint bridge, shared across extension realms.
 declare var CpoQueueEngine: any;
+
+/** Shared browser API effect transport. */
+declare var CpoBrowserApi: { invoke(operation: string, ...args: any[]): Promise<any> };
