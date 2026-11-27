@@ -194,6 +194,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const optimizerAdaptive = document.getElementById('optimizer-adaptive-budget');
     const optimizerResourceBudget = document.getElementById('optimizer-resource-budget');
     const optimizerIdleMinutes = document.getElementById('optimizer-idle-minutes');
+    const optimizerHistory = document.getElementById('optimizer-history-reader');
     const optimizerToggle = document.getElementById('optimizer-toggle');
     const optimizerStats = document.getElementById('optimizer-stats');
 
@@ -2470,6 +2471,19 @@ The sequence should do the following: `;
     if (optimizerEvictMedia) optimizerEvictMedia.addEventListener('change', scheduleOptimizerAutoSave);
     if (optimizerAdaptive) optimizerAdaptive.addEventListener('change', scheduleOptimizerAutoSave);
     if (optimizerResourceBudget) optimizerResourceBudget.addEventListener('change', scheduleOptimizerAutoSave);
+
+    if (optimizerHistory) optimizerHistory.addEventListener('click', async () => {
+        try {
+            const tab = await getOptimizerTargetTab();
+            if (tab?.incognito) throw new Error('Local history is unavailable for private tabs.');
+            if (tab?.id && !tab.discarded) await ensureOptimizerContentScript(tab.id);
+            const url = chrome.runtime.getURL('history-viewer.html') + (tab?.id ? '?tab=' + encodeURIComponent(tab.id) : '');
+            await extensionApiPromise(done => chrome.tabs.create({ url, active: true }, done),
+                () => chrome.tabs.create({ url, active: true }));
+        } catch (error) {
+            setOptimizerStatus(error?.message || 'Could not open local history reader.', 'disabled');
+        }
+    });
 
     if (optimizerToggle) {
         optimizerToggle.addEventListener('click', async function () {
