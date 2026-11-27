@@ -77,6 +77,8 @@ global.chrome = {
     }
 };
 
+const nativeFixture=require('./native-provider-fixture.js');
+nativeFixture.initialize();
 const utils = require('../utils.js');
 const adapterModule = require('../rust-browser-bridge.js');
 const {

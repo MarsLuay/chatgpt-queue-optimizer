@@ -76,6 +76,8 @@ global.chrome = {
     }
 };
 
+const nativeFixture=require('./native-provider-fixture.js');
+nativeFixture.initialize();
 const utils = require('../utils.js');
 const adapterModule = require('../rust-browser-bridge.js');
 const { ChatGPTAdapter, ProviderAdapter, getProvider, getProviderForUrl } = adapterModule;
@@ -1983,7 +1985,7 @@ test('ChatGPT generation state detects maximum-length on the active surface only
 
 
 test('turn snapshot caches historical fingerprints without retaining message text', () => {
-    const adapter = new ChatGPTAdapter();
+    const adapter = nativeFixture.attach(new ChatGPTAdapter());
     let reads = 0;
     const turns = Array.from({ length: 6 }, (_, i) => {
         let value = 'Original user message ' + i;
@@ -2019,7 +2021,7 @@ test('turn snapshot caches historical fingerprints without retaining message tex
 });
 
 test('deduplication retains canonical turns instead of generic parent wrappers', () => {
-    const adapter = new ChatGPTAdapter();
+    const adapter = nativeFixture.attach(new ChatGPTAdapter());
     const wrapper = { tagName: 'DIV', parentElement: null, getAttribute: () => null };
     const turn = {
         tagName: 'ARTICLE', parentElement: wrapper,
@@ -2032,7 +2034,7 @@ test('deduplication retains canonical turns instead of generic parent wrappers',
 });
 
 test('ChatGPT response evaluation reuses a supplied generation snapshot without rescanning', () => {
-    const adapter = new ChatGPTAdapter();
+    const adapter = nativeFixture.attach(new ChatGPTAdapter());
     let generationReads = 0;
     adapter.getGenerationState = () => {
         generationReads += 1;
@@ -2059,7 +2061,7 @@ test('ChatGPT response evaluation reuses a supplied generation snapshot without 
 });
 
 test('ChatGPT turn discovery uses a single document-ordered selector query', () => {
-    const adapter = new ChatGPTAdapter();
+    const adapter = nativeFixture.attach(new ChatGPTAdapter());
     const first = { id: 'first' };
     const second = { id: 'second' };
     let calls = 0;
@@ -2075,7 +2077,7 @@ test('ChatGPT turn discovery uses a single document-ordered selector query', () 
 });
 
 test('ChatGPT turn discovery retains selector-by-selector fallback', () => {
-    const adapter = new ChatGPTAdapter();
+    const adapter = nativeFixture.attach(new ChatGPTAdapter());
     const one = { id: 'one' };
     const two = { id: 'two' };
     const selectors = adapter.compatibilitySignals.turnContext;
@@ -2091,7 +2093,7 @@ test('ChatGPT turn discovery retains selector-by-selector fallback', () => {
 });
 
 test('ChatGPT turn list cache avoids repeated DOM scans until structural changes', () => {
-    const adapter = new ChatGPTAdapter();
+    const adapter = nativeFixture.attach(new ChatGPTAdapter());
     const parent = {
         nodeType: 1,
         parentElement: null,
@@ -2121,7 +2123,7 @@ test('ChatGPT turn list cache avoids repeated DOM scans until structural changes
 });
 
 test('ChatGPT turn list cache invalidates when a canonical turn marker changes', () => {
-    const adapter = new ChatGPTAdapter();
+    const adapter = nativeFixture.attach(new ChatGPTAdapter());
     const node = { nodeType: 1, parentElement: null };
     let queries = 0;
     const doc = { querySelectorAll() { queries++; return [node]; } };
@@ -2135,7 +2137,7 @@ test('ChatGPT turn list cache invalidates when a canonical turn marker changes',
 });
 
 test('active-response scoping uses the nearest turn ancestor', () => {
-    const adapter = new ChatGPTAdapter();
+    const adapter = nativeFixture.attach(new ChatGPTAdapter());
     const previous = { parentElement: null };
     const latest = { parentElement: null };
     const oldButton = { parentElement: previous };

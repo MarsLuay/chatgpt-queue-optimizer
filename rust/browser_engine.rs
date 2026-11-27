@@ -20,7 +20,7 @@ fn h(op: u32, a: u32, b: u32, c: u32) -> u32 {
 }
 
 #[no_mangle]
-pub extern "C" fn cpo_browser_abi() -> u32 { 12 }
+pub extern "C" fn cpo_browser_abi() -> u32 { 13 }
 
 #[cfg(target_arch = "wasm32")]
 mod sequence;
@@ -981,4 +981,27 @@ pub extern "C" fn cpo_provider_scan_turns(count:u32,cache:u32,exact:u32)->u32{
         if h(175,index,role,flags)!=1{return 0;}
     }
     1
+}
+
+
+// Provider observation order and signal selection. The host exposes
+// selector queries, DOM properties and the queue engine's semantic matcher.
+// Output uses the queue generation observation flags.
+#[cfg(target_arch="wasm32")]
+#[no_mangle]
+pub extern "C" fn cpo_provider_observe_generation(provider:u32)->u32{
+    if !(1..=3).contains(&provider){return u32::MAX;}
+    let chat=provider==1;
+    let mut flags=0u32;
+    if chat&&h(176,0,0,0)!=0{flags|=8;}
+    // A canonical stop selector wins. Avoid scanning every button for the
+    // semantic fallback when the canonical control is present.
+    if chat&&h(176,1,0,0)!=0{flags|=1;}
+    else if h(176,2,provider,0)!=0{flags|=1;}
+    if h(176,3,provider,0)!=0{flags|=2;}
+    h(176,4,provider,0);
+    if chat&&h(176,5,0,0)!=0{flags|=4;}
+    h(176,6,provider,0);
+    if h(176,7,provider,0)!=0{flags|=16;}
+    flags
 }

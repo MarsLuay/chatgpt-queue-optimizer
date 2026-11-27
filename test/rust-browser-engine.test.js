@@ -23,7 +23,7 @@ async function engine(optimizer = owner()) {
         cpo: { host: (op, a, b, c) => bridge.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
     });
     bridge.exports = result.instance.exports;
-    assert.equal(bridge.exports.cpo_browser_abi(), 12);
+    assert.equal(bridge.exports.cpo_browser_abi(), 13);
     return bridge;
 }
 
@@ -388,5 +388,17 @@ test('native provider traversal collects rows and skips assistant-only inspectio
     const rows=bridge.providerScanTurns(adapter,[node],expected,queue.fingerprint(expected),true);
     const snapshot=queue.providerTurnSnapshot(rows,queue.fingerprint(expected),true);
     assert.equal(snapshot.matchedUserTurnId,'u1');
+    assert.equal(bridge.context,null);
+});
+
+test('native observation orders canonical generation signals before fallback',{skip},async()=>{
+    const bridge=await engine();
+    const calls=[];
+    const adapter={id:'chatgpt',isActiveResponseNode:()=>true,getSelectorMatch(_doc,key){calls.push(key);return {element:key==='stopButton'?{}:null,selector:key==='stopButton'?'canonical-stop':''};},getSelectorNodes(_doc,key){calls.push(key);return [];},getRetryButtonMatch(){calls.push('retry');return {element:null};}};
+    const doc={querySelectorAll(){throw new Error('canonical stop must skip semantic button scan');}};
+    const result=bridge.providerObserveGeneration(adapter,doc,[]);
+    assert.equal(result.flags,1);
+    assert.equal(result.signals.stopButton,'canonical-stop');
+    assert.deepEqual(calls,['stopButton','streaming','status','spinner','errorAlerts','retry']);
     assert.equal(bridge.context,null);
 });

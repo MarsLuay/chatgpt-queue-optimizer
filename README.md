@@ -310,3 +310,7 @@ Completed-turn fingerprints, normalized-prefix error detection, text presence an
 ### Native streaming exact-match and turn traversal (browser ABI 12)
 
 The browser engine now drives the provider turn-observation loop, role classification, cache eligibility, candidate verification and assistant-only inspection. Exact expected-text matching compares normalized UTF-16 streams with two fixed-size buffers, preserving whitespace semantics and surrogate code units without allocating normalized full-text copies. The bridge exposes only DOM facts and call-local text chunks, and the queue engine retains ownership of metadata and snapshot settlement. No native compilation or live browser parity verification has been performed.
+
+### Native generation observation scheduling (browser ABI 13)
+
+The browser engine controls generation observation stages and canonical-stop precedence. The bridge supplies scoped DOM queries and passes native semantic observations to the queue engine. Gemini and Claude now share one observation projection. Provider integration fixtures initialize real compiled WASM engines instead of relying on removed JavaScript fallbacks; the full test suite still requires validation and remaining fixture migration.

@@ -21,11 +21,11 @@
                     cpo: { host: (op, a, b, c) => this.host(op >>> 0, a >>> 0, b >>> 0, c >>> 0) >>> 0 }
                 });
                 const core = result.instance.exports;
-                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 12 ||
+                if (typeof core.cpo_browser_abi !== 'function' || core.cpo_browser_abi() !== 13 ||
                     !['cpo_collect_resources', 'cpo_discover_messages', 'cpo_execute_media',
                         'cpo_apply_window', 'cpo_window_visible', 'cpo_capture_history', 'cpo_process_mutations',
                         'cpo_cache_ttl', 'cpo_cache_valid', 'cpo_cache_nodes_valid', 'cpo_mutation_delay', 'cpo_provider_selectors', 'cpo_dom_composer_write', 'cpo_dom_composer_read',
-                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool', 'cpo_ui_render', 'cpo_ui_sequence_edit', 'cpo_ui_next_limit', 'cpo_ui_sequence_select', 'cpo_ui_variables', 'cpo_ui_saved_sequence', 'cpo_sequence_import', 'cpo_sequence_substitute', 'cpo_event_ready','cpo_restore_window','cpo_restore_journal','cpo_intersection_transition','cpo_message_predicate','cpo_first_matching_selector','cpo_dom_event_ancestor','cpo_dom_normalize_turn','cpo_dom_last_assistant','cpo_provider_turns','cpo_provider_exact_text','cpo_provider_scan_turns'].every(name => typeof core[name] === 'function')) {
+                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool', 'cpo_ui_render', 'cpo_ui_sequence_edit', 'cpo_ui_next_limit', 'cpo_ui_sequence_select', 'cpo_ui_variables', 'cpo_ui_saved_sequence', 'cpo_sequence_import', 'cpo_sequence_substitute', 'cpo_event_ready','cpo_restore_window','cpo_restore_journal','cpo_intersection_transition','cpo_message_predicate','cpo_first_matching_selector','cpo_dom_event_ancestor','cpo_dom_normalize_turn','cpo_dom_last_assistant','cpo_provider_turns','cpo_provider_exact_text','cpo_provider_scan_turns','cpo_provider_observe_generation'].every(name => typeof core[name] === 'function')) {
                     throw new Error('Browser WASM ABI mismatch');
                 }
                 this.exports = core;
@@ -159,6 +159,16 @@
             return this.invoke({root,selectors,seen:new Set(),nodes:[]},(core,ctx)=>{
                 if(core.cpo_provider_turns(selectors.length)!==ctx.nodes.length)throw new Error('Native turn discovery count mismatch');
                 return ctx.nodes;
+            });
+        }
+        providerObserveGeneration(adapter,doc,turns=[]){
+            const provider={chatgpt:1,gemini:2,claude:3}[adapter.id];
+            const latest=turns.at(-1)||null;
+            const ctx={adapter,doc,turns,latest,members:new Set(turns),signals:{},statusRaw:'',alerts:'',buttons:null};
+            return this.invoke(ctx,(core,state)=>{
+                const flags=core.cpo_provider_observe_generation(provider)>>>0;
+                if(flags===0xffffffff)throw new Error('Unsupported native generation provider');
+                return {flags,statusRaw:state.statusRaw,alerts:state.alerts,signals:state.signals};
             });
         }
         providerExactText(left,right){
@@ -572,6 +582,69 @@
                     ctx.rows.push([b,ctx.node?.getAttribute?.('data-message-id')||'',ctx.node?.getAttribute?.('data-testid')||'',ctx.metadata.fingerprint,c,ctx.metadata.errorSignal]);
                     ctx.node=null;ctx.rawText=null;ctx.metadata=null;
                     return 1;
+                }
+                case 176:{
+                    const {adapter,doc,turns,latest,members,signals}=ctx;
+                    const chat=adapter.id==='chatgpt';
+                    const active=node=>!chat||adapter.isActiveResponseNode(node,turns,latest,members);
+                    const visible=node=>!node.hidden&&node.getAttribute?.('aria-hidden')!=='true';
+                    const outer=this.context;
+                    this.context=null;
+                    try{
+                        const buttons=()=>ctx.buttons??(ctx.buttons=Array.from(doc.querySelectorAll('button')||[]).filter(active));
+                        switch(a){
+                            case 0:{
+                                const error=getNodeRole(latest,this)==='assistant'&&hasAssistantErrorStop(latest,this);
+                                signals.assistantErrorStop=error;return Number(error);
+                            }
+                            case 1:{
+                                const match=adapter.getSelectorMatch(doc,'stopButton',node=>active(node)&&!node.disabled&&node.getAttribute?.('aria-disabled')!=='true');
+                                signals.stopButton=match.selector||null;return Number(!!match.element);
+                            }
+                            case 2:{
+                                const match=requireNative(globalThis.CpoQueueEngine?.providerButtons(b,0,buttons()))[0];
+                                if(match)signals.stopButton='stopButton.semantic';
+                                return Number(!!match);
+                            }
+                            case 3:{
+                                if(chat){
+                                    const match=adapter.getSelectorMatch(doc,'streaming',active);
+                                    signals.streaming=match.selector||null;return Number(!!match.element);
+                                }
+                                try{return Number(!!doc.querySelector(adapter.selectors.streaming.join(',')));}catch{return 0;}
+                            }
+                            case 4:{
+                                let nodes=[];
+                                if(chat){
+                                    const matches=adapter.getSelectorNodes(doc,'status',node=>active(node)&&node.getAttribute?.('aria-live')!=='off');
+                                    signals.status=matches[0]?.selector||null;
+                                    nodes=matches.map(match=>match.element);
+                                }else{
+                                    try{nodes=Array.from(doc.querySelectorAll(adapter.selectors.status.join(','))).filter(node=>node.getAttribute?.('aria-live')!=='off');}catch{}
+                                }
+                                ctx.statusRaw=nodes.filter(visible).map(node=>node.innerText||node.textContent||'').join(' ');
+                                return 1;
+                            }
+                            case 5:{
+                                const match=adapter.getSelectorMatch(doc,'spinner',node=>active(node)&&visible(node));
+                                signals.spinner=match.selector||null;return Number(!!match.element);
+                            }
+                            case 6:{
+                                const matches=adapter.getSelectorNodes(doc,'errorAlerts',chat?active:null);
+                                signals.alert=matches[0]?.selector||null;
+                                ctx.alerts=matches.map(match=>match.element.innerText||match.element.textContent||'').join(' ');
+                                return 1;
+                            }
+                            case 7:{
+                                if(chat){
+                                    const match=adapter.getRetryButtonMatch(doc);
+                                    signals.retry=match.selector||match.signalKey||null;return Number(!!match.element);
+                                }
+                                return Number(requireNative(globalThis.CpoQueueEngine?.providerButtons(b,1,buttons())).length>0);
+                            }
+                            default:return 0;
+                        }
+                    }finally{this.context=outer;}
                 }
                 case 80: {
                     const selector = ctx.selectors[a];
@@ -1629,43 +1702,10 @@
                 };
             }
 
-            const turns = this.getConversationTurns(doc);
-            const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
-            const assistantErrorStop = getNodeRole(latestTurn, this._nativeSelectorEngine) === 'assistant' && hasAssistantErrorStop(latestTurn, this._nativeSelectorEngine);
-            const turnSet = new Set(turns);
-            const inActiveSurface = (node) => this.isActiveResponseNode(node, turns, latestTurn, turnSet);
-
-            const buttons = Array.from(doc.querySelectorAll('button')).filter(inActiveSurface);
-            const stopSelectorMatch = this.getSelectorMatch(doc, 'stopButton', (button) => {
-                return inActiveSurface(button) && !button.disabled && button.getAttribute('aria-disabled') !== 'true';
-            });
-            const semanticStopButton=requireNative(globalThis.CpoQueueEngine?.providerButtons(1,0,buttons))[0];
-            const stopButton = stopSelectorMatch.element || semanticStopButton;
-            const hasActiveStopButton = !!stopButton;
-
-            const streamingMatches = this.getSelectorNodes(doc, 'streaming', inActiveSurface);
-            const streamingMatch = streamingMatches[0] || { element: null, selector: '' };
-            const hasResultStreaming = !!streamingMatch.element;
-
-            const statusMatches = this.getSelectorNodes(doc, 'status', (node) => {
-                return inActiveSurface(node) && node.getAttribute('aria-live') !== 'off';
-            });
-            const visibleActiveNodes = statusMatches
-                .map(match => match.element)
-                .filter(node => !node.hidden && node.getAttribute('aria-hidden') !== 'true');
-
-            const spinnerMatches = this.getSelectorNodes(doc, 'spinner', (node) => {
-                return inActiveSurface(node) && !node.hidden && node.getAttribute('aria-hidden') !== 'true';
-            });
-            const hasActiveSpinner = spinnerMatches.length > 0;
-
-            const statusRaw=visibleActiveNodes.map(node=>node.innerText||node.textContent||'').join(' ');
-            const alertMatches=this.getSelectorNodes(doc,'errorAlerts',inActiveSurface);
-            const alerts=alertMatches.map(match=>match.element.innerText||match.element.textContent||'').join(' ');
-            const retryMatch=this.getRetryButtonMatch(doc);
-            const flags=Number(hasActiveStopButton)|(Number(hasResultStreaming)<<1)|(Number(hasActiveSpinner)<<2)|(Number(assistantErrorStop)<<3)|(Number(!!retryMatch.element)<<4);
-            const observation=requireNative(globalThis.CpoQueueEngine?.providerGenerationState(1,statusRaw,alerts,flags));
-            const {statusText,research:matchedResearchMarker,error:matchedError,snippet:errorSnippet,timeout:hasDeliveryTimedOut,capacity:conversationCapacityReached,generating,deepResearchActive,statusUnknown,compatibilityState,hasActiveToolOrResearch,hasKnownError,hasTryAgainButton}=observation;
+            const turns=this.getConversationTurns(doc);
+            const {flags,statusRaw,alerts,signals}=requireNative(this._nativeSelectorEngine?.providerObserveGeneration(this,doc,turns));
+            const hasActiveStopButton=!!(flags&1),hasResultStreaming=!!(flags&2);
+            const {statusText,research:matchedResearchMarker,error:matchedError,snippet:errorSnippet,timeout:hasDeliveryTimedOut,capacity:conversationCapacityReached,generating,deepResearchActive,statusUnknown,compatibilityState,hasActiveToolOrResearch,hasKnownError,hasTryAgainButton}=requireNative(globalThis.CpoQueueEngine?.providerGenerationState(1,statusRaw,alerts,flags));
 
             const url = typeof location !== 'undefined' ? location.href : (doc.defaultView?.location?.href || '');
             const title = typeof document !== 'undefined' ? document.title : (doc.title || '');
@@ -1688,17 +1728,15 @@
                 statusUnknown,
                 compatibilityState,
                 matchedSignals: {
-                    stopButton: stopSelectorMatch.selector || (semanticStopButton ? 'stopButton.semantic' : null),
-                    streaming: streamingMatch.selector || null,
-                    status: statusMatches[0]?.selector || null,
-                    spinner: spinnerMatches[0]?.selector || null,
+                    stopButton: signals.stopButton||null,
+                    streaming: signals.streaming||null,
+                    status: signals.status||null,
+                    spinner: signals.spinner||null,
                     research: matchedResearchMarker ? `researchMarkers:${matchedResearchMarker}` : null,
                     error: conversationCapacityReached
-                        ? (alertMatches[0]?.selector || statusMatches[0]?.selector || 'conversationCapacityMarkers')
-                        : (assistantErrorStop
-                            ? 'assistant-error-stop'
-                            : (alertMatches[0]?.selector || (hasTryAgainButton ? retryMatch.selector || retryMatch.signalKey : null))),
-                    retry: hasTryAgainButton ? (retryMatch.selector || retryMatch.signalKey) : null,
+                        ? (signals.alert||signals.status||'conversationCapacityMarkers')
+                        : (signals.assistantErrorStop?'assistant-error-stop':(signals.alert||(hasTryAgainButton?signals.retry:null))),
+                    retry: hasTryAgainButton?signals.retry:null,
                     scope: 'active-response',
                     compatibility: compatibilityState
                 },
@@ -1831,6 +1869,13 @@
 
     const GEMINI_SELECTORS = catalogView(2);
 
+    function externalGeneration(adapter,doc){
+        if(!doc)return {generating:false,hasActiveStopButton:false,hasResultStreaming:false,hasActiveToolOrResearch:false,deepResearchActive:false,matchedResearchMarker:null,researchStatusPreview:null,hasError:false,hasTryAgainButton:false,errorSnippet:'',matchedError:'',url:'',title:''};
+        const {flags,statusRaw,alerts}=requireNative(adapter._nativeSelectorEngine?.providerObserveGeneration(adapter,doc));
+        const {statusText,research:matchedResearchMarker,error:matchedError,snippet:errorSnippet,hasActiveToolOrResearch,hasKnownError,hasTryAgainButton,generating}=requireNative(globalThis.CpoQueueEngine?.providerGenerationState(PROVIDER_CODES[adapter.id],statusRaw,alerts,flags));
+        return {generating,hasActiveStopButton:!!(flags&1),hasResultStreaming:!!(flags&2),hasActiveToolOrResearch,deepResearchActive:false,matchedResearchMarker,researchStatusPreview:statusText,hasError:hasKnownError,hasTryAgainButton,errorSnippet,matchedError,url:typeof location!=='undefined'?location.href:(doc.defaultView?.location?.href||''),title:typeof document!=='undefined'?document.title:(doc.title||'')};
+    }
+
     class GeminiAdapter extends ProviderAdapter {
         constructor() {
             super('gemini', 'Gemini', {
@@ -1911,71 +1956,7 @@
             if(this._nativeSelectorEngine?.composerWrite(2,composer,'',0)!==true)throw new Error('Native composer clear unavailable.');
         }
         getGenerationState(doc = (typeof document !== 'undefined' ? document : null)) {
-            if (!doc) {
-                return {
-                    generating: false,
-                    hasActiveStopButton: false,
-                    hasResultStreaming: false,
-                    hasActiveToolOrResearch: false,
-                    deepResearchActive: false,
-                    matchedResearchMarker: null,
-                    researchStatusPreview: null,
-                    hasError: false,
-                    hasTryAgainButton: false,
-                    errorSnippet: '',
-                    matchedError: '',
-                    url: '',
-                    title: ''
-                };
-            }
-
-            const buttons = Array.from(doc.querySelectorAll('button') || []);
-            const stopButton=requireNative(globalThis.CpoQueueEngine?.providerButtons(2,0,buttons))[0];
-            const hasActiveStopButton = !!stopButton;
-
-            const streamingSelector = this.selectors.streaming.join(',');
-            let hasResultStreaming = false;
-            try {
-                hasResultStreaming = !!doc.querySelector(streamingSelector);
-            } catch {
-                hasResultStreaming = false;
-            }
-
-            const statusSelector = this.selectors.status.join(',');
-            let statusNodes = [];
-            try {
-                statusNodes = Array.from(doc.querySelectorAll(statusSelector))
-                    .filter(node => node.getAttribute?.('aria-live') !== 'off');
-            } catch {
-                statusNodes = [];
-            }
-
-            const visibleActiveNodes = statusNodes.filter(node => !node.hidden && node.getAttribute?.('aria-hidden') !== 'true');
-            const statusRaw=visibleActiveNodes.map(node=>node.innerText||node.textContent||'').join(' ');
-            const alertMatches=this.getSelectorNodes(doc,'errorAlerts');
-            const alertText=alertMatches.map(match=>match.element.innerText||match.element.textContent||'').join(' ');
-            const retry=requireNative(globalThis.CpoQueueEngine?.providerButtons(2,1,buttons)).length>0;
-            const flags=Number(hasActiveStopButton)|(Number(hasResultStreaming)<<1)|(Number(retry)<<4);
-            const {statusText,research:matchedResearchMarker,error:matchedError,snippet:errorSnippet,hasActiveToolOrResearch,hasKnownError,hasTryAgainButton,generating}=requireNative(globalThis.CpoQueueEngine?.providerGenerationState(2,statusRaw,alertText,flags));
-
-            const url = typeof location !== 'undefined' ? location.href : (doc.defaultView?.location?.href || '');
-            const title = typeof document !== 'undefined' ? document.title : (doc.title || '');
-
-            return {
-                generating,
-                hasActiveStopButton,
-                hasResultStreaming,
-                hasActiveToolOrResearch,
-                deepResearchActive: false,
-                matchedResearchMarker,
-                researchStatusPreview: statusText,
-                hasError: hasKnownError,
-                hasTryAgainButton: !!hasTryAgainButton,
-                errorSnippet,
-                matchedError,
-                url,
-                title
-            };
+            return externalGeneration(this,doc);
         }
 
         getMainRoot() {
@@ -2074,71 +2055,7 @@
             if(this._nativeSelectorEngine?.composerWrite(3,composer,'',0)!==true)throw new Error('Native composer clear unavailable.');
         }
         getGenerationState(doc = (typeof document !== 'undefined' ? document : null)) {
-            if (!doc) {
-                return {
-                    generating: false,
-                    hasActiveStopButton: false,
-                    hasResultStreaming: false,
-                    hasActiveToolOrResearch: false,
-                    deepResearchActive: false,
-                    matchedResearchMarker: null,
-                    researchStatusPreview: null,
-                    hasError: false,
-                    hasTryAgainButton: false,
-                    errorSnippet: '',
-                    matchedError: '',
-                    url: '',
-                    title: ''
-                };
-            }
-
-            const buttons = Array.from(doc.querySelectorAll('button') || []);
-            const stopButton=requireNative(globalThis.CpoQueueEngine?.providerButtons(3,0,buttons))[0];
-            const hasActiveStopButton = !!stopButton;
-
-            const streamingSelector = this.selectors.streaming.join(',');
-            let hasResultStreaming = false;
-            try {
-                hasResultStreaming = !!doc.querySelector(streamingSelector);
-            } catch {
-                hasResultStreaming = false;
-            }
-
-            const statusSelector = this.selectors.status.join(',');
-            let statusNodes = [];
-            try {
-                statusNodes = Array.from(doc.querySelectorAll(statusSelector))
-                    .filter(node => node.getAttribute?.('aria-live') !== 'off');
-            } catch {
-                statusNodes = [];
-            }
-
-            const visibleActiveNodes = statusNodes.filter(node => !node.hidden && node.getAttribute?.('aria-hidden') !== 'true');
-            const statusRaw=visibleActiveNodes.map(node=>node.innerText||node.textContent||'').join(' ');
-            const alertMatches=this.getSelectorNodes(doc,'errorAlerts');
-            const alertText=alertMatches.map(match=>match.element.innerText||match.element.textContent||'').join(' ');
-            const retry=requireNative(globalThis.CpoQueueEngine?.providerButtons(3,1,buttons)).length>0;
-            const flags=Number(hasActiveStopButton)|(Number(hasResultStreaming)<<1)|(Number(retry)<<4);
-            const {statusText,research:matchedResearchMarker,error:matchedError,snippet:errorSnippet,hasActiveToolOrResearch,hasKnownError,hasTryAgainButton,generating}=requireNative(globalThis.CpoQueueEngine?.providerGenerationState(3,statusRaw,alertText,flags));
-
-            const url = typeof location !== 'undefined' ? location.href : (doc.defaultView?.location?.href || '');
-            const title = typeof document !== 'undefined' ? document.title : (doc.title || '');
-
-            return {
-                generating,
-                hasActiveStopButton,
-                hasResultStreaming,
-                hasActiveToolOrResearch,
-                deepResearchActive: false,
-                matchedResearchMarker,
-                researchStatusPreview: statusText,
-                hasError: hasKnownError,
-                hasTryAgainButton: !!hasTryAgainButton,
-                errorSnippet,
-                matchedError,
-                url,
-                title
-            };
+            return externalGeneration(this,doc);
         }
 
         getMainRoot() {
