@@ -5,7 +5,7 @@
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! { core::arch::wasm32::unreachable() }
 
 #[no_mangle]
-pub extern "C" fn cpo_queue_abi() -> u32 { 7 }
+pub extern "C" fn cpo_queue_abi() -> u32 { 8 }
 
 const OFFSET: u32 = 2166136261;
 const PRIME: u32 = 16777619;
@@ -711,7 +711,7 @@ pub extern "C" fn cpo_log_sensitive(len:u32)->u32 {
 // Browser message/API dispatch tables. Unknown names never authorize effects.
 const CONTENT_EVENTS: &[&[u8]] = &[b"GET_NATIVE_SUBMISSION_CAPABILITY",b"NATIVE_SUBMIT_PROMPT",b"TOGGLE_OPTIMIZER",b"UPDATE_CONFIG",b"CPO_HISTORY_BATCH",b"CAN_DISCARD_INACTIVE_TAB",b"GET_STATUS",b"GET_CONVERSATION_IDENTITY",b"CHECK_GENERATION_STATE",b"GET_COMMAND_TURN_SNAPSHOT",b"GET_COMMAND_RESPONSE_STATE",b"INSPECT_GENERATION_STATE",b"CLICK_RETRY_BUTTON",b"RELOAD_PAGE",b"GET_ENTER_DIAGNOSTICS",b"DEBUG_MESSAGES"];
 const BACKGROUND_EVENTS: &[&[u8]] = &[b"authorizeNativeQueueClick",b"discardHistorySource",b"startSequence",b"enqueueMessage",b"retryPausedJob",b"stopSequence",b"stopAllSequences",b"getRunningJobs",b"getQueueDebugLogs",b"clearQueueDebugLogs",b"logAutomationEvent",b"scheduleMessage",b"listScheduledMessages",b"cancelScheduledMessage",b"deleteScheduledMessage",b"retryScheduledMessage"];
-const API_EVENTS: &[&[u8]] = &[b"localGet",b"localSet",b"syncGet",b"syncSet",b"tabGet",b"tabQuery",b"tabUpdate",b"tabCreate",b"tabSend",b"runtimeSend",b"tabDiscard",b"tabReload"];
+const API_EVENTS: &[&[u8]] = &[b"localGet",b"localSet",b"syncGet",b"syncSet",b"tabGet",b"tabQuery",b"tabUpdate",b"tabCreate",b"tabSend",b"runtimeSend",b"tabDiscard",b"tabReload",b"scriptExecute",b"cssInsert",b"legacyScriptExecute",b"legacyCssInsert"];
 fn event_code(domain:u32, input:&[u16])->u32 {
     let table=match domain {0=>CONTENT_EVENTS,1=>BACKGROUND_EVENTS,2=>API_EVENTS,_=>return 0};
     table.iter().position(|name|ascii_eq(input,name)).map_or(0,|i|i as u32+1)
@@ -732,14 +732,60 @@ pub extern "C" fn cpo_content_event_kind(code:u32)->u32 {
 // operation/argument count and never retry a mutating operation.
 #[no_mangle]
 pub extern "C" fn cpo_api_mode(code:u32,argc:u32,flags:u32)->u32 {
-    let expected=match code{1..=6|8|10|11=>1,7|9=>2,12=>1,_=>return 0};
+    let expected=match code{1..=6|8|10..=14=>1,7|9|15|16=>2,_=>return 0};
     if argc!=expected{return 0;}
     if flags&1!=0{1}else if flags&2!=0{2}else{0}
 }
 
+// Platform method paths are owned by Rust. Host resolves each component
+// against browser/chrome, preserving the original receiver.
+const API_PATHS: &[&[u8]] = &[
+    b"storage.local.get",b"storage.local.set",b"storage.sync.get",b"storage.sync.set",
+    b"tabs.get",b"tabs.query",b"tabs.update",b"tabs.create",b"tabs.sendMessage",
+    b"runtime.sendMessage",b"tabs.discard",b"tabs.reload",b"scripting.executeScript",
+    b"scripting.insertCSS",b"tabs.executeScript",b"tabs.insertCSS",
+];
+#[no_mangle]
+pub extern "C" fn cpo_api_path(code:u32,offset:u32)->u32 {
+    let Some(path)=code.checked_sub(1).and_then(|i|API_PATHS.get(i as usize)) else{return 0;};
+    let mut packed=0;
+    for i in 0..4 {if let Some(&ch)=path.get(offset as usize+i){packed|=u32::from(ch)<<(i*8);}}
+    packed
+}
+// Injection selection occurs before any effect: modern API takes precedence.
+// Legacy accepts one file or one function; CSS accepts only one file.
+// flags: modern available=1, legacy available=2, single file=4,
+// function=8, valid tab=16. Return a single API opcode.
+#[no_mangle]
+pub extern "C" fn cpo_injection_route(css:u32,flags:u32)->u32 {
+    if flags&16==0{return 0;}
+    if flags&1!=0{return if css==0{13}else{14};}
+    if flags&2==0{return 0;}
+    if flags&4!=0 || (css==0&&flags&8!=0){if css==0{15}else{16}}else{0}
+}
+// Completion state is call-local, not a persistent global handle table.
+// 0 pending, 1 fulfilled, 2 rejected. A second completion is ignored.
+// event: 1 successful callback/promise, 2 rejection or thrown exception.
+#[no_mangle]
+pub extern "C" fn cpo_async_transition(state:u32,event:u32)->u32 {
+    if state==0 && matches!(event,1|2){event}else{0}
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn host_transport_contract() {
+        assert_eq!(cpo_api_path(1,0),u32::from_le_bytes(*b"stor"));
+        assert_eq!(cpo_api_path(16,0),u32::from_le_bytes(*b"tabs"));
+        assert_eq!(cpo_api_path(0,0),0);
+        assert_eq!(cpo_injection_route(0,1|2|4|16),13);
+        assert_eq!(cpo_injection_route(1,2|4|16),16);
+        assert_eq!(cpo_injection_route(1,2|8|16),0);
+        assert_eq!(cpo_async_transition(0,1),1);
+        assert_eq!(cpo_async_transition(0,2),2);
+        assert_eq!(cpo_async_transition(1,2),0);
+        assert_eq!(cpo_async_transition(2,1),0);
+    }
     #[test]
     fn browser_event_dispatch() {
         assert_eq!(event_code(0,&"CPO_HISTORY_BATCH".encode_utf16().collect::<Vec<_>>()),5);
