@@ -419,3 +419,6 @@ declare var ClaudeAdapter: any;
 interface Window {
     ChatGPTOptimizerInstance?: unknown;
 }
+
+// Browser DOM import bridge is loaded before content.js by the manifest.
+declare var CpoRustBrowserBridge: any;
