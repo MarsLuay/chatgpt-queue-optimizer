@@ -25,7 +25,7 @@
                     !['cpo_collect_resources', 'cpo_discover_messages', 'cpo_execute_media',
                         'cpo_apply_window', 'cpo_window_visible', 'cpo_capture_history', 'cpo_process_mutations',
                         'cpo_cache_ttl', 'cpo_cache_valid', 'cpo_cache_nodes_valid', 'cpo_mutation_delay', 'cpo_provider_selectors', 'cpo_dom_composer_write', 'cpo_dom_composer_read',
-                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate'].every(name => typeof core[name] === 'function')) {
+                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool'].every(name => typeof core[name] === 'function')) {
                     throw new Error('Browser WASM ABI mismatch');
                 }
                 this.exports = core;
@@ -166,7 +166,29 @@
             return this.invoke({node,members,latest},core=>core.cpo_dom_active_surface()===1);
         }
         nodeRole(flags) { return this.invoke({},core=>core.cpo_dom_role(flags)>>>0); }
-        candidate(mode,flags) { return this.invoke({},core=>core.cpo_dom_candidate(mode,flags)===1); }
+        candidate(mode,flags) {
+            // Pure native exports can run inside a selector host predicate
+            // without replacing the outer invocation's DOM context.
+            if(!this.exports)return null;
+            try{return this.exports.cpo_dom_candidate(mode,flags)===1;}catch(error){this.fail(error);return null;}
+        }
+        assistantError(node,attrs,values) {
+            if(!node||typeof node.getAttribute!=='function')return false;
+            return this.invoke({node,attrs,values},(core,ctx)=>{
+                ctx.candidates=[node];
+                try{for(const candidate of node.querySelectorAll?.(attrs.map(attr=>'['+attr+']').join(','))||[])ctx.candidates.push(candidate);}catch{}
+                return core.cpo_dom_error_stop(ctx.candidates.length,attrs.length)===1;
+            });
+        }
+        incompleteTool(node,selectors,states,normalize) {
+            if(!node||typeof node.getAttribute!=='function')return false;
+            return this.invoke({node,selectors,states,normalize},(core,ctx)=>{
+                ctx.candidates=[node];
+                ctx.attrs=selectors.flatMap(selector=>selector.match(/\\[([^=\\]]+)/g)||[]).map(attr=>attr.slice(1));
+                try{for(const candidate of node.querySelectorAll?.(selectors.join(','))||[])ctx.candidates.push(candidate);}catch{}
+                return core.cpo_dom_incomplete_tool(ctx.candidates.length)===1;
+            });
+        }
 
         handle(node) {
             if (!node) return 0;
@@ -474,6 +496,27 @@
                     try{ctx.element.click();return 1;}catch{return 0;}
                 case 100: return !ctx.node?0:ctx.node===ctx.latest?1:ctx.members.has(ctx.node)?2:3;
                 case 101: ctx.node=ctx.node.parentElement||ctx.node.parentNode||null;return 1;
+                case 102: {
+                    const attr=ctx.attrs[b];
+                    const value=String(ctx.candidates[a].getAttribute?.(attr)||'').trim().toLowerCase();
+                    return Number(ctx.values.has(value))|(Number(attr==='data-error')<<1)|(Number(['true','1','yes'].includes(value))<<2);
+                }
+                case 103:
+                    return Number(ctx.selectors.some(selector=>{try{return !!ctx.candidates[a].matches?.(selector);}catch{return false;}}));
+                case 104: {
+                    const candidate=ctx.candidates[a];
+                    for(const attr of ctx.attrs){
+                        const value=String(candidate.getAttribute?.(attr)||'').trim().toLowerCase();
+                        if(value)return Number(ctx.states.has(value));
+                    }
+                    return 0;
+                }
+                case 105: {
+                    const turn=ctx.normalize(ctx.node.innerText||ctx.node.textContent||'');
+                    if(!turn)return 1;
+                    const tool=ctx.candidates[a];
+                    return Number(turn===ctx.normalize(tool.innerText||tool.textContent||''));
+                }
                 default: throw new Error('Unknown Rust browser host operation: ' + op);
             }
         }
