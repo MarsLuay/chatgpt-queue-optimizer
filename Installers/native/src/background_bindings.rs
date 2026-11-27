@@ -246,37 +246,16 @@ async function validateJobTargetConversation(tabId, job) {
     const currentIdentity = await resolveTabConversationIdentity(tabId);
     if(jobs.get(tabId)!==job)return {ok:false,reason:'Queue owner changed during conversation validation.',currentIdentity};
 
-    if (!job.provider) {
-        jobs.transaction(job,0,0,{provider:currentIdentity.provider||'chatgpt'});
-    }
-
-    if (job.rolloverInProgress) {
-        const adapter = getActiveProviderAdapter(currentIdentity.provider || job.provider || 'chatgpt') || getActiveProviderAdapter('chatgpt');
-        const fromId = job.rolloverFromConversationId || null;
-        if (isVerifiedFreshConversation(adapter, currentIdentity, fromId, job.rolloverNavigationStarted)) {
-            if (!job.rolloverRebindApplied) {
-                applyAuthorizedConversationRebind(job, currentIdentity);
-                await updateRunningJobsStorage({ force: true });
-            } else if (job.conversationType === 'new' && currentIdentity.type === 'existing' && currentIdentity.conversationId) {
-                jobs.transaction(job,19,0,{provider:currentIdentity.provider,conversationId:currentIdentity.conversationId,targetKey:currentIdentity.key});
-                await updateRunningJobsStorage({ force: true });
-            }
-            return { ok: true, currentIdentity, rolloverRebind: true };
-        }
-        return {
-            ok: false,
-            awaitingRollover: true,
-            reason: 'Rollover in progress; waiting for a verified new ChatGPT conversation before queue delivery resumes.',
-            currentIdentity
-        };
-    }
-
-    const decision=requiredQueueDecision(globalThis.CpoQueueEngine?.bindingDecision?.(job,currentIdentity));
-    if(decision===3||decision===8){
-        jobs.transaction(job,0,0,{provider:currentIdentity.provider||job.provider||'chatgpt',conversationId:currentIdentity.conversationId||null,conversationType:currentIdentity.type,targetKey:currentIdentity.key});
+    const outcome=jobs.target(job,currentIdentity);
+    if(!outcome)return {ok:false,reason:'Queue ownership changed or native target validation unavailable.',currentIdentity};
+    if(outcome.changed){
         await updateRunningJobsStorage({force:true});
-        return {ok:true,currentIdentity,...(decision===3?{updatedBinding:true}:{boundFromUnknown:true})};
+        if(jobs.processing(job,2)!==1)return {ok:false,reason:'Queue ownership changed during conversation validation.',currentIdentity};
     }
+    const decision=outcome.decision;
+    if(decision===9)return {ok:true,currentIdentity,rolloverRebind:true};
+    if(decision===10)return {ok:false,awaitingRollover:true,reason:'Rollover in progress; waiting for a verified new ChatGPT conversation before queue delivery resumes.',currentIdentity};
+    if(decision===3||decision===8)return {ok:true,currentIdentity,...(decision===3?{updatedBinding:true}:{boundFromUnknown:true})};
     const reasons={
         1:()=>`Provider mismatch: queue is bound to ${job.provider}, but tab is on ${currentIdentity.provider}.`,
         2:()=>`Tab navigated away from conversation to unsupported page (${currentIdentity.key||'unsupported'}). Queue paused to prevent sending into the wrong page.`,
@@ -486,16 +465,9 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
             pauseJob(tabId, 'Rollover target identity could not be verified before handoff.', { phase: 'rollover-handoff', failureClass: 'conversation-max-length' });
             return { action: 'return' };
         }
-        const remainingAfterCurrent = Math.max(0, (Array.isArray(job.queue) ? job.queue.length : 0));
-        const handoffText = adapter.buildContinuationHandoffMessage({
-            runId: job.runId,
-            currentCommandNumber: job.currentCommandNumber,
-            completedCount: job.completedCount,
-            remainingCount: remainingAfterCurrent,
-            conversationGeneration: job.conversationGeneration,
-            pendingMessageLength: String(job.currentMessage || job.queue?.[0] || '').length
-        });
-        const handoffFingerprint=job.handoffFingerprint||fingerprintCommandTextForJob(handoffText);
+        const handoff=jobs.handoff(job);
+        if(!handoff){pauseJob(tabId,'Native continuation handoff unavailable.',{phase:'rollover-handoff',failureClass:'non-retryable'});return {action:'return'};}
+        const handoffText=handoff.text,handoffFingerprint=handoff.fingerprint;
 
         if (handoffAction === 7) {
             const inspect = await inspectTabCommandTurns(tabId, {

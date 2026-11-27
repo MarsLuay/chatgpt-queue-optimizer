@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 33);
+    assert.equal(e.cpo_queue_abi(), 34);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -872,4 +872,19 @@ test('native submission leases enforce exclusive tab ownership and polling deadl
     assert.equal(w(16,lease),0);assert.equal(w(16,replacement),1);
     const e=instance.exports;assert.equal(e.cpo_rollover_effect(1,7),1);assert.equal(e.cpo_rollover_effect(1,3),2);
     assert.equal(e.cpo_rollover_effect(3,5),1);assert.equal(e.cpo_rollover_effect(3,6),0);
+});
+
+
+test('native target binding rejects mismatches and builds rollover handoff from queue storage',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});engine.install(instance.exports);
+    const jobs=engine.createLiveJobs();jobs.set(7,{tabId:7,provider:'chatgpt',conversationType:'new',queue:['next'],isRunning:true,runId:'  run\t\ud800 ',completedCount:2});const job=jobs.get(7);
+    assert.deepEqual(jobs.target(job,{provider:'chatgpt',type:'existing',conversationId:'a',key:'chatgpt:c:a'},10),{decision:3,changed:true});
+    assert.equal(jobs.target(job,{provider:'chatgpt',type:'existing',conversationId:'b',key:'chatgpt:c:b'},11).decision,5);
+    assert.equal(job.conversationId,'a');jobs.transaction(job,12,0);jobs.transaction(job,12,1);
+    assert.equal(jobs.target(job,{provider:'chatgpt',type:'new',conversationId:null,key:'chatgpt:new'},12).decision,9);
+    const handoff=jobs.handoff(job);assert.equal(handoff.text,engine.continuationHandoff({runId:job.runId,conversationGeneration:job.conversationGeneration,completedCount:2,currentCommandNumber:0,remainingCount:1,pendingMessageLength:4}));
+    assert.equal(handoff.fingerprint,legacy(handoff.text));
+    assert.equal(jobs.target(job,{provider:'chatgpt',type:'existing',conversationId:'b',key:'chatgpt:c:b'},13).decision,9);
+    assert.equal(job.conversationGeneration,1);assert.equal(jobs.target(job,{provider:'chatgpt',type:'existing',conversationId:'c',key:'chatgpt:c:c'},14).decision,10);
+    assert.equal(job.conversationId,'b');
 });

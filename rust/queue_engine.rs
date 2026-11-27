@@ -1478,10 +1478,71 @@ mod live_state {
             if op!=1&&op!=11{job.set("updatedAt",time.as_bytes());}
             self.changed(id);true
         }
+        fn target_decision(&mut self,id:u32,now:f64)->u32{
+            let input=std::mem::take(&mut self.input);
+            let Some(job)=self.jobs.get_mut(&id)else{return u32::MAX;};
+            if !now.is_finite()||now<0.0||!job.truth("isRunning")||job.truth("isPaused")||job.truth("isStopped"){return u32::MAX;}
+            let Some(fields)=patch(&input)else{return u32::MAX;};
+            let value=|name:&str|fields.iter().find(|(i,_)|*i==field(name)).and_then(|(_,v)|v.as_deref());
+            let (Some(provider),Some(kind),Some(target),Some(key))=(value("provider"),value("conversationType"),value("conversationId"),value("targetKey"))else{return u32::MAX;};
+            let kind_code=|v:&[u8]|match v{b"\"existing\""=>1,b"\"new\""=>2,b"\"unsupported\""=>3,_=>0};
+            let old_provider=if job.truth("provider"){job.get("provider")}else if present(provider){provider}else{b"\"chatgpt\""};
+            let mut changed=false;
+            let decision=if job.truth("rolloverInProgress"){
+                let flags=(provider==b"\"chatgpt\""&&old_provider==b"\"chatgpt\"") as u32|
+                    ((present(target) as u32)<<1)|(((target!=job.get("rolloverFromConversationId")) as u32)<<2)|
+                    ((job.truth("rolloverFromConversationId") as u32)<<3)|((job.truth("rolloverNavigationStarted") as u32)<<4);
+                if super::cpo_rollover_fresh(kind_code(kind),flags)!=1{10}
+                else if !job.truth("rolloverRebindApplied"){
+                    for (name,v) in [("provider",provider),("conversationId",target),("conversationType",kind),("targetKey",key)]{job.set(name,v);}
+                    job.set("rolloverToConversationId",target);
+                    let n=job.num("conversationGeneration").saturating_add(1);
+                    job.set("conversationGeneration",n.to_string().as_bytes());
+                    job.set("rolloverRebindApplied",TRUE);job.set("rolloverStage",b"\"identity-confirmed\"");
+                    changed=true;9
+                }else if job.get("conversationType")==b"\"new\""&&kind_code(kind)==1&&present(target){
+                    job.set("conversationId",target);job.set("conversationType",kind);job.set("targetKey",key);job.set("rolloverToConversationId",target);
+                    changed=true;9
+                }else if job.get("conversationType")==kind&&job.get("conversationId")==target{9}
+                else{10}
+            }else{
+                let flags=(present(provider)&&provider!=b"\"unknown\""&&provider!=old_provider) as u32|
+                    ((job.truth("conversationId") as u32)<<1)|((present(target) as u32)<<2)|
+                    (((target==job.get("conversationId")) as u32)<<3);
+                let decision=super::cpo_job_binding(kind_code(job.get("conversationType")),kind_code(kind),flags);
+                if decision==3||decision==8{
+                    let p=if present(provider){provider}else{old_provider}.to_vec();
+                    for (name,v) in [("provider",p.as_slice()),("conversationId",target),("conversationType",kind),("targetKey",key)]{job.set(name,v);}
+                    changed=true;
+                }else if decision==0&&!job.truth("provider"){
+                    let p=old_provider.to_vec();job.set("provider",&p);changed=true;
+                }
+                decision
+            };
+            if changed{job.set("updatedAt",now.to_string().as_bytes());self.changed(id);}
+            decision|((changed as u32)<<8)
+        }
+        fn handoff_record(job:&Job)->Option<Vec<u8>>{
+            if !job.truth("rolloverInProgress")||!job.truth("rolloverRebindApplied"){return None;}
+            let run=if job.truth("runId"){super::command_identity::decode_units(job.get("runId"))?}else{Vec::new()};
+            let pending=if job.truth("currentMessage"){job.get("currentMessage")}else{job.queue.front().map(Vec::as_slice).unwrap_or(EMPTY)};
+            let numbers=[job.num("conversationGeneration") as usize,job.num("completedCount") as usize,
+                job.num("currentCommandNumber") as usize,job.queue.len(),json_len(pending)];
+            let parts:Vec<Vec<u16>>=numbers.iter().map(|n|n.to_string().encode_utf16().collect()).collect();
+            let fields=[run.as_slice(),parts[0].as_slice(),parts[1].as_slice(),parts[2].as_slice(),parts[3].as_slice(),parts[4].as_slice()];
+            let units=super::presentation_batch::handoff(&fields)?;
+            let text=super::command_identity::encode_units(&units);
+            let fp=if job.truth("handoffFingerprint"){job.get("handoffFingerprint").to_vec()}
+                else{super::command_identity::fingerprint_json(&text)?};
+            let mut out=b"{\"text\":".to_vec();out.extend_from_slice(&text);
+            out.extend_from_slice(b",\"fingerprint\":");out.extend_from_slice(&fp);out.push(b'}');Some(out)
+        }
         fn read(&mut self, id: u32, field: u32, index: u32) -> u32 {
             self.output.clear();
             let Some(job) = self.jobs.get(&id) else { return 0; };
-            if field == u32::MAX-2 {
+            if field == u32::MAX-3 {
+                let Some(bytes)=Self::handoff_record(job)else{return 0;};self.output=bytes;
+            }else if field == u32::MAX-2 {
                 let Some(bytes)=super::durable_projection::project(&job.fields,&job.queue)else{return 0;};
                 self.output=bytes;
             }
@@ -1577,6 +1638,8 @@ mod live_state {
     pub extern "C" fn cpo_live_processing(id:u32,op:u32)->u32{
         STORE.with(|s|s.borrow_mut().processing(id,op))
     }
+    #[no_mangle]
+    pub extern "C" fn cpo_live_target(id:u32,now:f64)->u32{STORE.with(|s|s.borrow_mut().target_decision(id,now))}
     #[no_mangle]
     pub extern "C" fn cpo_live_transaction(id:u32,op:u32,arg:u32,now:f64)->u32{
         STORE.with(|s|s.borrow_mut().transaction(id,op,arg,now) as u32)
@@ -1927,7 +1990,7 @@ mod presentation_batch {
         if !f[2].is_empty(){append(&mut out,"c:");out.extend_from_slice(f[2]);}else{out.extend_from_slice(f[1]);}
         Some(out)
     }
-    fn handoff(f:&[&[u16]])->Option<Vec<u16>>{
+    pub(super) fn handoff(f:&[&[u16]])->Option<Vec<u16>>{
         if f.len()!=6{return None;}
         let mut run=normalize(f[0]);run.truncate(80);
         let mut out=ascii("Continuation handoff for an automated ChatGPT Queue Optimizer run. The previous conversation reached ChatGPT maximum length. Logical run id: ");

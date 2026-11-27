@@ -488,6 +488,29 @@ const HOST:&str=r####"(() => {
                     }finally{e.cpo_live_wipe();}
                 });
             },
+            target(job,identity,now=Date.now()){
+                const id=ids.get(job);
+                if(!id||handles.get(ownerTabs.get(job))!==job)return null;
+                return native(e=>{
+                    const data={provider:identity.provider||'',conversationType:identity.type||'unknown',
+                        conversationId:identity.conversationId||null,targetKey:identity.key||''};
+                    const entries=Object.entries(data).map(([key,value])=>[fields.get(key),encoder.encode(JSON.stringify(value))]);
+                    const length=entries.reduce((sum,[,v])=>sum+8+v.length,0);
+                    const ptr=e.cpo_live_input(length)>>>0;if(!ptr)return null;
+                    try{
+                        const view=new DataView(e.memory.buffer,ptr,length),out=new Uint8Array(e.memory.buffer,ptr,length);
+                        let offset=0;
+                        for(const [field,bytes] of entries){view.setUint32(offset,field,true);view.setUint32(offset+4,bytes.length,true);out.set(bytes,offset+8);offset+=8+bytes.length;}
+                        const result=e.cpo_live_target(id,now)>>>0;
+                        return result===NONE?null:{decision:result&255,changed:!!(result&256)};
+                    }finally{e.cpo_live_wipe();}
+                });
+            },
+            handoff(job){
+                const id=ids.get(job);
+                if(!id||handles.get(ownerTabs.get(job))!==job)return null;
+                return read(id,NONE-3)??null;
+            },
             dispatch(job){
                 const id=ids.get(job);
                 if(!id||handles.get(ownerTabs.get(job))!==job)return null;
