@@ -36,6 +36,13 @@
     function setStatus(message) { el('status').textContent = message; }
     function updateButtons() {
         const complete = !!meta?.complete;
+        const validSource=Number.isSafeInteger(sourceTab)&&sourceTab>0;
+        const flags=Number(busy)|(Number(validSource)<<1)|(Number(!!meta)<<2)|(Number(complete)<<3)|(Number(meta?.tabId===sourceTab)<<4);
+        const native=historyStore?.core?.cpo_reader_buttons(flags,pageStart,meta?.count||0);
+        if(native!=null){
+            [captureButton,discardButton,originalButton,deleteButton,prevButton,nextButton].forEach((button,i)=>{button.disabled=!(native&(1<<i));});
+            return;
+        }
         captureButton.disabled = busy || !Number.isSafeInteger(sourceTab) || sourceTab <= 0;
         discardButton.disabled = busy || !complete || meta?.tabId !== sourceTab;
         originalButton.disabled = busy || !complete;
@@ -102,8 +109,11 @@
                 type: 'CPO_HISTORY_BATCH', offset,
                 identity: current?.identity, total: current?.total
             });
-            if (!reply?.ok || !Array.isArray(reply.records) || !Number.isSafeInteger(reply.total) ||
-                reply.total < 0 || reply.records.length > 16 || reply.next !== offset + reply.records.length) {
+            const shape=!!reply?.ok&&Array.isArray(reply.records)&&Number.isSafeInteger(reply.total)&&reply.total>=0&&reply.total<=0xffffffff&&
+                Number.isSafeInteger(reply.next)&&reply.next>=0&&reply.next<=0xffffffff;
+            const accepted=shape&&(historyStore.core?.cpo_reader_batch(offset,reply.total,reply.records.length,reply.next,3) ??
+                Number(reply.records.length<=16&&reply.next===offset+reply.records.length&&reply.next<=reply.total));
+            if (!accepted) {
                 throw new Error(reply?.error || 'The source conversation did not return a valid snapshot batch.');
             }
             if (!current) {
@@ -134,12 +144,12 @@
             }
             offset = current.count;
             setStatus('Captured ' + offset + ' of ' + current.total + ' loaded turns…');
-            if (offset >= current.total || records.length < reply.records.length || !records.length) break;
+            if (!(historyStore.core?.cpo_reader_continue(offset,current.total,records.length,reply.records.length) ?? Number(offset<MAX_TURNS&&offset<current.total&&records.length===reply.records.length&&records.length>0))) break;
         }
         if (!current?.count) throw new Error('No text rows were saved.');
         const source = await getTab(sourceTab);
         if (source.url !== current.url || source.active || source.discarded) throw new Error('Source tab changed during capture.');
-        current = { ...current, partial: partial || current.count < current.total, complete: true };
+        current = { ...current, partial: !!(historyStore.core?.cpo_reader_partial(current.count,current.total,Number(partial)) ?? Number(partial || current.count < current.total)), complete: true };
         await historyStore.finalize(id, current);
         await renderPage();
     }));
@@ -172,8 +182,8 @@
         await renderPage();
         setStatus('Saved snapshot deleted.');
     }));
-    prevButton.addEventListener('click', () => run(async () => { pageStart = Math.max(0, pageStart - PAGE_SIZE); await renderPage(); }));
-    nextButton.addEventListener('click', () => run(async () => { pageStart += PAGE_SIZE; await renderPage(); }));
+    prevButton.addEventListener('click', () => run(async () => { pageStart = historyStore.core?.cpo_reader_move(pageStart,0) ?? Math.max(0, pageStart - PAGE_SIZE); await renderPage(); }));
+    nextButton.addEventListener('click', () => run(async () => { pageStart = historyStore.core?.cpo_reader_move(pageStart,1) ?? pageStart + PAGE_SIZE; await renderPage(); }));
 
     async function init() {
         busy = true;
