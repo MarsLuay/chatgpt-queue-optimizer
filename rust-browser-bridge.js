@@ -25,7 +25,7 @@
                     !['cpo_collect_resources', 'cpo_discover_messages', 'cpo_execute_media',
                         'cpo_apply_window', 'cpo_window_visible', 'cpo_capture_history', 'cpo_process_mutations',
                         'cpo_cache_ttl', 'cpo_cache_valid', 'cpo_cache_nodes_valid', 'cpo_mutation_delay', 'cpo_provider_selectors', 'cpo_dom_composer_write', 'cpo_dom_composer_read',
-                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool', 'cpo_ui_render', 'cpo_ui_sequence_edit', 'cpo_ui_next_limit', 'cpo_ui_sequence_select', 'cpo_ui_variables', 'cpo_ui_saved_sequence', 'cpo_sequence_import', 'cpo_sequence_substitute'].every(name => typeof core[name] === 'function')) {
+                        'cpo_dom_click', 'cpo_dom_submit_stage', 'cpo_dom_active_surface', 'cpo_dom_role', 'cpo_dom_candidate', 'cpo_dom_error_stop', 'cpo_dom_incomplete_tool', 'cpo_ui_render', 'cpo_ui_sequence_edit', 'cpo_ui_next_limit', 'cpo_ui_sequence_select', 'cpo_ui_variables', 'cpo_ui_saved_sequence', 'cpo_sequence_import', 'cpo_sequence_substitute', 'cpo_event_ready'].every(name => typeof core[name] === 'function')) {
                     throw new Error('Browser WASM ABI mismatch');
                 }
                 this.exports = core;
@@ -199,6 +199,9 @@
         sequenceEdit(messages,action,index=0,text='') {
             return this.invoke({messages,value:text},core=>
                 core.cpo_ui_sequence_edit(action,index,messages.length,Number(!!text))===1);
+        }
+        eventReady(kind,queueReady) {
+            return this.invoke({},core=>core.cpo_event_ready(kind,Number(!!this.exports)|(Number(!!queueReady)<<1))===1);
         }
         importSequence(value) {
             if(typeof value!=='string'||value.length>8*1024*1024)return null;
@@ -627,7 +630,9 @@
                 case 140:return ctx.values[a].length;
                 case 141:ctx.values.push(ctx.values[a][b]);return ctx.values.length-1;
                 case 142:{
-                    const value=globalThis.CpoQueueEngine.trim(String(ctx.values[a]??''));
+                    const raw=ctx.values[a];
+                    const value=globalThis.CpoQueueEngine.trim(raw&&typeof raw==='object'&&!Array.isArray(raw)?'[object Object]':String(raw??''));
+                    if(value==null)throw new Error('Native sequence trim unavailable');
                     if(b===1)ctx.result.name=value||'Imported sequence';
                     else if(value)ctx.result.messages.push(value);
                     return 1;
