@@ -74,6 +74,35 @@ const HOST:&str=r####"(() => {
         try { return core[name](...args) >>> 0; }
         catch (error) { fail(error); return null; }
     }
+    // Call-local frame transfer; the native store retains only validated
+    // bounded collections, never browser handles or arbitrary JS objects.
+    const workerEncoder=new TextEncoder(),workerDecoder=new TextDecoder();
+    function workerCollection(op,token=0,fields=[]){
+        if(!core)return null;
+        try{
+            const e=core,parts=fields.map(v=>workerEncoder.encode(v));
+            const length=parts.reduce((n,v)=>n+4+v.length,0);
+            if(length>8*1024*1024)return null;
+            const ptr=e.cpo_worker_input(length)>>>0;
+            if(length&&!ptr)return null;
+            if(length){
+                const view=new DataView(e.memory.buffer,ptr,length);
+                const out=new Uint8Array(e.memory.buffer,ptr,length);
+                let at=0;
+                for(const part of parts){view.setUint32(at,part.length,true);out.set(part,at+4);at+=4+part.length;}
+            }
+            try{
+                const result=e.cpo_worker_dispatch(op,token)>>>0;
+                if(result===0xffffffff)return null;
+                if(op!==1)return result;
+                return JSON.parse(workerDecoder.decode(new Uint8Array(e.memory.buffer,e.cpo_worker_output()>>>0,result)));
+            }finally{e.cpo_worker_wipe();}
+        }catch(error){fail(error);return null;}
+    }
+    function completedRunCount(count){
+        if(!core)return null;
+        try{return core.cpo_completed_run_count(count);}catch(error){fail(error);return null;}
+    }
     function backgroundWaitTimeout(flags,ordinary,research){
         if(!core)return null;
         try{return core.cpo_background_wait_timeout(flags,ordinary,research);}
@@ -1021,7 +1050,7 @@ const HOST:&str=r####"(() => {
             (Number(!!job.waitForIdleBeforeSend) << 6);
         return call('cpo_queue_next', [flags, phase, job.queue.length]);
     }
-    const api = { backgroundWaitTimeout, genericProviderResponse, providerSurface, providerNavigation, providerTurnMetadata, invalidateProviderTurn, providerLastAssistant, providerGenerationState, providerMarker, providerButtons, providerGenerationText, providerDiagnostics, providerTurnSnapshot, providerBoundResponse, providerSemanticButton, classifyFailure, bindingDecision, scheduledMutation, sequenceName, validSequenceName, sequenceVariables, keyboardEvent, localDateParts, localDateMatches, localDateInput, timestampValid, timestampMath, batch, textBatch, scheduledSort, scheduledLookup, scheduledWithout, scheduledDue, identityKey, continuationHandoff, supportedTabs, popupStatus, popupRunningLabel, popupScheduledLabel, popupStats, providerCatalog, diagnosticText, diagnosticPick, sanitizeDiagnostic, createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
+    const api = { completedRunCount, workerCollection, backgroundWaitTimeout, genericProviderResponse, providerSurface, providerNavigation, providerTurnMetadata, invalidateProviderTurn, providerLastAssistant, providerGenerationState, providerMarker, providerButtons, providerGenerationText, providerDiagnostics, providerTurnSnapshot, providerBoundResponse, providerSemanticButton, classifyFailure, bindingDecision, scheduledMutation, sequenceName, validSequenceName, sequenceVariables, keyboardEvent, localDateParts, localDateMatches, localDateInput, timestampValid, timestampMath, batch, textBatch, scheduledSort, scheduledLookup, scheduledWithout, scheduledDue, identityKey, continuationHandoff, supportedTabs, popupStatus, popupRunningLabel, popupScheduledLabel, popupStats, providerCatalog, diagnosticText, diagnosticPick, sanitizeDiagnostic, createLiveJobs, load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, serialize, projectDurable, deserializeDurable, trim, settings, remaining, scheduledActions, sensitiveKey, eventCode, apiPath, tabDiscard, install, get status() { return status; } };
     globalThis.CpoQueueEngine = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();

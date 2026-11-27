@@ -6,6 +6,12 @@ mod background_controller;
 pub use background_controller::*;
 mod background_runtime;
 mod background_schedule;
+mod worker_collections;
+#[no_mangle]
+pub extern "C" fn cpo_completed_run_count(count:f64)->f64{
+    if !count.is_finite()||count<0.0||count.fract()!=0.0{1.0}else{(count+1.0).min(9007199254740991.0)}
+}
+pub use worker_collections::{cpo_worker_input,cpo_worker_dispatch,cpo_worker_output,cpo_worker_wipe};
 pub use background_schedule::cpo_background_schedule_guard;
 pub use background_runtime::{cpo_background_grant,cpo_background_restore,cpo_background_poll_gate};
 use queue_schema::DURABLE_FIELDS;

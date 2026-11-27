@@ -585,9 +585,13 @@ async function handleConversationCapacityRollover(tabId, job, waitResult = {}) {
 let queueStateWrite = Promise.resolve();
 let queueStateFlushTimer = null;
 let queueLogWrite = Promise.resolve();
-let pendingQueueLogEntries = [];
+// Bounded emergency-only fallback for startup or a failed WASM engine.
+let emergencyQueueLogEntries = [];
+const workerCollection=(op,token=0,fields=[])=>globalThis.CpoQueueEngine?.workerCollection(op,token,fields)??null;
 let queueLogFlushTimer = null;
-let queueLogGeneration = 0;
+let emergencyLogGeneration=0;
+const logGeneration=()=>({native:workerCollection(3),emergency:emergencyLogGeneration});
+const currentLogGeneration=g=>g.emergency===emergencyLogGeneration&&(g.native==null||g.native===workerCollection(3));
 
 globalThis.CpoBrowserApi.listen(
     /**
@@ -1041,19 +1045,20 @@ function handleGetQueueDebugLogs(sendResponse) {
 }
 
 function handleClearQueueDebugLogs(sendResponse) {
-    queueLogGeneration += 1;
-    pendingQueueLogEntries = [];
+    emergencyLogGeneration+=1;
+    emergencyQueueLogEntries=[];
+    workerCollection(2);
 
     if (queueLogFlushTimer !== null) {
         clearTimeout(queueLogFlushTimer);
         queueLogFlushTimer = null;
     }
 
-    const clearGeneration = queueLogGeneration;
+    const clearGeneration=logGeneration();
     queueLogWrite = queueLogWrite
         .catch(() => {})
         .then(async () => {
-            if (clearGeneration !== queueLogGeneration) {
+            if (!currentLogGeneration(clearGeneration)) {
                 return;
             }
 
@@ -2585,9 +2590,11 @@ async function waitForSubmissionAck(tabId, { expectedText, beforeSnapshot, timeo
     const timeout = Number(timeoutMs) > 0 ? Number(timeoutMs) : QUEUE_WAIT_POLICY.submissionAckTimeoutMs;
     const interval = Number(pollMs) > 0 ? Number(pollMs) : QUEUE_WAIT_POLICY.submissionAckPollMs;
     const startedAt = Date.now();
-    const beforeIds = new Set((beforeSnapshot?.userTurns || []).map(turn => turn.turnId));
+    const beforeIds=(beforeSnapshot?.userTurns||[]).map(turn=>turn.turnId).filter(id=>typeof id==='string'&&id.length>0).map(id=>JSON.stringify(id));
     const supportsTurnAck = provider?.supportsCommandTurnAck !== false;
-
+    const baseline=supportsTurnAck?workerCollection(4,0,beforeIds):0;
+    if(supportsTurnAck&&!baseline)return {ok:false,error:'Native submission baseline unavailable.',details:{failureClass:'submission-unconfirmed'}};
+    try{
     if (job) {
         await persistCommandDelivery(tabId, job, {
             currentPhase: 'awaiting-submission-ack',
@@ -2616,15 +2623,15 @@ async function waitForSubmissionAck(tabId, { expectedText, beforeSnapshot, timeo
                 expectedFingerprint: liveJob?.commandFingerprint || fingerprintCommandTextForJob(expectedText)
             });
             const snapshot = inspected.snapshot || { userTurns: [] };
-            const accept = (turn, expected) => {
-                const flags = 1 | (Number(!!expected) << 1) | (Number(beforeIds.has(turn.turnId)) << 2) |
-                    (Number(!!turn.turnId) << 3);
-                return (globalThis.CpoQueueEngine?.call('cpo_submission_ack', [flags]) ??
-                    0) === 1;
-            };
-            const matched = (snapshot.userTurns || []).find(turn => accept(turn, turn.matchedExpected)) ||
-                (snapshot.matchedUserTurnId ? (snapshot.userTurns || []).find(turn =>
-                    turn.turnId === snapshot.matchedUserTurnId && accept(turn, true)) : null);
+            const turns=snapshot.userTurns||[];
+            const fields=[];
+            for(const turn of turns){
+                fields.push(typeof turn.turnId==='string'?JSON.stringify(turn.turnId):'null',
+                    turn.matchedExpected?'1':'0',snapshot.matchedUserTurnId&&turn.turnId===snapshot.matchedUserTurnId?'1':'0');
+            }
+            const selected=workerCollection(5,baseline,fields);
+            if(selected==null)return {ok:false,error:'Native submission acknowledgment unavailable.',details:{failureClass:'submission-unconfirmed'}};
+            const matched=selected>0?turns[selected-1]:null;
             if (job && (jobs.get(tabId) !== job || job.isPaused || job.isStopped || !job.isRunning)) continue;
 
             if (matched) {
@@ -2686,6 +2693,7 @@ async function waitForSubmissionAck(tabId, { expectedText, beforeSnapshot, timeo
             supportsCommandTurnAck: supportsTurnAck
         }
     };
+    }finally{if(baseline)workerCollection(6,baseline);}
 }
 
 async function sendPromptToSpecificTab(tabId, text, expectedJob = jobs.get(tabId)) {
@@ -3370,23 +3378,16 @@ function updateQueueWakeAlarm(hasJobs = jobs.size > 0) {
     chrome.alarms.clear(QUEUE_WAKE_ALARM_NAME);
 }
 
+let completedRunWrite=Promise.resolve();
 function recordCompletedRun(tabId) {
-    chrome.storage.local.get(['successCount'], function (data) {
-        const newCount = Number(data.successCount || 0) + 1;
-
-        chrome.storage.local.set(
-            {
-                successCount: newCount
-            },
-            () => {
-                notifyRuntime({
-                    action: 'automationFinished',
-                    tabId,
-                    successCount: newCount
-                });
-            }
-        );
-    });
+    completedRunWrite=completedRunWrite.catch(()=>{}).then(async()=>{
+        const data=await readLocalStorage(['successCount']);
+        const count=Number(data.successCount||0);
+        const newCount=globalThis.CpoQueueEngine?.completedRunCount(count);
+        if(newCount==null)throw new Error('Native completion counter unavailable.');
+        await writeLocalStorage({successCount:newCount});
+        notifyRuntime({action:'automationFinished',tabId,successCount:newCount});
+    }).catch(error=>console.warn('Could not record completed run:',error));
 }
 
 function notifyRuntime(message) {
@@ -3419,7 +3420,10 @@ function logQueueEvent(tabId, level, message, details = {}) {
         console.log(consoleMessage, entry.details);
     }
 
-    pendingQueueLogEntries.push(entry);
+    if(workerCollection(0,0,[JSON.stringify(entry)])!==1){
+        emergencyQueueLogEntries.push(entry);
+        if(emergencyQueueLogEntries.length>MAX_QUEUE_DEBUG_LOG_ENTRIES)emergencyQueueLogEntries.shift();
+    }
 
     if (queueLogFlushTimer === null) {
         queueLogFlushTimer = setTimeout(() => {
@@ -3437,23 +3441,21 @@ function flushQueueDebugLogs() {
         queueLogFlushTimer = null;
     }
 
-    if (pendingQueueLogEntries.length === 0) {
-        return queueLogWrite;
-    }
-
-    const entries = pendingQueueLogEntries;
-    pendingQueueLogEntries = [];
-    const generation = queueLogGeneration;
+    const nativeEntries=workerCollection(1)||[];
+    const entries=emergencyQueueLogEntries.concat(nativeEntries);
+    emergencyQueueLogEntries=[];
+    if(!entries.length)return queueLogWrite;
+    const generation=logGeneration();
 
     queueLogWrite = queueLogWrite
         .catch(() => {})
         .then(async () => {
-            if (generation !== queueLogGeneration) {
+            if (!currentLogGeneration(generation)) {
                 return;
             }
 
             const data = await readLocalStorage([QUEUE_DEBUG_LOG_KEY]);
-            if (generation !== queueLogGeneration) {
+            if (!currentLogGeneration(generation)) {
                 return;
             }
 
@@ -3680,6 +3682,7 @@ async function persistScheduledItem(nextItem) {
         const previous=findScheduledItem(items,nextItem.id);
         const index=items.indexOf(previous);
         const terminal=nextItem.status==='completed'||nextItem.status==='failed';
+        if(terminal&&nextItem.__nativeClaim&&workerCollection(9,0,[JSON.stringify(String(nextItem.id))])!==nextItem.__nativeClaim)throw new Error('Native scheduled claim expired before settlement.');
         if(globalThis.CpoQueueEngine?.call('cpo_background_schedule_guard',[2,
             Number(terminal)|(Number(!!previous)<<1)|(Number(previous?.status==='firing')<<2)])!==0)
             throw new Error('Scheduled claim changed before settlement; no record overwritten.');
@@ -3916,9 +3919,18 @@ async function claimScheduledMessageForFire(id, now = Date.now()) {
 
         if (scheduledAction(4, item, now) !== 1) return null;
 
-        if(!globalThis.CpoQueueEngine.scheduledMutation(4,item,now))return null;
-        await writeScheduledMessages(items);
-        return { ...item };
+        const key=JSON.stringify(String(item.id));
+        const lease=workerCollection(7,0,[key]);
+        if(!lease)return null;
+        try{
+            if(!globalThis.CpoQueueEngine.scheduledMutation(4,item,now)){
+                workerCollection(8,lease,[key]);return null;
+            }
+            await writeScheduledMessages(items);
+            const claimed={...item};
+            Object.defineProperty(claimed,'__nativeClaim',{value:lease,enumerable:false});
+            return claimed;
+        }catch(error){workerCollection(8,lease,[key]);throw error;}
     });
 }
 
@@ -3962,9 +3974,12 @@ async function validateScheduledTarget(item) {
 }
 
 async function fireScheduledMessage(item) {
+    const key=JSON.stringify(String(item.id)),lease=item.__nativeClaim;
+    if(!lease||workerCollection(9,0,[key])!==lease)throw new Error('Native scheduled delivery claim unavailable.');
+    try{
     const validation = await validateScheduledTarget(item);
     if (!validation.ok) {
-        return markScheduledFailed(item, validation.reason);
+        return await markScheduledFailed(item, validation.reason);
     }
 
     const enqueueResult = await enqueueMessageInternal({
@@ -3977,10 +3992,11 @@ async function fireScheduledMessage(item) {
     });
 
     if (!enqueueResult?.ok) {
-        return markScheduledFailed(item, enqueueResult?.error || 'Failed to enqueue scheduled message.');
+        return await markScheduledFailed(item, enqueueResult?.error || 'Failed to enqueue scheduled message.');
     }
 
-    return markScheduledCompleted(item, enqueueResult);
+    return await markScheduledCompleted(item, enqueueResult);
+    }finally{workerCollection(8,lease,[key]);}
 }
 
 async function processDueScheduledMessages(source = 'manual', onlyId = null, now = Date.now()) {
@@ -4033,6 +4049,9 @@ async function recoverScheduledMessages(source = 'startup') {
 
         for (const item of items) {
             if (scheduledAction(5, item) === 5) {
+            const active=workerCollection(9,0,[JSON.stringify(String(item.id))]);
+            if(active==null)throw new Error('Native scheduled recovery ownership unavailable.');
+            if(active)continue;
             if(!globalThis.CpoQueueEngine.scheduledMutation(5,item))throw new Error('Native scheduled recovery rejected.');
             clearScheduledAlarm(item.id);
                 changed = true;

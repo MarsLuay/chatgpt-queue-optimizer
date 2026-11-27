@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 24);
+    assert.equal(e.cpo_queue_abi(), 25);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -711,4 +711,21 @@ test('native recovery transitions preserve prompt ownership and atomic revision'
     assert.deepEqual([...job.queue],['current','next']);assert.equal(job.currentMessage,null);
     assert.equal(job.rolloverInProgress,false);assert.equal(job.currentPhase,'queued');
     assert.equal(instance.exports.cpo_background_schedule_guard(2,3),1);
+});
+
+
+test('native worker collections keep bounded logs and isolate exact turn and schedule leases',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    const w=engine.workerCollection;
+    for(let i=0;i<350;i++)assert.equal(w(0,0,[JSON.stringify({i})]),1);
+    const entries=w(1);assert.equal(entries.length,300);assert.equal(entries[0].i,50);
+    assert.deepEqual(w(1),[]);assert.equal(w(2),1);assert.equal(w(3),1);
+    const baseline=w(4,0,['"old"']);assert.ok(baseline);
+    assert.equal(w(5,baseline,['"old"','1','0','"fallback"','0','1','"explicit"','1','0']),3);
+    assert.equal(w(6,baseline),1);assert.equal(w(5,baseline,[]),null);
+    const claim=w(7,0,['"id"']);assert.ok(claim);assert.equal(w(7,0,['"id"']),null);
+    assert.equal(w(8,claim+1,['"id"']),0);assert.equal(w(9,0,['"id"']),claim);
+    assert.equal(w(8,claim,['"id"']),1);assert.equal(w(9,0,['"id"']),0);
+    assert.equal(engine.completedRunCount(5),6);
 });
