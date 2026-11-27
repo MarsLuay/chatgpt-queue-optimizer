@@ -13,9 +13,11 @@
             'cpo_queue_total','cpo_queue_can_retry','cpo_queue_backoff',
             'cpo_submission_ack','cpo_submission_poll','cpo_submission_stage','cpo_delivery_recovery',
             'cpo_restore_action','cpo_restore_eligible','cpo_restore_command_number','cpo_persist_action',
-            'cpo_schedule_action','cpo_schedule_compare','cpo_schedule_identity'];
+            'cpo_schedule_action','cpo_schedule_compare','cpo_schedule_identity',
+            'cpo_provider_host','cpo_provider_route','cpo_marker_contains','cpo_generation_state',
+            'cpo_response_class','cpo_wait_failure','cpo_wait_settle','cpo_rollover_next','cpo_rollover_fresh','cpo_rollover_generation'];
         if (!names.every(name => typeof exports[name] === 'function') ||
-            exports.cpo_queue_abi() !== 2 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
+            exports.cpo_queue_abi() !== 3 || !(exports.memory instanceof WebAssembly.Memory)) throw new Error('Queue WASM ABI mismatch');
         core = exports;
         status = 'Rust/WASM';
     }
@@ -82,6 +84,47 @@
             (Number(!!job.currentMessage) << 3);
         return call('cpo_restore_action', [phase, flags]);
     }
+    function withUnits(value, operation) {
+        if (!core) return null;
+        let input;
+        try {
+            const capacity = core.cpo_fingerprint_capacity() >>> 0;
+            if (value.length > capacity) return null;
+            input = new Uint16Array(core.memory.buffer, core.cpo_fingerprint_buffer() >>> 0, capacity);
+            for (let i = 0; i < value.length; i++) input[i] = value.charCodeAt(i);
+            return operation(core, value.length) >>> 0;
+        } catch (error) { fail(error); return null; }
+        finally { if (input) input.fill(0); }
+    }
+    function providerHost(host) {
+        return withUnits(host, (e,n) => e.cpo_provider_host(n));
+    }
+    function providerRoute(provider, pathname) {
+        const packed = withUnits(pathname, (e,n) => e.cpo_provider_route(provider,n));
+        if (packed == null) return null;
+        const kind = packed & 3;
+        const start = (packed >>> 2) & 2047;
+        const length = (packed >>> 13) & 2047;
+        return { type: kind === 2 ? 'existing' : kind === 1 ? 'new' : 'unsupported',
+            conversationId: kind === 2 ? pathname.slice(start,start+length) : null };
+    }
+    function contains(text, marker) {
+        if (!core) return null;
+        if (!marker.length) return true;
+        if (marker.length > 256) return null;
+        // Overlapping chunks retain matches across boundaries without copying
+        // entire conversation text into WASM or growing linear memory.
+        const capacity = core.cpo_fingerprint_capacity() >>> 0;
+        const size = capacity-marker.length;
+        if (size < marker.length) return null;
+        for (let start=0; start<text.length; start+=size-marker.length+1) {
+            const chunk = text.slice(start,start+size);
+            const match = withUnits(chunk+marker,(e) => e.cpo_marker_contains(chunk.length,marker.length));
+            if (match == null) return null;
+            if (match) return true;
+        }
+        return false;
+    }
     function fingerprint(text) {
         if (!core) return null;
         const value = String(text || '');
@@ -118,7 +161,7 @@
             (Number(!!job.waitForIdleBeforeSend) << 6);
         return call('cpo_queue_next', [flags, phase, job.queue.length]);
     }
-    const api = { load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, install, get status() { return status; } };
+    const api = { load, fingerprint, confirmed, next, call, numeric, schedule, scheduleIdentity, restoreAction, providerHost, providerRoute, contains, install, get status() { return status; } };
     globalThis.CpoQueueEngine = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();
