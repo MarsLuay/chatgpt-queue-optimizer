@@ -5,7 +5,9 @@ Installer and packaging tools for ChatGPT Queue + Optimizer.
 ## Files
 
 - `Install ChatGPT Queue Optimizer.bat` - Windows launcher.
-- `../install locally.bat` - Windows Firefox-only local installer for the active browser profile.
+- `../install locally.bat` - Windows local installer for Firefox and Chromium, with optional Chrome selection.
+- `install_locally.ps1` - dispatches browser-specific local installers.
+- `install_chromium_locally.ps1` - verified Chromium Developer mode, Load unpacked and reload automation adapted from Vault Pi.
 - `install_firefox_locally.ps1` - verified Firefox debugging-page and file-picker automation adapted from Vault Pi.
 - `Install ChatGPT Queue Optimizer.app` - macOS launcher.
 - `install_chatgpt_queue_optimizer.py` - shared Chrome/Firefox installation helper used by the launchers.
@@ -31,7 +33,7 @@ open "Installers/Install ChatGPT Queue Optimizer.app"
 
 Both launchers ultimately call `install_chatgpt_queue_optimizer.py` against the repository root.
 
-## Install the latest local build into your normal Firefox session
+## Install the latest local build into your normal browser sessions
 
 From the repository root in PowerShell:
 
@@ -39,7 +41,36 @@ From the repository root in PowerShell:
 & '.\install locally.bat'
 ```
 
-This builds the current checkout, validates the Firefox XPI against the pinned
+By default, the launcher attempts Firefox and Chromium independently, skips a
+browser that is not installed, and reports failures. To install into only one
+browser or explicitly select Google Chrome:
+
+```powershell
+& '.\install locally.bat' -Browser Firefox
+& '.\install locally.bat' -Browser Chromium
+& '.\install locally.bat' -Browser Chrome
+```
+
+Chromium and Chrome use the Vault Pi style verified `chrome://extensions`
+workflow: detect the requested browser executable, enable Developer mode only
+if it is off, choose **Load unpacked** in the native folder picker, and verify
+the dedicated local extension ID. Later runs update the stable
+`build/local-chromium/extension/` directory and request Reload on the exact
+local extension card instead of uninstalling it. The persistent unpacked
+extension survives browser restarts as long as the directory is retained and
+the browser permits developer extensions. Its public development key gives it
+a separate ID and storage from any store-installed copy; disable that copy
+manually if both would run on the same sites. The store package is unchanged.
+No browser is terminated and no store upload occurs. Live reload execution
+inside the browser is not independently verified by the script.
+
+For a nonstandard Chromium executable:
+
+```powershell
+& '.\install locally.bat' -Browser Chromium -ChromiumPath 'D:\Chromium\chrome.exe'
+```
+
+For Firefox, the launcher builds the current checkout, validates the Firefox XPI against the pinned
 Gecko ID and current manifest version, detects the existing Firefox executable,
 opens or reuses `about:debugging#/runtime/this-firefox`, and automates **Load
 Temporary Add-on** through the real Firefox-owned file picker. It verifies the
