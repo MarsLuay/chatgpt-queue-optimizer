@@ -6,3 +6,6 @@ node_modules/
 
 # Local extension signing keys stay outside tracked source.
 *.pem
+
+# Locally compiled Rust WebAssembly (reproducible from rust/optimizer_core.rs).
+/optimizer_core.wasm
