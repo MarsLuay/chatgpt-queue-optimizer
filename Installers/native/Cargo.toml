@@ -1,0 +1,15 @@
+[package]
+name = "cpo-release"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+serde_json = "1.0"
+zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
