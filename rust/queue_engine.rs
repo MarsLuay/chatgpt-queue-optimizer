@@ -1084,6 +1084,7 @@ mod live_state {
         // Per-job native wait lease. A completed or replaced worker cannot
         // publish a heartbeat, increment samples or release a successor's lease.
         fn wait_control(&mut self,id:u32,token:u32,op:u32,a:u32,b:u32,now:f64)->u32{
+            let preview=if op==9{std::mem::take(&mut self.input)}else{Vec::new()};
             if !now.is_finite()||now<0.0{return u32::MAX;}
             let Some(job)=self.jobs.get_mut(&id)else{return u32::MAX;};
             if op==0{
@@ -1117,6 +1118,32 @@ mod live_state {
                 5=>wait.progress_log(now),
                 6=>return 1, // drop lease
                 7=>(!wait.polling) as u32,
+                8=>{
+                    let seen=job.get("sawGenerating")==TRUE||job.get("sawDeepResearch")==TRUE;
+                    wait.settle((a&!64)|((seen as u32)<<6),b.clamp(1,32767))
+                },
+                9=>{
+                    if !job.truth("isRunning")||job.truth("isPaused")||job.truth("isStopped")||
+                        a&4==0||preview.len()<2||preview.first()!=Some(&b'"')||preview.last()!=Some(&b'"'){
+                        u32::MAX
+                    }else{
+                        let old_gen=job.get("sawGenerating")==TRUE;
+                        let old_research=job.get("sawDeepResearch")==TRUE;
+                        let generating=old_gen||a&1!=0;
+                        let research=old_research||a&2!=0;
+                        let first_research=!old_research&&research;
+                        let progress=wait.research_progress(preview,first_research||a&8!=0);
+                        if generating!=old_gen{job.set("sawGenerating",TRUE);dirty=true;}
+                        if research!=old_research{job.set("sawDeepResearch",TRUE);dirty=true;}
+                        if progress{
+                            let time=now.to_string();
+                            if job.get("lastResearchProgressAt")!=time.as_bytes(){job.set("lastResearchProgressAt",time.as_bytes());dirty=true;}
+                        }
+                        wait.sample(0,1);
+                        (first_research as u32)|((!old_gen as u32)<<1)|((generating as u32)<<2)|
+                            ((research as u32)<<3)|((progress as u32)<<4)
+                    }
+                },
                 _=>u32::MAX
             };
             job.wait=Some(wait);
@@ -1177,6 +1204,7 @@ mod live_state {
             let Some(j)=self.jobs.get(&id) else{return u32::MAX;};
             match kind {
                 0=>j.confirmed() as u32,
+                3=>self.decision(id,1,j.confirmed() as u32),
                 1=>{
                     let phase=match j.get("currentPhase"){
                         b"\"terminal\""=>1,b"\"waiting\""|b"\"awaiting-response\""|b"\"active-response\""=>2,

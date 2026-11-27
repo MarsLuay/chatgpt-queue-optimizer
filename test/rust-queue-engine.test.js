@@ -53,7 +53,7 @@ test('Rust dispatcher retains legacy priority for every flag combination',{skip}
 test('native submission acknowledges only new matching turns or supported generation fallback', {skip}, async () => {
     const {instance} = await WebAssembly.instantiate(fs.readFileSync(wasmPath), {});
     const e = instance.exports;
-    assert.equal(e.cpo_queue_abi(), 30);
+    assert.equal(e.cpo_queue_abi(), 31);
     for (let flags = 0; flags < 32; flags++) {
         const expected = flags & 1 ? ((flags & 14) === 10 ? 1 : 0) : (flags & 16 ? 2 : 0);
         assert.equal(e.cpo_submission_ack(flags), expected);
@@ -822,4 +822,22 @@ test('native recovery effects, observations and compatibility normalization',{sk
     const rev=jobs.revision();jobs.transaction(job,15,0,{lastResponsePhase:'active'});assert.equal(jobs.revision(),rev+1);
     jobs.transaction(job,15,0,{lastResponsePhase:'active'});assert.equal(jobs.revision(),rev+1);
     jobs.delete(7);assert.equal(jobs.recoveryStep(job,4,true,0),0);
+});
+
+
+test('native wait settlement and research progress stay scoped to live owners',{skip},async()=>{
+    const {instance}=await WebAssembly.instantiate(fs.readFileSync(wasmPath),{});
+    engine.install(instance.exports);
+    const jobs=engine.createLiveJobs();jobs.set(7,{tabId:7,queue:[],currentMessage:'current',isRunning:true,deliveryState:'confirmed-submission'});
+    const job=jobs.get(7),lease=jobs.waitControl(job,0,0,0,0,1000);
+    assert.equal(jobs.dispatch(job),5);
+    assert.equal(jobs.waitProgress(job,lease,6,'research',1100),27);
+    assert.equal(job.lastResearchProgressAt,1100);assert.equal(job.sawDeepResearch,true);
+    assert.equal(jobs.waitProgress(job,lease,6,'research',1200),10);
+    assert.equal(job.lastResearchProgressAt,1100);
+    assert.equal(jobs.waitProgress(job,lease,6,'changed',1300),26);
+    assert.equal(job.lastResearchProgressAt,1300);
+    assert.equal(jobs.waitControl(job,lease,8,8|16|32,2,1400),4);
+    assert.equal(jobs.waitControl(job,lease,8,8|16|32,2,1500),260);
+    jobs.waitControl(job,lease,6);assert.equal(jobs.waitProgress(job,lease,6,'stale',1600),null);
 });

@@ -9,15 +9,37 @@ pub(super) struct ResponseWait {
     last_log:f64,
     last_persist:f64,
     signature:Vec<Vec<u8>>,
+    research_preview:Vec<u8>,
 }
 impl ResponseWait{
     pub fn new(token:u32,started:f64)->Self{
-        Self{token,polling:false,cursor:0,last_log:started,last_persist:0.0,signature:Vec::new()}
+        Self{token,polling:false,cursor:0,last_log:started,last_persist:0.0,signature:Vec::new(),research_preview:b"\"\"".to_vec()}
     }
     pub fn sample(&mut self,op:u32,needed:u32)->u32{
         let packed=super::cpo_background_wait_sample(self.cursor,op,needed);
         self.cursor=packed&0x3fffffff;
         (packed>>30)&1
+    }
+    // Low byte: settlement action. Bit 8: confirmation reached.
+    pub fn settle(&mut self,flags:u32,needed:u32)->u32{
+        let action=super::cpo_wait_settle(flags);
+        let confirmed=match action{
+            1=>self.sample(1,1),
+            2=>self.sample(2,if flags&64!=0{needed}else{1}),
+            4=>self.sample(3,needed),
+            5=>self.sample(4,needed),
+            _=>self.sample(0,1)
+        };
+        action|(confirmed<<8)
+    }
+    // Exact JSON-escaped preview comparison, including lone surrogates.
+    pub fn research_progress(&mut self,preview:Vec<u8>,force:bool)->bool{
+        let changed=force||self.research_preview!=preview;
+        if changed{
+            self.research_preview.fill(0);
+            self.research_preview=preview;
+        }
+        changed
     }
     pub fn progress_log(&mut self,now:f64)->u32{
         if now-self.last_log>30000.0{self.last_log=now;1}else{0}
@@ -107,6 +129,19 @@ pub extern "C" fn cpo_background_poll_gate(flags:u32,elapsed:f64,ordinary:f64,re
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]fn settlement_and_research_progress(){
+        let mut w=ResponseWait::new(1,0.0);
+        let terminal=8|16|32;
+        assert_eq!(w.settle(terminal,2),4);
+        assert_eq!(w.settle(terminal,2),4|256);
+        assert_eq!(w.settle(4|8,2),3);
+        assert_eq!(w.settle(terminal,2),4);
+        assert_eq!(w.settle(1,3),2|256);
+        assert!(!w.research_progress(b"\"\"".to_vec(),false));
+        assert!(w.research_progress(b"\"\\ud800\"".to_vec(),false));
+        assert!(!w.research_progress(b"\"\\ud800\"".to_vec(),false));
+        assert!(w.research_progress(b"\"\\ud800\"".to_vec(),true));
+    }
     #[test]fn exact_heartbeat_and_poll_samples(){
         let mut w=ResponseWait::new(1,1000.0);
         assert!(w.persist(false,1000.0,&[b"a|b",b"c"]));

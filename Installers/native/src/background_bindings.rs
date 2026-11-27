@@ -1538,7 +1538,7 @@ function handleStopAllSequences(sendResponse) {
 }
 
 function queueExecutionAction(job) {
-    const native = globalThis.CpoQueueEngine?.next(job, isSubmissionConfirmed(job));
+    const native=jobs.dispatch(job);
     if (native == null) throw new Error('Required Rust queue dispatcher unavailable.');
     return native;
 }
@@ -1810,6 +1810,7 @@ async function handleProcessSending(tabId, job) {
     });
 
     await updateRunningJobsStorage({ force: true });
+    if(jobs.processing(job,2)!==1)return {action:'return'};
 
     const sendResult = await sendPromptToSpecificTab(tabId, job.currentMessage, job);
 
@@ -2638,17 +2639,11 @@ async function waitForTabResponse(tabId, context = {}) {
         : QUEUE_WAIT_POLICY.checkIntervalMs;
     let sawGenerating = liveJob?.sawGenerating === true;
     let sawDeepResearch = liveJob?.sawDeepResearch === true;
-    let lastResearchPreview = '';
     let lease;
     try{lease=jobs.waitControl(liveJob,0,0,0,0,startedAt);}catch{}
     if(!lease)return {ok:false,error:'Queue stopped or a native response wait is already active.',details:{failureClass:'user-stop'}};
     const waitNative=(op,a=0,b=0,now=Date.now())=>{
         try{return jobs.waitControl(liveJob,lease,op,a,b,now);}catch{return null;}
-    };
-    const sample=(op,needed=1)=>{
-        const next=waitNative(3,op,Math.min(32767,Math.max(1,Math.ceil(needed))));
-        if(next==null)throw new Error('Native response confirmation unavailable.');
-        return next===1;
     };
     const waitLabel = getWaitContextLabel(context);
     const commandBinding = getCommandBinding(liveJob, context);
@@ -2824,43 +2819,31 @@ async function waitForTabResponse(tabId, context = {}) {
                 const deepResearchActive=observation.deep;
                 const researchPreview = String(state.researchStatusPreview || '');
 
-                if (deepResearchActive && !sawDeepResearch) {
-                    logQueueEvent(tabId, 'info', `Deep research activity detected for ${waitLabel}.`, {
-                        commandNumber: context.commandNumber || 0,
-                        totalMessages: context.totalMessages || 0,
-                        elapsedMs: Date.now() - startedAt,
-                        matchedResearchMarker: state.matchedResearchMarker || '',
-                        researchPreviewLength: researchPreview.length
-                    });
-                    lastResearchPreview = researchPreview;
-                    job.lastResearchProgressAt = Date.now();
-                }
-
-                    const incompleteToolTurn=observation.incomplete;
-                    const responseIsActive=observation.active;
-
-                    if (responseIsActive) {
-                    if (!sawGenerating && responseIsActive) {
-                        logQueueEvent(tabId, 'info', `ChatGPT is responding for ${waitLabel}.`, {
-                            commandNumber: context.commandNumber || 0,
-                            totalMessages: context.totalMessages || 0,
-                            elapsedMs: Date.now() - startedAt,
-                            commandId: commandBinding.commandId || job.commandId || '',
-                            userTurnId: responseState?.userTurnId || commandBinding.userTurnId || null,
-                            responsePhase: incompleteToolTurn ? 'incomplete-tool' : (phase || 'active')
+                const incompleteToolTurn=observation.incomplete;
+                const responseIsActive=observation.active;
+                if(responseIsActive){
+                    const progress=jobs.waitProgress(job,lease,
+                        Number(observation.generating)|(Number(deepResearchActive)<<1)|4|
+                        (Number(!!state.generating||phase==='active'||incompleteToolTurn)<<3),researchPreview);
+                    if(progress==null){resolve({ok:false,error:'Native research progress unavailable.',details:{failureClass:'non-retryable'}});return;}
+                    if(progress&1){
+                        logQueueEvent(tabId,'info','Deep research activity detected for '+waitLabel+'.',{
+                            commandNumber:context.commandNumber||0,totalMessages:context.totalMessages||0,
+                            elapsedMs:Date.now()-startedAt,matchedResearchMarker:state.matchedResearchMarker||'',
+                            researchPreviewLength:researchPreview.length
                         });
                     }
-
-                    sawGenerating=sawGenerating||observation.generating;
-                    sawDeepResearch=sawDeepResearch||deepResearchActive;
-                    jobs.transaction(job,15,Number(hasCommandBinding),{lastResponsePhase:incompleteToolTurn?'incomplete-tool':(phase||'active'),assistantTurnId:responseState?.assistantTurnId||null});
-                    sample(0);
-
-                    if (state.generating || researchPreview !== lastResearchPreview || phase === 'active' || incompleteToolTurn) {
-                        job.lastResearchProgressAt = Date.now();
-                        lastResearchPreview = researchPreview;
+                    if(progress&2){
+                        logQueueEvent(tabId,'info','ChatGPT is responding for '+waitLabel+'.',{
+                            commandNumber:context.commandNumber||0,totalMessages:context.totalMessages||0,
+                            elapsedMs:Date.now()-startedAt,commandId:commandBinding.commandId||job.commandId||'',
+                            userTurnId:responseState?.userTurnId||commandBinding.userTurnId||null,
+                            responsePhase:incompleteToolTurn?'incomplete-tool':(phase||'active')
+                        });
                     }
-
+                    sawGenerating=!!(progress&4);
+                    sawDeepResearch=!!(progress&8);
+                    jobs.transaction(job,15,Number(hasCommandBinding),{lastResponsePhase:incompleteToolTurn?'incomplete-tool':(phase||'active'),assistantTurnId:responseState?.assistantTurnId||null});
                     persistWaitSignals();
 
                     if (waitNative(5)===1) {
@@ -2901,16 +2884,14 @@ async function waitForTabResponse(tabId, context = {}) {
                     (Number(phase === 'terminal')<<4) | (Number(bindingMatches)<<5) |
                     (Number(!!(sawGenerating || sawDeepResearch))<<6) | (Number(!phase)<<7) |
                     (Number(incompleteToolTurn)<<8);
-                const settle = globalThis.CpoQueueEngine?.call('cpo_wait_settle',[settleFlags]);
-                if(settle==null){clearInterval(checkInterval);resolve({ok:false,error:'Native response settlement unavailable.',details:{failureClass:'non-retryable'}});return;}
+                const settlement=waitNative(8,settleFlags,Math.min(32767,Math.max(1,Math.ceil(requiredConfirmSamples))));
+                if(settlement==null){clearInterval(checkInterval);resolve({ok:false,error:'Native response settlement unavailable.',details:{failureClass:'non-retryable'}});return;}
+                const settle=settlement&255,confirmed=!!(settlement&256);
                 if (settle === 1 || settle === 2) {
                     if (settle === 1) {
-                        sample(1);
                         persistWaitSignals();
                         return;
                     }
-                    const needed = (sawGenerating || sawDeepResearch) ? requiredConfirmSamples : 1;
-                    const confirmed=sample(2,needed);
                     persistWaitSignals();
                     if (confirmed) {
                         resolve({
@@ -2930,14 +2911,12 @@ async function waitForTabResponse(tabId, context = {}) {
                 }
 
                 if (settle === 3) {
-                    sample(0);
-                    job.lastResponsePhase = phase || 'transient-idle';
+                    jobs.transaction(job,15,0,{lastResponsePhase:phase||'transient-idle'});
                     persistWaitSignals();
                     return;
                 }
 
                 if (settle === 4) {
-                    const confirmed=sample(3,requiredConfirmSamples);
                     jobs.transaction(job,15,confirmed?2:0,{lastResponsePhase:'terminal',
                         assistantTurnId:responseState?.assistantTurnId||null,terminalAckSource:responseState?.source||'bound-assistant-turn'});
                     persistWaitSignals();
@@ -2958,7 +2937,6 @@ async function waitForTabResponse(tabId, context = {}) {
                 }
 
                 if (settle === 5) {
-                    const confirmed=sample(4,requiredConfirmSamples);
                     persistWaitSignals();
                     if (confirmed) {
                         resolve({
@@ -2972,8 +2950,6 @@ async function waitForTabResponse(tabId, context = {}) {
                     }
                     return;
                 }
-
-                sample(0);
 
                 if (queueSettings.queueUnlimitedRetryWait && waitNative(5)===1) {
                     logQueueEvent(tabId, 'info', `Unlimited wait mode is still waiting for ${waitLabel}.`, {

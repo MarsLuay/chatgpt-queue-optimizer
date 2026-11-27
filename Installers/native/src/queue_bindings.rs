@@ -473,6 +473,26 @@ const HOST:&str=r####"(() => {
                     return result===0xffffffff?null:result;
                 });
             },
+            waitProgress(job,token,flags,preview,now=Date.now()){
+                const id=ids.get(job);
+                if(!id||handles.get(ownerTabs.get(job))!==job)return null;
+                return native(e=>{
+                    const bytes=encoder.encode(JSON.stringify(preview));
+                    if(bytes.length>64*1024*1024)return null;
+                    const ptr=e.cpo_live_input(bytes.length)>>>0;
+                    if(!ptr)return null;
+                    try{
+                        new Uint8Array(e.memory.buffer,ptr,bytes.length).set(bytes);
+                        const result=e.cpo_live_wait(id,token,9,flags,0,now)>>>0;
+                        return result===NONE?null:result;
+                    }finally{e.cpo_live_wipe();}
+                });
+            },
+            dispatch(job){
+                const id=ids.get(job);
+                if(!id||handles.get(ownerTabs.get(job))!==job)return null;
+                return native(e=>{const result=e.cpo_live_decision(id,3,0)>>>0;return result===NONE?null:result;});
+            },
             rollover(job,stage,observed){
                 const id=ids.get(job);
                 if(!id||handles.get(ownerTabs.get(job))!==job)return 0;
